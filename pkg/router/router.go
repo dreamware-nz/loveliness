@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/johnjansen/loveliness/pkg/schema"
 	"github.com/johnjansen/loveliness/pkg/shard"
 )
 
@@ -42,6 +43,7 @@ type Router struct {
 	shards     []*shard.Shard
 	shardCount int
 	timeout    time.Duration
+	schema     *schema.Registry
 }
 
 // NewRouter creates a Router over the given shards.
@@ -53,9 +55,19 @@ func NewRouter(shards []*shard.Shard, timeout time.Duration) *Router {
 	}
 }
 
+// NewRouterWithSchema creates a Router with schema-aware shard key routing.
+func NewRouterWithSchema(shards []*shard.Shard, timeout time.Duration, reg *schema.Registry) *Router {
+	return &Router{
+		shards:     shards,
+		shardCount: len(shards),
+		timeout:    timeout,
+		schema:     reg,
+	}
+}
+
 // Execute parses a Cypher query, resolves target shards, and executes.
 func (r *Router) Execute(ctx context.Context, cypher string) (*Result, error) {
-	parsed, err := Parse(cypher)
+	parsed, err := ParseWithSchema(cypher, r.schema)
 	if err != nil {
 		return nil, &QueryError{Code: "CYPHER_PARSE_ERROR", Message: err.Error()}
 	}

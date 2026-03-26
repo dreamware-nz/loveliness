@@ -2,6 +2,8 @@ package router
 
 import (
 	"testing"
+
+	"github.com/johnjansen/loveliness/pkg/schema"
 )
 
 func TestParse_EmptyQuery(t *testing.T) {
@@ -269,5 +271,91 @@ func TestParse_WhereBeforeSetTerminator(t *testing.T) {
 	}
 	if len(pq.ShardKeys) != 1 || pq.ShardKeys[0] != "Alice" {
 		t.Errorf("expected [Alice], got %v", pq.ShardKeys)
+	}
+}
+
+// --- Schema-aware shard key tests ---
+
+func TestParseWithSchema_UsesShardKeyOnly(t *testing.T) {
+	reg := schema.NewRegistry()
+	reg.Register("Person", "name")
+
+	// city is NOT the shard key — should be ignored.
+	pq, err := ParseWithSchema("MATCH (p:Person {city: 'Auckland', name: 'Alice'}) RETURN p", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pq.ShardKeys) != 1 || pq.ShardKeys[0] != "Alice" {
+		t.Errorf("expected shard key [Alice] (only name, not city), got %v", pq.ShardKeys)
+	}
+}
+
+func TestParseWithSchema_WhereShardKey(t *testing.T) {
+	reg := schema.NewRegistry()
+	reg.Register("Person", "name")
+
+	pq, err := ParseWithSchema("MATCH (p:Person) WHERE p.name = 'Bob' AND p.age = 30 RETURN p", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pq.ShardKeys) != 1 || pq.ShardKeys[0] != "Bob" {
+		t.Errorf("expected [Bob], got %v", pq.ShardKeys)
+	}
+}
+
+func TestParseWithSchema_UnknownTableFallsBack(t *testing.T) {
+	reg := schema.NewRegistry()
+	// No tables registered — should fall back to legacy extraction.
+
+	pq, err := ParseWithSchema("MATCH (p:Unknown {foo: 'bar'}) RETURN p", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Legacy fallback grabs all string literals.
+	if len(pq.ShardKeys) != 1 || pq.ShardKeys[0] != "bar" {
+		t.Errorf("expected fallback key [bar], got %v", pq.ShardKeys)
+	}
+}
+
+func TestParseWithSchema_CreateNodeTableRegisters(t *testing.T) {
+	reg := schema.NewRegistry()
+
+	_, err := ParseWithSchema("CREATE NODE TABLE Person(name STRING, age INT64, PRIMARY KEY(name))", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The registry should now have Person registered.
+	if key := reg.GetShardKey("Person"); key != "name" {
+		t.Errorf("expected Person shard key 'name', got %q", key)
+	}
+}
+
+func TestParseWithSchema_DropTableUnregisters(t *testing.T) {
+	reg := schema.NewRegistry()
+	reg.Register("Person", "name")
+
+	_, err := ParseWithSchema("DROP TABLE Person", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if key := reg.GetShardKey("Person"); key != "" {
+		t.Errorf("expected Person removed from registry, got %q", key)
+	}
+}
+
+func TestParseWithSchema_WrongPropertyScatterGathers(t *testing.T) {
+	reg := schema.NewRegistry()
+	reg.Register("Person", "name")
+
+	// Query has city but not name — should NOT route based on city.
+	// Person is a registered table, so no legacy fallback. Scatter-gather instead.
+	pq, err := ParseWithSchema("MATCH (p:Person {city: 'Auckland'}) RETURN p", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pq.NeedsScatterGather() {
+		t.Errorf("expected scatter-gather when shard key property is missing, got keys %v", pq.ShardKeys)
 	}
 }
