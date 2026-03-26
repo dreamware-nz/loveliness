@@ -33,6 +33,9 @@ type Server struct {
 	// scans on every batch.
 	refTracker map[int]map[string]bool
 	refTrackMu sync.RWMutex
+
+	// dr holds optional disaster recovery extensions (WAL, backup, replica state).
+	dr *DRExtension
 }
 
 // NewServer creates a new API server.
@@ -61,6 +64,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /cluster", s.handleCluster)
 	mux.HandleFunc("POST /join", s.handleJoin)
+	s.registerDRRoutes(mux)
 	return s.withMiddleware(mux)
 }
 

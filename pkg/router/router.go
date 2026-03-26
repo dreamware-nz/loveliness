@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -58,6 +59,15 @@ type Router struct {
 
 	// Phase E: Pipeline executor for overlapping multi-hop traversals.
 	pipeline *PipelineExecutor
+
+	// WAL appender for recording writes (disaster recovery).
+	walAppender WALAppender
+}
+
+// WALAppender is called by the router to record write operations in the
+// intent log. Implementations live in pkg/replication to avoid circular imports.
+type WALAppender interface {
+	Append(shardID int, cypher string) (uint64, error)
 }
 
 // NewRouter creates a Router over the given shards.
@@ -94,6 +104,11 @@ func (r *Router) BloomIndex() *ShardBloomIndex {
 // EdgeCut returns the edge-cut replicator.
 func (r *Router) EdgeCut() *EdgeCutReplicator {
 	return r.edgeCut
+}
+
+// SetWAL attaches a WAL appender for recording write operations.
+func (r *Router) SetWAL(w WALAppender) {
+	r.walAppender = w
 }
 
 // Partitioner returns the partition analyzer.
@@ -225,6 +240,17 @@ func (r *Router) isCrossShard(keys []string) bool {
 	return false
 }
 
+// isWriteQuery does a quick check on raw Cypher to detect write operations.
+func isWriteQuery(cypher string) bool {
+	upper := strings.ToUpper(cypher)
+	for _, clause := range []string{"CREATE ", "MERGE ", "SET ", "DELETE ", "REMOVE ", "DETACH ", "COPY "} {
+		if strings.Contains(upper, clause) {
+			return true
+		}
+	}
+	return false
+}
+
 // queryShard sends a query to a single shard.
 func (r *Router) queryShard(ctx context.Context, shardID int, cypher string) (*Result, error) {
 	if shardID < 0 || shardID >= len(r.shards) {
@@ -233,6 +259,13 @@ func (r *Router) queryShard(ctx context.Context, shardID int, cypher string) (*R
 	s := r.shards[shardID]
 	if !s.IsHealthy() {
 		return nil, &QueryError{Code: "SHARD_UNAVAILABLE", Message: fmt.Sprintf("shard %d is unhealthy", shardID), ShardID: shardID}
+	}
+
+	// Record writes in the WAL before execution for replica catch-up.
+	if r.walAppender != nil && isWriteQuery(cypher) {
+		if _, err := r.walAppender.Append(shardID, cypher); err != nil {
+			return nil, &QueryError{Code: "WAL_ERROR", Message: fmt.Sprintf("WAL append failed: %v", err), ShardID: shardID}
+		}
 	}
 
 	type queryResult struct {

@@ -16,9 +16,11 @@ import (
 	"time"
 
 	"github.com/johnjansen/loveliness/pkg/api"
+	"github.com/johnjansen/loveliness/pkg/backup"
 	"github.com/johnjansen/loveliness/pkg/cluster"
 	"github.com/johnjansen/loveliness/pkg/config"
 	"github.com/johnjansen/loveliness/pkg/logging"
+	"github.com/johnjansen/loveliness/pkg/replication"
 	"github.com/johnjansen/loveliness/pkg/router"
 	"github.com/johnjansen/loveliness/pkg/schema"
 	"github.com/johnjansen/loveliness/pkg/shard"
@@ -85,8 +87,23 @@ func main() {
 		r.BloomIndex().InitShard(i, 5_000_000, 0.01)
 	}
 
-	// Start HTTP server.
+	// Initialize WAL for disaster recovery.
+	walDir := filepath.Join(cfg.DataDir, "wal")
+	wal, err := replication.NewWAL(walDir)
+	if err != nil {
+		slog.Error("WAL init failed", "err", err)
+		os.Exit(1)
+	}
+	slog.Info("WAL initialized", "dir", walDir, "sequence", wal.LastSequence())
+	r.SetWAL(wal)
+
+	// Start HTTP server with DR extensions.
 	srv := api.NewServer(r, c, shards, reg, queryTimeout)
+	srv.SetDR(&api.DRExtension{
+		BackupMgr:    backup.NewManager(cfg.DataDir, cfg.NodeID),
+		WAL:          wal,
+		ReplicaState: replication.NewReplicaState(),
+	})
 	httpServer := &http.Server{
 		Addr:         cfg.BindAddr,
 		Handler:      srv.Handler(),
@@ -118,6 +135,9 @@ func main() {
 	defer shutdownCancel()
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		slog.Error("http shutdown error", "err", err)
+	}
+	if err := wal.Close(); err != nil {
+		slog.Error("WAL close error", "err", err)
 	}
 	if err := c.Shutdown(); err != nil {
 		slog.Error("raft shutdown error", "err", err)
