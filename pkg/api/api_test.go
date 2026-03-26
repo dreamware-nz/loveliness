@@ -20,7 +20,7 @@ func setupTestServer() *Server {
 		shards[i] = shard.NewShard(i, store, 4)
 	}
 	r := router.NewRouter(shards, 5*time.Second)
-	return NewServer(r, nil, 5*time.Second)
+	return NewServer(r, nil, shards, 5*time.Second)
 }
 
 func TestQuery_ValidCypher(t *testing.T) {
@@ -122,12 +122,70 @@ func TestHealth_Standalone(t *testing.T) {
 		t.Errorf("expected 200, got %d", w.Code)
 	}
 
-	var resp map[string]string
+	var resp map[string]any
 	json.Unmarshal(w.Body.Bytes(), &resp)
 	if resp["status"] != "ok" {
-		t.Errorf("expected status ok, got %s", resp["status"])
+		t.Errorf("expected status ok, got %v", resp["status"])
+	}
+	// Should include shard health.
+	shards, ok := resp["shards"].(map[string]any)
+	if !ok {
+		t.Fatal("expected shards in health response")
+	}
+	if len(shards) != 3 {
+		t.Errorf("expected 3 shards, got %d", len(shards))
+	}
+	for id, status := range shards {
+		if status != "healthy" {
+			t.Errorf("shard %s expected healthy, got %v", id, status)
+		}
 	}
 }
+
+func TestHealth_RequestID(t *testing.T) {
+	srv := setupTestServer()
+	req := httptest.NewRequest("GET", "/health", nil)
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	reqID := w.Header().Get("X-Request-ID")
+	if reqID == "" {
+		t.Error("expected X-Request-ID header")
+	}
+	if len(reqID) != 16 { // 8 bytes = 16 hex chars
+		t.Errorf("expected 16-char request ID, got %d: %s", len(reqID), reqID)
+	}
+}
+
+func TestHealth_DegradedWithUnhealthyShard(t *testing.T) {
+	// Create shards, one of which panics (becomes unhealthy).
+	shards := make([]*shard.Shard, 2)
+	shards[0] = shard.NewShard(0, shard.NewMemoryStore(), 4)
+	shards[1] = shard.NewShard(1, &panicStore{}, 4)
+
+	// Trigger the panic to mark shard 1 unhealthy.
+	shards[1].Query("MATCH (n) RETURN n")
+
+	r := router.NewRouter(shards, 5*time.Second)
+	srv := NewServer(r, nil, shards, 5*time.Second)
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	var resp map[string]any
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp["status"] != "degraded" {
+		t.Errorf("expected status degraded, got %v", resp["status"])
+	}
+}
+
+// panicStore panics on every query (for testing degraded health).
+type panicStore struct{}
+
+func (s *panicStore) Query(string) (*shard.QueryResponse, error) { panic("boom") }
+func (s *panicStore) Close() error                               { return nil }
 
 func TestCluster_NoCluster(t *testing.T) {
 	srv := setupTestServer() // no cluster configured

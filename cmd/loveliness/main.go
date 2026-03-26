@@ -1,8 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -14,6 +18,7 @@ import (
 	"github.com/johnjansen/loveliness/pkg/api"
 	"github.com/johnjansen/loveliness/pkg/cluster"
 	"github.com/johnjansen/loveliness/pkg/config"
+	"github.com/johnjansen/loveliness/pkg/logging"
 	"github.com/johnjansen/loveliness/pkg/router"
 	"github.com/johnjansen/loveliness/pkg/shard"
 )
@@ -21,12 +26,18 @@ import (
 func main() {
 	cfg := config.FromEnv()
 	if err := cfg.Validate(); err != nil {
-		log.Fatalf("invalid config: %v", err)
+		fmt.Fprintf(os.Stderr, "invalid config: %v\n", err)
+		os.Exit(1)
 	}
 
-	log.Printf("loveliness node %s starting", cfg.NodeID)
-	log.Printf("  bind=%s raft=%s data=%s shards=%d",
-		cfg.BindAddr, cfg.RaftAddr, cfg.DataDir, cfg.ShardCount)
+	logging.Setup(cfg.NodeID)
+
+	slog.Info("starting",
+		"bind", cfg.BindAddr,
+		"raft", cfg.RaftAddr,
+		"data_dir", cfg.DataDir,
+		"shards", cfg.ShardCount,
+	)
 
 	// Calculate threads per shard to avoid CPU oversubscription.
 	threadsPerShard := uint64(runtime.NumCPU()) / uint64(cfg.ShardCount)
@@ -35,36 +46,37 @@ func main() {
 	}
 
 	// Open local shards.
-	// In a real multi-node cluster, each node only opens the shards assigned to it.
-	// For the PoC, each node opens all shards (they'll be assigned via Raft after bootstrap).
 	shards := make([]*shard.Shard, cfg.ShardCount)
 	for i := 0; i < cfg.ShardCount; i++ {
 		shardDir := filepath.Join(cfg.DataDir, fmt.Sprintf("shard-%d", i))
 		if err := os.MkdirAll(shardDir, 0755); err != nil {
-			log.Fatalf("create shard dir %s: %v", shardDir, err)
+			slog.Error("create shard dir failed", "path", shardDir, "err", err)
+			os.Exit(1)
 		}
 
 		store, err := shard.NewLbugStore(shardDir, threadsPerShard)
 		if err != nil {
-			log.Fatalf("open shard %d: %v", i, err)
+			slog.Error("open shard failed", "shard", i, "err", err)
+			os.Exit(1)
 		}
 		shards[i] = shard.NewShard(i, store, cfg.MaxConcurrentQueries)
-		log.Printf("  shard %d opened at %s (threads=%d)", i, shardDir, threadsPerShard)
+		slog.Info("shard opened", "shard", i, "path", shardDir, "threads", threadsPerShard)
 	}
 
 	// Start Raft cluster.
 	c, err := cluster.New(cfg.NodeID, cfg.RaftAddr, cfg.DataDir, cfg.Bootstrap)
 	if err != nil {
-		log.Fatalf("start cluster: %v", err)
+		slog.Error("start cluster failed", "err", err)
+		os.Exit(1)
 	}
-	log.Printf("  raft started (bootstrap=%v)", cfg.Bootstrap)
+	slog.Info("raft started", "bootstrap", cfg.Bootstrap)
 
 	// Create query router.
 	queryTimeout := time.Duration(cfg.QueryTimeoutMs) * time.Millisecond
 	r := router.NewRouter(shards, queryTimeout)
 
 	// Start HTTP server.
-	srv := api.NewServer(r, c, queryTimeout)
+	srv := api.NewServer(r, c, shards, queryTimeout)
 	httpServer := &http.Server{
 		Addr:         cfg.BindAddr,
 		Handler:      srv.Handler(),
@@ -73,29 +85,79 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("  http listening on %s", cfg.BindAddr)
+		slog.Info("http listening", "addr", cfg.BindAddr)
 		if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
-			log.Fatalf("http server error: %v", err)
+			slog.Error("http server error", "err", err)
+			os.Exit(1)
 		}
 	}()
+
+	// Auto-join cluster if peers are configured.
+	if len(cfg.Peers) > 0 && !cfg.Bootstrap {
+		go autoJoin(cfg)
+	}
 
 	// Wait for shutdown signal.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	sig := <-sigCh
-	log.Printf("received %s, shutting down...", sig)
+	slog.Info("shutting down", "signal", sig.String())
 
-	// Graceful shutdown.
-	if err := httpServer.Close(); err != nil {
-		log.Printf("http shutdown error: %v", err)
+	// Graceful shutdown: drain in-flight HTTP requests.
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer shutdownCancel()
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		slog.Error("http shutdown error", "err", err)
 	}
 	if err := c.Shutdown(); err != nil {
-		log.Printf("raft shutdown error: %v", err)
+		slog.Error("raft shutdown error", "err", err)
 	}
 	for _, s := range shards {
 		if err := s.Close(); err != nil {
-			log.Printf("shard %d close error: %v", s.ID, err)
+			slog.Error("shard close error", "shard", s.ID, "err", err)
 		}
 	}
-	log.Printf("loveliness node %s stopped", cfg.NodeID)
+	slog.Info("stopped")
+}
+
+// autoJoin attempts to join the cluster via the configured peers.
+// Peers are Raft addresses (e.g., "node1:9000"). We derive the HTTP address
+// by replacing the port with the standard HTTP port (8080).
+func autoJoin(cfg config.Config) {
+	// Wait for the cluster to stabilize.
+	time.Sleep(3 * time.Second)
+
+	body, _ := json.Marshal(map[string]string{
+		"node_id":   cfg.NodeID,
+		"raft_addr": cfg.RaftAddr,
+		"grpc_addr": cfg.GRPCAddr,
+		"http_addr": cfg.BindAddr,
+	})
+
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	for attempt := 0; attempt < 5; attempt++ {
+		for _, peer := range cfg.Peers {
+			host, _, err := net.SplitHostPort(peer)
+			if err != nil {
+				host = peer
+			}
+			url := fmt.Sprintf("http://%s:8080/join", host)
+
+			resp, err := client.Post(url, "application/json", bytes.NewReader(body))
+			if err != nil {
+				slog.Debug("auto-join attempt failed", "peer", url, "err", err)
+				continue
+			}
+			resp.Body.Close()
+
+			if resp.StatusCode == http.StatusOK {
+				slog.Info("joined cluster", "peer", url)
+				return
+			}
+			slog.Debug("auto-join rejected", "peer", url, "status", resp.StatusCode)
+		}
+		time.Sleep(time.Duration(attempt+1) * 2 * time.Second)
+	}
+	slog.Warn("auto-join exhausted retries, node running standalone")
 }

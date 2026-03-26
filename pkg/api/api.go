@@ -2,37 +2,41 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/johnjansen/loveliness/pkg/cluster"
 	"github.com/johnjansen/loveliness/pkg/router"
+	"github.com/johnjansen/loveliness/pkg/shard"
 )
 
 // Server is the HTTP API server for a Loveliness node.
-//
-//	Endpoints:
-//	  POST /query     — execute a Cypher query
-//	  GET  /health    — node health check
-//	  GET  /cluster   — cluster status (shard map, leader, nodes)
-//	  POST /join      — join a new node to the cluster (leader only)
 type Server struct {
 	router  *router.Router
 	cluster *cluster.Cluster
+	shards  []*shard.Shard
 	timeout time.Duration
 }
 
 // NewServer creates a new API server.
-func NewServer(r *router.Router, c *cluster.Cluster, timeout time.Duration) *Server {
+func NewServer(r *router.Router, c *cluster.Cluster, shards []*shard.Shard, timeout time.Duration) *Server {
 	return &Server{
 		router:  r,
 		cluster: c,
+		shards:  shards,
 		timeout: timeout,
 	}
 }
+
+type contextKey string
+
+const requestIDKey contextKey = "request_id"
 
 // Handler returns the HTTP handler with all routes registered.
 func (s *Server) Handler() http.Handler {
@@ -41,7 +45,43 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /cluster", s.handleCluster)
 	mux.HandleFunc("POST /join", s.handleJoin)
-	return mux
+	return s.withMiddleware(mux)
+}
+
+func (s *Server) withMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqID := generateRequestID()
+		ctx := context.WithValue(r.Context(), requestIDKey, reqID)
+		w.Header().Set("X-Request-ID", reqID)
+
+		start := time.Now()
+		rw := &responseWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rw, r.WithContext(ctx))
+
+		slog.Info("request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", rw.status,
+			"duration_ms", time.Since(start).Milliseconds(),
+			"request_id", reqID,
+		)
+	})
+}
+
+type responseWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (rw *responseWriter) WriteHeader(code int) {
+	rw.status = code
+	rw.ResponseWriter.WriteHeader(code)
+}
+
+func generateRequestID() string {
+	b := make([]byte, 8)
+	rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 // queryRequest is the JSON body for POST /query.
@@ -111,19 +151,39 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	if s.cluster == nil {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "mode": "standalone"})
-		return
+	resp := map[string]any{
+		"status": "ok",
 	}
-	status := "follower"
-	if s.cluster.IsLeader() {
-		status = "leader"
+
+	if s.cluster != nil {
+		role := "follower"
+		if s.cluster.IsLeader() {
+			role = "leader"
+		}
+		resp["role"] = role
+		resp["node_id"] = s.cluster.NodeID()
+	} else {
+		resp["mode"] = "standalone"
 	}
-	writeJSON(w, http.StatusOK, map[string]string{
-		"status":  "ok",
-		"role":    status,
-		"node_id": s.cluster.NodeID(),
-	})
+
+	if len(s.shards) > 0 {
+		shardStatus := make(map[string]string, len(s.shards))
+		allHealthy := true
+		for _, sh := range s.shards {
+			if sh.IsHealthy() {
+				shardStatus[strconv.Itoa(sh.ID)] = "healthy"
+			} else {
+				shardStatus[strconv.Itoa(sh.ID)] = "unhealthy"
+				allHealthy = false
+			}
+		}
+		resp["shards"] = shardStatus
+		if !allHealthy {
+			resp["status"] = "degraded"
+		}
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
@@ -133,11 +193,11 @@ func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
 	}
 	sm := s.cluster.GetShardMap()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"leader":      s.cluster.LeaderAddr(),
-		"node_id":     s.cluster.NodeID(),
-		"is_leader":   s.cluster.IsLeader(),
-		"shard_map":   sm.Assignments,
-		"nodes":       sm.Nodes,
+		"leader":    s.cluster.LeaderAddr(),
+		"node_id":   s.cluster.NodeID(),
+		"is_leader": s.cluster.IsLeader(),
+		"shard_map": sm.Assignments,
+		"nodes":     sm.Nodes,
 	})
 }
 
@@ -171,7 +231,7 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.cluster.Join(req.NodeID, req.RaftAddr); err != nil {
-		log.Printf("join error: %v", err)
+		slog.Error("join failed", "node_id", req.NodeID, "err", err)
 		writeError(w, http.StatusInternalServerError, "JOIN_ERROR", err.Error(), 0)
 		return
 	}
@@ -183,7 +243,7 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 		HTTPAddr: req.HTTPAddr,
 		Alive:    true,
 	}); err != nil {
-		log.Printf("register node error: %v", err)
+		slog.Error("register node failed", "node_id", req.NodeID, "err", err)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "joined", "node_id": req.NodeID})

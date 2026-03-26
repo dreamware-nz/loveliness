@@ -7,12 +7,13 @@ import (
 )
 
 // LbugStore is the production Store implementation backed by LadybugDB.
+// It maintains a pool of connections for concurrent query execution.
 type LbugStore struct {
 	db   *lbug.Database
-	conn *lbug.Connection
+	pool chan *lbug.Connection
 }
 
-// NewLbugStore opens a LadybugDB database at the given path.
+// NewLbugStore opens a LadybugDB database at the given path with a connection pool.
 func NewLbugStore(path string, maxThreads uint64) (*LbugStore, error) {
 	cfg := lbug.DefaultSystemConfig()
 	if maxThreads > 0 {
@@ -22,17 +23,39 @@ func NewLbugStore(path string, maxThreads uint64) (*LbugStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open database at %s: %w", path, err)
 	}
-	conn, err := lbug.OpenConnection(db)
-	if err != nil {
-		db.Close()
-		return nil, fmt.Errorf("open connection: %w", err)
+
+	poolSize := maxThreads
+	if poolSize > 8 {
+		poolSize = 8
 	}
-	return &LbugStore{db: db, conn: conn}, nil
+	if poolSize < 1 {
+		poolSize = 1
+	}
+
+	pool := make(chan *lbug.Connection, poolSize)
+	for i := uint64(0); i < poolSize; i++ {
+		conn, err := lbug.OpenConnection(db)
+		if err != nil {
+			// Close already-opened connections.
+			close(pool)
+			for c := range pool {
+				c.Close()
+			}
+			db.Close()
+			return nil, fmt.Errorf("open connection %d: %w", i, err)
+		}
+		pool <- conn
+	}
+
+	return &LbugStore{db: db, pool: pool}, nil
 }
 
-// Query executes a Cypher query against the LadybugDB instance.
+// Query executes a Cypher query using a pooled connection.
 func (s *LbugStore) Query(cypher string) (*QueryResponse, error) {
-	result, err := s.conn.Query(cypher)
+	conn := <-s.pool
+	defer func() { s.pool <- conn }()
+
+	result, err := conn.Query(cypher)
 	if err != nil {
 		return nil, err
 	}
@@ -66,9 +89,12 @@ func (s *LbugStore) Query(cypher string) (*QueryResponse, error) {
 	}, nil
 }
 
-// Close releases LadybugDB resources.
+// Close drains the connection pool and releases all LadybugDB resources.
 func (s *LbugStore) Close() error {
-	s.conn.Close()
+	close(s.pool)
+	for conn := range s.pool {
+		conn.Close()
+	}
 	s.db.Close()
 	return nil
 }
