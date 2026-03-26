@@ -288,7 +288,86 @@ done:
 		merged.Partial = true
 		merged.Errors = errors
 	}
+	// Deduplicate rows: remove reference nodes (PK-only stubs) when the
+	// real node with full properties also appears in the results.
+	merged.Rows = deduplicateRows(merged.Rows, merged.Columns)
 	return merged, nil
+}
+
+// deduplicateRows removes rows that are strict subsets of other rows.
+// A row A is a subset of row B if every non-null value in A equals the
+// corresponding value in B, and B has strictly more non-null values.
+// This handles reference nodes (PK-only with nulls) being superseded
+// by real nodes (full properties).
+func deduplicateRows(rows []map[string]any, columns []string) []map[string]any {
+	if len(rows) <= 1 || len(columns) == 0 {
+		return rows
+	}
+
+	// Build a key for grouping: use the first column as the identity key.
+	// Rows with the same value for column[0] are candidates for dedup.
+	type group struct {
+		rows    []int // indices into the original rows slice
+	}
+	groups := make(map[string]*group)
+	keyCol := columns[0]
+
+	for i, row := range rows {
+		keyVal := fmt.Sprintf("%v", row[keyCol])
+		g, ok := groups[keyVal]
+		if !ok {
+			g = &group{}
+			groups[keyVal] = g
+		}
+		g.rows = append(g.rows, i)
+	}
+
+	// For each group with multiple rows, drop rows that are strict subsets
+	// (have nulls where another row has real values). If all rows in a group
+	// have identical non-null counts, keep all of them — they're real
+	// duplicates from different shards, not reference vs real node.
+	drop := make(map[int]bool)
+	for _, g := range groups {
+		if len(g.rows) < 2 {
+			continue
+		}
+		// Find the maximum non-null count in this group.
+		maxNonNull := 0
+		for _, idx := range g.rows {
+			if nn := countNonNull(rows[idx]); nn > maxNonNull {
+				maxNonNull = nn
+			}
+		}
+		// Only drop rows that have strictly fewer non-null values
+		// (these are reference/stub nodes).
+		for _, idx := range g.rows {
+			if countNonNull(rows[idx]) < maxNonNull {
+				drop[idx] = true
+			}
+		}
+	}
+
+	if len(drop) == 0 {
+		return rows
+	}
+
+	out := make([]map[string]any, 0, len(rows)-len(drop))
+	for i, row := range rows {
+		if !drop[i] {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
+func countNonNull(row map[string]any) int {
+	count := 0
+	for _, v := range row {
+		if v != nil {
+			count++
+		}
+	}
+	return count
 }
 
 // QueryError is a structured error with a code for the API layer.

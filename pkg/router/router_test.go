@@ -175,6 +175,54 @@ func TestRouter_DeleteWithShardKey(t *testing.T) {
 	}
 }
 
+// --- Dedup tests ---
+
+func TestDeduplicateRows_RemovesReferenceNodes(t *testing.T) {
+	columns := []string{"p.name", "p.age", "p.city"}
+	rows := []map[string]any{
+		{"p.name": "Bob", "p.age": nil, "p.city": nil},       // reference node (stub)
+		{"p.name": "Alice", "p.age": 30, "p.city": "Auckland"}, // real node
+		{"p.name": "Bob", "p.age": 25, "p.city": "Wellington"}, // real node
+	}
+
+	result := deduplicateRows(rows, columns)
+	if len(result) != 2 {
+		t.Fatalf("expected 2 rows after dedup, got %d: %v", len(result), result)
+	}
+
+	// Bob should have full properties, not nulls.
+	for _, row := range result {
+		if row["p.name"] == "Bob" {
+			if row["p.age"] != 25 {
+				t.Errorf("Bob's age: got %v, want 25", row["p.age"])
+			}
+			if row["p.city"] != "Wellington" {
+				t.Errorf("Bob's city: got %v, want Wellington", row["p.city"])
+			}
+		}
+	}
+}
+
+func TestDeduplicateRows_NoFalsePositives(t *testing.T) {
+	columns := []string{"p.name", "p.age"}
+	rows := []map[string]any{
+		{"p.name": "Alice", "p.age": 30},
+		{"p.name": "Bob", "p.age": 25},
+	}
+
+	result := deduplicateRows(rows, columns)
+	if len(result) != 2 {
+		t.Fatalf("expected 2 rows (no dedup), got %d", len(result))
+	}
+}
+
+func TestDeduplicateRows_EmptyInput(t *testing.T) {
+	result := deduplicateRows(nil, []string{"p.name"})
+	if result != nil {
+		t.Errorf("expected nil, got %v", result)
+	}
+}
+
 // --- Schema broadcast tests ---
 
 func TestRouter_SchemaBroadcast(t *testing.T) {
