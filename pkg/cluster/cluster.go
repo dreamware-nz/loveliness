@@ -142,6 +142,27 @@ func (c *Cluster) NodeID() string {
 	return c.nodeID
 }
 
+// BootstrapShards assigns shardCount shards round-robin across the given nodes.
+// Primary and replica are placed on different nodes.
+// Called once by the leader after cluster bootstrap.
+func (c *Cluster) BootstrapShards(shardCount int, nodeIDs []string) error {
+	n := len(nodeIDs)
+	if n == 0 {
+		return fmt.Errorf("no nodes to assign shards to")
+	}
+	for i := 0; i < shardCount; i++ {
+		primary := nodeIDs[i%n]
+		replica := ""
+		if n > 1 {
+			replica = nodeIDs[(i+1)%n]
+		}
+		if err := c.AssignShard(i, primary, replica); err != nil {
+			return fmt.Errorf("assign shard %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
 // Shutdown gracefully stops the Raft node.
 func (c *Cluster) Shutdown() error {
 	f := c.raft.Shutdown()
