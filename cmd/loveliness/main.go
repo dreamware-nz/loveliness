@@ -46,14 +46,15 @@ func main() {
 	}
 
 	// Open local shards.
+	// Note: LadybugDB must create its own database directory. We only create
+	// the parent directory here — not the shard directories themselves.
+	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
+		slog.Error("create data dir failed", "path", cfg.DataDir, "err", err)
+		os.Exit(1)
+	}
 	shards := make([]*shard.Shard, cfg.ShardCount)
 	for i := 0; i < cfg.ShardCount; i++ {
 		shardDir := filepath.Join(cfg.DataDir, fmt.Sprintf("shard-%d", i))
-		if err := os.MkdirAll(shardDir, 0755); err != nil {
-			slog.Error("create shard dir failed", "path", shardDir, "err", err)
-			os.Exit(1)
-		}
-
 		store, err := shard.NewLbugStore(shardDir, threadsPerShard)
 		if err != nil {
 			slog.Error("open shard failed", "shard", i, "err", err)

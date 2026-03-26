@@ -97,10 +97,12 @@ func (m *Manager) UpdateAssignments(assignments map[int]Assignment) {
 func (m *Manager) openShard(id int) error {
 	var path string
 	if m.dataDir != "" {
-		path = filepath.Join(m.dataDir, fmt.Sprintf("shard-%d", id))
-		if err := os.MkdirAll(path, 0755); err != nil {
-			return fmt.Errorf("create shard dir: %w", err)
+		// Only create the parent directory — LadybugDB must create
+		// its own database directory or it fails with status 1.
+		if err := os.MkdirAll(m.dataDir, 0755); err != nil {
+			return fmt.Errorf("create data dir: %w", err)
 		}
+		path = filepath.Join(m.dataDir, fmt.Sprintf("shard-%d", id))
 	}
 
 	store, err := m.storeFactory(path, m.maxThreads)
