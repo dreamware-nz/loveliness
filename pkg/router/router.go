@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"hash/fnv"
+	"sort"
 	"sync"
 	"time"
 
@@ -45,6 +46,18 @@ type Router struct {
 	timeout    time.Duration
 	schema     *schema.Registry
 	resolver   *Resolver
+
+	// Phase B: Bloom filter index for shard-targeted lookups.
+	bloomIndex *ShardBloomIndex
+
+	// Phase C: Edge-cut replicator for border node full-property replication.
+	edgeCut *EdgeCutReplicator
+
+	// Phase D: Partition analyzer for community detection.
+	partitioner *PartitionAnalyzer
+
+	// Phase E: Pipeline executor for overlapping multi-hop traversals.
+	pipeline *PipelineExecutor
 }
 
 // NewRouter creates a Router over the given shards.
@@ -64,9 +77,33 @@ func NewRouterWithSchema(shards []*shard.Shard, timeout time.Duration, reg *sche
 		shardCount: len(shards),
 		timeout:    timeout,
 		schema:     reg,
+		bloomIndex: NewShardBloomIndex(),
 	}
 	r.resolver = NewResolver(shards, reg, r)
+	r.edgeCut = NewEdgeCutReplicator(shards, r)
+	r.partitioner = NewPartitionAnalyzer(shards, r)
+	r.pipeline = NewPipelineExecutor(shards, r, timeout)
 	return r
+}
+
+// BloomIndex returns the Bloom filter index for external use (e.g., bulk load populates it).
+func (r *Router) BloomIndex() *ShardBloomIndex {
+	return r.bloomIndex
+}
+
+// EdgeCut returns the edge-cut replicator.
+func (r *Router) EdgeCut() *EdgeCutReplicator {
+	return r.edgeCut
+}
+
+// Partitioner returns the partition analyzer.
+func (r *Router) Partitioner() *PartitionAnalyzer {
+	return r.partitioner
+}
+
+// Pipeline returns the pipeline executor.
+func (r *Router) Pipeline() *PipelineExecutor {
+	return r.pipeline
 }
 
 // Execute parses a Cypher query, resolves target shards, and executes.
@@ -105,8 +142,17 @@ func (r *Router) Execute(ctx context.Context, cypher string) (*Result, error) {
 		return r.resolver.ResolveTraversal(ctx, parsed)
 	}
 
-	// Route to the shard determined by the first shard key.
+	// Phase B: Use Bloom filter to refine shard routing.
+	// If the Bloom index is populated, it may narrow the target to fewer shards
+	// (or confirm the hash-based shard). This is especially useful after
+	// graph-aware repartitioning (Phase D) when keys may have migrated.
 	shardID := r.resolveShard(parsed.ShardKeys[0])
+	if r.bloomIndex != nil && !parsed.IsWrite() {
+		likely := r.bloomIndex.LikelyShards(parsed.ShardKeys[0])
+		if len(likely) == 1 {
+			shardID = likely[0]
+		}
+	}
 	return r.queryShard(ctx, shardID, parsed.Raw)
 }
 
@@ -217,11 +263,20 @@ func (r *Router) queryShard(ctx context.Context, shardID int, cypher string) (*R
 }
 
 // scatterGather sends the query to ALL shards and merges results.
+// It applies query pushdown (rewriting AVG→SUM+COUNT for distributed aggregation)
+// and post-merge operations (ORDER BY, LIMIT, DISTINCT, aggregate merging).
 func (r *Router) scatterGather(ctx context.Context, parsed *ParsedQuery) (*Result, error) {
 	type shardResult struct {
 		shardID int
 		resp    *shard.QueryResponse
 		err     error
+	}
+
+	// Phase A: Parse query modifiers for aggregate pushdown.
+	mods := parseQueryModifiers(parsed.Raw)
+	shardQuery := parsed.Raw
+	if mods.HasAggregates() {
+		shardQuery = rewriteQueryForShards(parsed.Raw, mods)
 	}
 
 	var wg sync.WaitGroup
@@ -235,7 +290,7 @@ func (r *Router) scatterGather(ctx context.Context, parsed *ParsedQuery) (*Resul
 		wg.Add(1)
 		go func(s *shard.Shard) {
 			defer wg.Done()
-			resp, err := s.Query(parsed.Raw)
+			resp, err := s.Query(shardQuery)
 			results <- shardResult{shardID: s.ID, resp: resp, err: err}
 		}(s)
 	}
@@ -291,7 +346,35 @@ done:
 	// Deduplicate rows: remove reference nodes (PK-only stubs) when the
 	// real node with full properties also appears in the results.
 	merged.Rows = deduplicateRows(merged.Rows, merged.Columns)
+
+	// Phase A: Post-merge operations — aggregate merging, ORDER BY, LIMIT, DISTINCT.
+	if mods.NeedsMerge() {
+		if mods.HasAggregates() {
+			merged.Rows = mergeGroupedAggregateRows(merged.Rows, merged.Columns, mods)
+			// Update columns after aggregate merging (AVG rewrite changes column names).
+			if len(merged.Rows) > 0 {
+				merged.Columns = resultColumns(merged.Rows[0])
+			}
+		}
+		if mods.HasDistinct {
+			merged.Rows = applyDistinct(merged.Rows, merged.Columns)
+		}
+		if len(mods.OrderBy) > 0 || mods.Limit >= 0 {
+			merged.Rows = applyOrderByAndLimit(merged.Rows, mods)
+		}
+	}
+
 	return merged, nil
+}
+
+// resultColumns extracts sorted column names from a result row.
+func resultColumns(row map[string]any) []string {
+	cols := make([]string, 0, len(row))
+	for k := range row {
+		cols = append(cols, k)
+	}
+	sort.Strings(cols)
+	return cols
 }
 
 // deduplicateRows removes rows that are strict subsets of other rows.

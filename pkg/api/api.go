@@ -6,13 +6,17 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/johnjansen/loveliness/pkg/cluster"
 	"github.com/johnjansen/loveliness/pkg/router"
+	"github.com/johnjansen/loveliness/pkg/schema"
 	"github.com/johnjansen/loveliness/pkg/shard"
 )
 
@@ -21,16 +25,25 @@ type Server struct {
 	router  *router.Router
 	cluster *cluster.Cluster
 	shards  []*shard.Shard
+	schema  *schema.Registry
 	timeout time.Duration
+
+	// refTracker tracks known node keys per shard for fast duplicate
+	// detection during bulk edge loading. Avoids expensive full-table
+	// scans on every batch.
+	refTracker map[int]map[string]bool
+	refTrackMu sync.RWMutex
 }
 
 // NewServer creates a new API server.
-func NewServer(r *router.Router, c *cluster.Cluster, shards []*shard.Shard, timeout time.Duration) *Server {
+func NewServer(r *router.Router, c *cluster.Cluster, shards []*shard.Shard, reg *schema.Registry, timeout time.Duration) *Server {
 	return &Server{
-		router:  r,
-		cluster: c,
-		shards:  shards,
-		timeout: timeout,
+		router:     r,
+		cluster:    c,
+		shards:     shards,
+		schema:     reg,
+		timeout:    timeout,
+		refTracker: make(map[int]map[string]bool),
 	}
 }
 
@@ -42,6 +55,9 @@ const requestIDKey contextKey = "request_id"
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /query", s.handleQuery)
+	mux.HandleFunc("POST /cypher", s.handleCypher)
+	mux.HandleFunc("POST /bulk/nodes", s.handleBulkNodes)
+	mux.HandleFunc("POST /bulk/edges", s.handleBulkEdges)
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /cluster", s.handleCluster)
 	mux.HandleFunc("POST /join", s.handleJoin)
@@ -129,6 +145,43 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	result, err := s.router.Execute(ctx, req.Cypher)
+	if err != nil {
+		if qe, ok := err.(*router.QueryError); ok {
+			status := http.StatusInternalServerError
+			switch qe.Code {
+			case "CYPHER_PARSE_ERROR", "MISSING_SHARD_KEY":
+				status = http.StatusBadRequest
+			case "SHARD_UNAVAILABLE":
+				status = http.StatusServiceUnavailable
+			case "QUERY_TIMEOUT":
+				status = http.StatusGatewayTimeout
+			}
+			writeError(w, status, qe.Code, qe.Message, qe.ShardID)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error(), 0)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) handleCypher(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1 MB max
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "cannot read body: "+err.Error(), 0)
+		return
+	}
+	cypher := strings.TrimSpace(string(body))
+	if cypher == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "empty query body", 0)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), s.timeout)
+	defer cancel()
+
+	result, err := s.router.Execute(ctx, cypher)
 	if err != nil {
 		if qe, ok := err.(*router.QueryError); ok {
 			status := http.StatusInternalServerError

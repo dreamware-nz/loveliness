@@ -20,7 +20,7 @@ func setupTestServer() *Server {
 		shards[i] = shard.NewShard(i, store, 4)
 	}
 	r := router.NewRouter(shards, 5*time.Second)
-	return NewServer(r, nil, shards, 5*time.Second)
+	return NewServer(r, nil, shards, nil, 5*time.Second)
 }
 
 func TestQuery_ValidCypher(t *testing.T) {
@@ -191,7 +191,7 @@ func TestHealth_DegradedWithUnhealthyShard(t *testing.T) {
 	shards[1].Query("MATCH (n) RETURN n")
 
 	r := router.NewRouter(shards, 5*time.Second)
-	srv := NewServer(r, nil, shards, 5*time.Second)
+	srv := NewServer(r, nil, shards, nil, 5*time.Second)
 
 	req := httptest.NewRequest("GET", "/health", nil)
 	w := httptest.NewRecorder()

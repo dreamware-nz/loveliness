@@ -79,13 +79,19 @@ func main() {
 	reg := schema.NewRegistry()
 	r := router.NewRouterWithSchema(shards, queryTimeout, reg)
 
+	// Phase B: Initialize per-shard Bloom filters (5M expected keys per shard, 1% FPR).
+	// At 5M keys and 1% FPR each filter uses ~6 MB, so 4 shards = ~24 MB total.
+	for i := 0; i < cfg.ShardCount; i++ {
+		r.BloomIndex().InitShard(i, 5_000_000, 0.01)
+	}
+
 	// Start HTTP server.
-	srv := api.NewServer(r, c, shards, queryTimeout)
+	srv := api.NewServer(r, c, shards, reg, queryTimeout)
 	httpServer := &http.Server{
 		Addr:         cfg.BindAddr,
 		Handler:      srv.Handler(),
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: queryTimeout + 5*time.Second,
+		ReadTimeout:  5 * time.Minute,
+		WriteTimeout: 5 * time.Minute,
 	}
 
 	go func() {

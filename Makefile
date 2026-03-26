@@ -29,10 +29,16 @@ docker-down:
 	docker compose down -v
 
 generate: build-generate
-	./generate -nodes 100000 -edge-ratio 1.0 -workers 64
+	./generate -nodes 100000 -edge-ratio 1.0 -batch 50000
 
 build-generate:
 	CGO_ENABLED=0 go build -o generate ./cmd/generate
+
+build-benchmark:
+	CGO_ENABLED=0 go build -o benchmark ./cmd/benchmark
+
+bench: build-benchmark
+	./benchmark -nodes 50000 -edges 50000 -iters 200
 
 lint:
 	golangci-lint run ./...
