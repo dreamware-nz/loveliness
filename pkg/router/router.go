@@ -60,6 +60,19 @@ func (r *Router) Execute(ctx context.Context, cypher string) (*Result, error) {
 		return nil, &QueryError{Code: "CYPHER_PARSE_ERROR", Message: err.Error()}
 	}
 
+	// Schema DDL (CREATE NODE TABLE, DROP, ALTER) must run on ALL shards.
+	if parsed.Type == QuerySchema {
+		return r.broadcast(ctx, parsed)
+	}
+
+	// Writes without a shard key are unsafe — we can't scatter-gather mutations.
+	if parsed.IsWrite() && parsed.NeedsScatterGather() {
+		return nil, &QueryError{
+			Code:    "MISSING_SHARD_KEY",
+			Message: "write queries require a shard key (property value) for routing; use inline properties {prop: 'value'} or WHERE equality",
+		}
+	}
+
 	if parsed.NeedsScatterGather() {
 		return r.scatterGather(ctx, parsed)
 	}
@@ -67,6 +80,49 @@ func (r *Router) Execute(ctx context.Context, cypher string) (*Result, error) {
 	// Route to the shard determined by the first shard key.
 	shardID := r.resolveShard(parsed.ShardKeys[0])
 	return r.queryShard(ctx, shardID, parsed.Raw)
+}
+
+// broadcast sends a query to ALL shards (used for schema DDL).
+// All shards must succeed; any failure is an error.
+func (r *Router) broadcast(ctx context.Context, parsed *ParsedQuery) (*Result, error) {
+	type shardResult struct {
+		shardID int
+		resp    *shard.QueryResponse
+		err     error
+	}
+
+	var wg sync.WaitGroup
+	results := make(chan shardResult, r.shardCount)
+
+	for _, s := range r.shards {
+		wg.Add(1)
+		go func(s *shard.Shard) {
+			defer wg.Done()
+			resp, err := s.Query(parsed.Raw)
+			results <- shardResult{shardID: s.ID, resp: resp, err: err}
+		}(s)
+	}
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	var errors []ShardError
+	for res := range results {
+		if res.err != nil {
+			errors = append(errors, ShardError{ShardID: res.shardID, Error: res.err.Error()})
+		}
+	}
+
+	if len(errors) > 0 {
+		return &Result{Errors: errors, Partial: true}, &QueryError{
+			Code:    "BROADCAST_PARTIAL",
+			Message: fmt.Sprintf("schema change failed on %d/%d shards", len(errors), r.shardCount),
+		}
+	}
+
+	return &Result{Columns: []string{}, Rows: []map[string]any{}}, nil
 }
 
 // resolveShard hashes a key to a shard ID.

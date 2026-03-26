@@ -47,10 +47,15 @@ func (s *MemoryStore) Query(cypher string) (*QueryResponse, error) {
 	defer s.mu.RUnlock()
 
 	upper := strings.ToUpper(strings.TrimSpace(cypher))
-	if strings.HasPrefix(upper, "CREATE") {
+	// Schema DDL, writes, and CREATE data — all return empty success.
+	if strings.HasPrefix(upper, "CREATE") || strings.HasPrefix(upper, "DROP") ||
+		strings.HasPrefix(upper, "ALTER") || strings.HasPrefix(upper, "MERGE") ||
+		strings.Contains(upper, "SET ") || strings.Contains(upper, "DELETE") ||
+		strings.Contains(upper, "REMOVE ") {
 		return &QueryResponse{Columns: []string{}, Rows: []map[string]any{}}, nil
 	}
-	if strings.HasPrefix(upper, "MATCH") {
+	if strings.HasPrefix(upper, "MATCH") || strings.HasPrefix(upper, "OPTIONAL MATCH") ||
+		strings.HasPrefix(upper, "UNWIND") || strings.HasPrefix(upper, "CALL") {
 		rows := make([]map[string]any, 0, len(s.nodes))
 		for _, props := range s.nodes {
 			rows = append(rows, props)

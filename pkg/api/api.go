@@ -133,7 +133,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		if qe, ok := err.(*router.QueryError); ok {
 			status := http.StatusInternalServerError
 			switch qe.Code {
-			case "CYPHER_PARSE_ERROR":
+			case "CYPHER_PARSE_ERROR", "MISSING_SHARD_KEY":
 				status = http.StatusBadRequest
 			case "SHARD_UNAVAILABLE":
 				status = http.StatusServiceUnavailable

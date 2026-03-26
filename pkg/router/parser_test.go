@@ -11,38 +11,13 @@ func TestParse_EmptyQuery(t *testing.T) {
 	}
 }
 
-func TestParse_UnsupportedClause(t *testing.T) {
-	clauses := []string{
-		"MERGE (n:Person {name: 'Alice'})",
-		"MATCH (n) SET n.age = 30",
-		"MATCH (n) DELETE n",
-		"MATCH (n) WITH n RETURN n",
-		"UNWIND [1,2,3] AS x RETURN x",
-		"CALL db.labels() YIELD label",
-		"OPTIONAL MATCH (n) RETURN n",
-	}
-	for _, q := range clauses {
-		_, err := Parse(q)
-		if err == nil {
-			t.Errorf("expected error for unsupported clause: %s", q)
-		}
-	}
-}
-
-func TestParse_UnsupportedStatement(t *testing.T) {
-	_, err := Parse("DROP TABLE foo")
-	if err == nil {
-		t.Fatal("expected error for unsupported statement")
-	}
-}
-
 func TestParse_MatchWithWhereEquality(t *testing.T) {
 	pq, err := Parse("MATCH (p:Person) WHERE p.name = 'Alice' RETURN p")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pq.Type != QueryMatch {
-		t.Errorf("expected QueryMatch, got %d", pq.Type)
+	if pq.Type != QueryRead {
+		t.Errorf("expected QueryRead, got %d", pq.Type)
 	}
 	if len(pq.ShardKeys) != 1 || pq.ShardKeys[0] != "Alice" {
 		t.Errorf("expected shard key [Alice], got %v", pq.ShardKeys)
@@ -97,8 +72,8 @@ func TestParse_CreateNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pq.Type != QueryCreate {
-		t.Errorf("expected QueryCreate, got %d", pq.Type)
+	if pq.Type != QueryWrite {
+		t.Errorf("expected QueryWrite, got %d", pq.Type)
 	}
 	if len(pq.ShardKeys) != 1 || pq.ShardKeys[0] != "Dave" {
 		t.Errorf("expected shard key [Dave], got %v", pq.ShardKeys)
@@ -116,7 +91,6 @@ func TestParse_Relationship(t *testing.T) {
 }
 
 func TestParse_DeduplicatesKeys(t *testing.T) {
-	// Same value in both inline prop and WHERE.
 	pq, err := Parse("MATCH (p:Person {name: 'Alice'}) WHERE p.name = 'Alice' RETURN p")
 	if err != nil {
 		t.Fatal(err)
@@ -154,5 +128,146 @@ func TestParse_WhereWithOR(t *testing.T) {
 	}
 	if len(pq.ShardKeys) != 2 {
 		t.Errorf("expected 2 shard keys, got %d: %v", len(pq.ShardKeys), pq.ShardKeys)
+	}
+}
+
+// --- New tests for expanded dialect ---
+
+func TestParse_MergeIsWrite(t *testing.T) {
+	pq, err := Parse("MERGE (n:Person {name: 'Alice'}) ON CREATE SET n.created = true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pq.Type != QueryWrite {
+		t.Errorf("expected QueryWrite, got %d", pq.Type)
+	}
+	if len(pq.ShardKeys) != 1 || pq.ShardKeys[0] != "Alice" {
+		t.Errorf("expected shard key [Alice], got %v", pq.ShardKeys)
+	}
+}
+
+func TestParse_MatchSetIsWrite(t *testing.T) {
+	pq, err := Parse("MATCH (p:Person {name: 'Bob'}) SET p.age = 30 RETURN p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pq.Type != QueryWrite {
+		t.Errorf("expected QueryWrite, got %d", pq.Type)
+	}
+	if len(pq.ShardKeys) != 1 || pq.ShardKeys[0] != "Bob" {
+		t.Errorf("expected shard key [Bob], got %v", pq.ShardKeys)
+	}
+}
+
+func TestParse_MatchDeleteIsWrite(t *testing.T) {
+	pq, err := Parse("MATCH (p:Person {name: 'Charlie'}) DELETE p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pq.Type != QueryWrite {
+		t.Errorf("expected QueryWrite, got %d", pq.Type)
+	}
+}
+
+func TestParse_DetachDeleteIsWrite(t *testing.T) {
+	pq, err := Parse("MATCH (p:Person {name: 'Dave'}) DETACH DELETE p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pq.Type != QueryWrite {
+		t.Errorf("expected QueryWrite, got %d", pq.Type)
+	}
+}
+
+func TestParse_RemoveIsWrite(t *testing.T) {
+	pq, err := Parse("MATCH (p:Person {name: 'Eve'}) REMOVE p.age RETURN p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pq.Type != QueryWrite {
+		t.Errorf("expected QueryWrite, got %d", pq.Type)
+	}
+}
+
+func TestParse_OptionalMatchIsRead(t *testing.T) {
+	pq, err := Parse("OPTIONAL MATCH (p:Person) RETURN p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pq.Type != QueryRead {
+		t.Errorf("expected QueryRead, got %d", pq.Type)
+	}
+}
+
+func TestParse_WithClauseIsRead(t *testing.T) {
+	pq, err := Parse("MATCH (p:Person) WITH p.name AS name RETURN name")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pq.Type != QueryRead {
+		t.Errorf("expected QueryRead, got %d", pq.Type)
+	}
+}
+
+func TestParse_UnwindIsRead(t *testing.T) {
+	pq, err := Parse("UNWIND [1,2,3] AS x RETURN x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pq.Type != QueryRead {
+		t.Errorf("expected QueryRead, got %d", pq.Type)
+	}
+}
+
+func TestParse_CallIsRead(t *testing.T) {
+	pq, err := Parse("CALL db.labels() YIELD label RETURN label")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pq.Type != QueryRead {
+		t.Errorf("expected QueryRead, got %d", pq.Type)
+	}
+}
+
+func TestParse_CreateNodeTableIsSchema(t *testing.T) {
+	pq, err := Parse("CREATE NODE TABLE Person(name STRING, age INT64, PRIMARY KEY(name))")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pq.Type != QuerySchema {
+		t.Errorf("expected QuerySchema, got %d", pq.Type)
+	}
+}
+
+func TestParse_CreateRelTableIsSchema(t *testing.T) {
+	pq, err := Parse("CREATE REL TABLE KNOWS(FROM Person TO Person, since INT64)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pq.Type != QuerySchema {
+		t.Errorf("expected QuerySchema, got %d", pq.Type)
+	}
+}
+
+func TestParse_DropTableIsSchema(t *testing.T) {
+	pq, err := Parse("DROP TABLE Person")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pq.Type != QuerySchema {
+		t.Errorf("expected QuerySchema, got %d", pq.Type)
+	}
+}
+
+func TestParse_WhereBeforeSetTerminator(t *testing.T) {
+	pq, err := Parse("MATCH (p:Person) WHERE p.name = 'Alice' SET p.age = 30")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pq.Type != QueryWrite {
+		t.Errorf("expected QueryWrite, got %d", pq.Type)
+	}
+	if len(pq.ShardKeys) != 1 || pq.ShardKeys[0] != "Alice" {
+		t.Errorf("expected [Alice], got %v", pq.ShardKeys)
 	}
 }

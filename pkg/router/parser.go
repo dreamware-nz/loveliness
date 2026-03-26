@@ -6,26 +6,18 @@ import (
 	"unicode"
 )
 
-// QueryType indicates what kind of Cypher statement was parsed.
+// QueryType classifies statements for routing decisions.
 type QueryType int
 
 const (
-	QueryMatch  QueryType = iota // MATCH ... RETURN
-	QueryCreate                  // CREATE
+	QueryRead   QueryType = iota // MATCH, OPTIONAL MATCH, CALL, UNWIND — safe to scatter-gather
+	QueryWrite                   // CREATE, MERGE, SET, DELETE, REMOVE — needs shard routing
+	QuerySchema                  // CREATE NODE TABLE, DROP TABLE, etc. — broadcast to all shards
 )
 
-// ParsedQuery is the result of parsing a Cypher subset for shard routing.
-//
-//	Supported:
-//	  MATCH (v:Label) WHERE v.prop = 'value' RETURN ...
-//	  MATCH (v:Label {prop: 'value'}) RETURN ...
-//	  MATCH (a:L)-[:R]->(b:L) WHERE ... RETURN ...
-//	  CREATE (v:Label {prop: 'value', ...})
-//	  CREATE (a)-[:R]->(b)
-//	  RETURN ... LIMIT N / ORDER BY ...
-//
-//	Not supported (returns error):
-//	  MERGE, SET, DELETE, WITH, UNWIND, CALL, OPTIONAL MATCH, subqueries
+// ParsedQuery is the result of analyzing a Cypher statement for shard routing.
+// The parser does NOT validate Cypher — LadybugDB does that. The parser only
+// extracts enough information to decide where to send the query.
 type ParsedQuery struct {
 	Type      QueryType
 	ShardKeys []string // extracted property values for shard routing
@@ -38,15 +30,26 @@ func (pq *ParsedQuery) NeedsScatterGather() bool {
 	return len(pq.ShardKeys) == 0
 }
 
-var unsupportedClauses = []string{
-	"MERGE", "SET ", "DELETE", "REMOVE", "DETACH",
-	"WITH ", "UNWIND", "CALL", "FOREACH", "LOAD CSV",
-	"OPTIONAL MATCH",
+// IsWrite returns true if this is a data-modifying statement.
+func (pq *ParsedQuery) IsWrite() bool {
+	return pq.Type == QueryWrite
 }
 
-// Parse parses a Cypher query string and extracts shard routing keys.
-// It does NOT fully parse Cypher — it extracts just enough to determine
-// which shard(s) the query should be routed to.
+// writeClauses are Cypher clauses that modify data.
+var writeClauses = []string{
+	"CREATE ", "MERGE ", "SET ", "DELETE ", "REMOVE ", "DETACH ",
+}
+
+// schemaPrefixes are DDL statements that must be broadcast to all shards.
+var schemaPrefixes = []string{
+	"CREATE NODE TABLE", "CREATE REL TABLE", "CREATE RELATIONSHIP TABLE",
+	"CREATE TABLE", "DROP TABLE", "DROP ", "ALTER ",
+}
+
+// Parse analyzes a Cypher query string and extracts shard routing keys.
+// It classifies the query as read, write, or schema, and extracts property
+// values that can be used as shard keys. The raw Cypher is passed through
+// to LadybugDB unmodified.
 func Parse(cypher string) (*ParsedQuery, error) {
 	trimmed := strings.TrimSpace(cypher)
 	if trimmed == "" {
@@ -54,23 +57,10 @@ func Parse(cypher string) (*ParsedQuery, error) {
 	}
 
 	upper := strings.ToUpper(trimmed)
-
-	// Check for unsupported clauses.
-	for _, clause := range unsupportedClauses {
-		if strings.Contains(upper, clause) {
-			return nil, fmt.Errorf("unsupported clause: %s", strings.TrimSpace(clause))
-		}
-	}
-
 	pq := &ParsedQuery{Raw: trimmed}
 
-	if strings.HasPrefix(upper, "CREATE") {
-		pq.Type = QueryCreate
-	} else if strings.HasPrefix(upper, "MATCH") {
-		pq.Type = QueryMatch
-	} else {
-		return nil, fmt.Errorf("unsupported statement: must start with MATCH or CREATE")
-	}
+	// Classify the query type.
+	pq.Type = classifyQuery(upper)
 
 	// Extract shard keys from inline properties: {prop: 'value'}
 	keys := extractInlineProperties(trimmed)
@@ -86,12 +76,31 @@ func Parse(cypher string) (*ParsedQuery, error) {
 	return pq, nil
 }
 
+// classifyQuery determines whether a statement is a read, write, or schema operation.
+func classifyQuery(upper string) QueryType {
+	// Schema DDL takes priority — must be broadcast to all shards.
+	for _, prefix := range schemaPrefixes {
+		if strings.HasPrefix(upper, prefix) {
+			return QuerySchema
+		}
+	}
+
+	// Check for write clauses anywhere in the statement.
+	// A MATCH ... SET or MATCH ... DELETE is still a write.
+	for _, clause := range writeClauses {
+		if strings.Contains(upper, clause) {
+			return QueryWrite
+		}
+	}
+
+	return QueryRead
+}
+
 // extractInlineProperties extracts string values from {key: 'value'} patterns.
 func extractInlineProperties(cypher string) []string {
 	var keys []string
 	i := 0
 	for i < len(cypher) {
-		// Find opening brace.
 		start := strings.IndexByte(cypher[i:], '{')
 		if start == -1 {
 			break
@@ -104,7 +113,6 @@ func extractInlineProperties(cypher string) []string {
 		end += start
 
 		block := cypher[start+1 : end]
-		// Parse key: 'value' pairs.
 		pairs := strings.Split(block, ",")
 		for _, pair := range pairs {
 			parts := strings.SplitN(pair, ":", 2)
@@ -129,20 +137,17 @@ func extractWhereEquality(cypher string) []string {
 		return nil
 	}
 
-	// Find the end of the WHERE clause (RETURN, ORDER BY, LIMIT, or end of string).
 	whereClause := cypher[whereIdx+6:]
-	for _, terminator := range []string{"RETURN", "ORDER BY", "LIMIT"} {
+	for _, terminator := range []string{"RETURN", "ORDER BY", "LIMIT", " SET ", " DELETE", " REMOVE"} {
 		if idx := strings.Index(strings.ToUpper(whereClause), terminator); idx != -1 {
 			whereClause = whereClause[:idx]
 		}
 	}
 
 	var keys []string
-	// Split on AND/OR and look for equality conditions.
 	conditions := splitConditions(whereClause)
 	for _, cond := range conditions {
 		cond = strings.TrimSpace(cond)
-		// Look for = sign (but not !=, <=, >=).
 		eqIdx := -1
 		for j := 0; j < len(cond); j++ {
 			if cond[j] == '=' && j > 0 && cond[j-1] != '!' && cond[j-1] != '<' && cond[j-1] != '>' {
@@ -174,10 +179,10 @@ func splitConditions(clause string) []string {
 		width := 0
 		if andIdx != -1 && (orIdx == -1 || andIdx < orIdx) {
 			next = andIdx
-			width = 5 // " AND "
+			width = 5
 		} else if orIdx != -1 {
 			next = orIdx
-			width = 4 // " OR "
+			width = 4
 		}
 
 		if next == -1 {

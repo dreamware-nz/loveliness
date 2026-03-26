@@ -70,9 +70,9 @@ func TestQuery_InvalidJSON(t *testing.T) {
 	}
 }
 
-func TestQuery_UnsupportedClause(t *testing.T) {
+func TestQuery_EmptyCypher(t *testing.T) {
 	srv := setupTestServer()
-	body := `{"cypher": "MERGE (n:Person {name: 'Alice'})"}`
+	body := `{"cypher": ""}`
 	req := httptest.NewRequest("POST", "/query", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -82,11 +82,34 @@ func TestQuery_UnsupportedClause(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())
 	}
+}
 
-	var resp errorResponse
-	json.Unmarshal(w.Body.Bytes(), &resp)
-	if resp.Error.Code != "CYPHER_PARSE_ERROR" {
-		t.Errorf("expected CYPHER_PARSE_ERROR, got %s", resp.Error.Code)
+func TestQuery_MergeWithShardKey(t *testing.T) {
+	srv := setupTestServer()
+	body := `{"cypher": "MERGE (n:Person {name: 'Alice'})"}`
+	req := httptest.NewRequest("POST", "/query", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestQuery_WriteWithoutShardKey(t *testing.T) {
+	srv := setupTestServer()
+	body := `{"cypher": "MATCH (p:Person) SET p.active = true"}`
+	req := httptest.NewRequest("POST", "/query", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	// Writes without shard key should be rejected.
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())
 	}
 }
 

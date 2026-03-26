@@ -195,9 +195,11 @@ Execute a Cypher query. The router parses the query, extracts shard keys, and ro
 
 | Code | HTTP Status | Meaning |
 |---|---|---|
-| `CYPHER_PARSE_ERROR` | 400 | Unsupported or malformed Cypher |
+| `CYPHER_PARSE_ERROR` | 400 | Empty or unparseable query |
+| `MISSING_SHARD_KEY` | 400 | Write query has no shard key for routing |
 | `SHARD_UNAVAILABLE` | 503 | Target shard is unhealthy |
 | `QUERY_TIMEOUT` | 504 | Query exceeded timeout |
+| `BROADCAST_PARTIAL` | 500 | Schema DDL failed on some shards |
 | `QUERY_ERROR` | 500 | LadybugDB execution error |
 
 ### `GET /health`
@@ -214,21 +216,15 @@ Join a new node to the cluster. Must be called on the leader.
 
 ## Supported Cypher
 
-Loveliness supports a subset of Cypher, sufficient for CRUD and traversal:
+Loveliness passes all Cypher through to LadybugDB — the router only classifies queries for routing, it doesn't validate syntax.
 
-| Supported | Not Supported |
-|---|---|
-| `MATCH (n:Label)` | `MERGE` |
-| `MATCH (n:Label {prop: 'val'})` | `SET` / `DELETE` / `REMOVE` |
-| `MATCH (a)-[:REL]->(b)` | `WITH` / `UNWIND` |
-| `WHERE n.prop = 'val'` | `CALL` / `FOREACH` |
-| `WHERE ... AND ... OR ...` | `OPTIONAL MATCH` |
-| `CREATE (n:Label {props})` | `LOAD CSV` |
-| `CREATE (a)-[:REL]->(b)` | Subqueries |
-| `RETURN ... LIMIT N` | |
-| `ORDER BY` | |
+| Category | Clauses | Routing |
+|---|---|---|
+| **Reads** | `MATCH`, `OPTIONAL MATCH`, `WITH`, `UNWIND`, `CALL`, `RETURN`, `ORDER BY`, `LIMIT` | Shard key → single shard; no key → scatter-gather |
+| **Writes** | `CREATE`, `MERGE`, `SET`, `DELETE`, `DETACH DELETE`, `REMOVE` | Shard key → single shard; no key → **rejected** (`MISSING_SHARD_KEY`) |
+| **Schema DDL** | `CREATE NODE TABLE`, `CREATE REL TABLE`, `DROP TABLE`, `ALTER` | Broadcast to all shards |
 
-Unsupported clauses return a `CYPHER_PARSE_ERROR`.
+**Why are keyless writes rejected?** Scatter-gathering a `SET` or `DELETE` across all shards would mutate data on shards that don't own it. Reads are safe to scatter-gather; writes are not. Always include a shard key (inline property or WHERE equality) in write queries.
 
 ## Project Structure
 

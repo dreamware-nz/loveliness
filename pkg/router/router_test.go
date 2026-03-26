@@ -29,7 +29,6 @@ func TestRouter_SingleShardQuery(t *testing.T) {
 	if result == nil {
 		t.Fatal("expected result, got nil")
 	}
-	// Query should hit exactly one shard.
 	queriedShards := 0
 	for _, s := range shards {
 		ms := s.Store.(*shard.MemoryStore)
@@ -50,11 +49,9 @@ func TestRouter_ScatterGatherQuery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Scatter-gather should return rows from all shards.
 	if len(result.Rows) != 3 {
 		t.Errorf("expected 3 rows (one per shard), got %d", len(result.Rows))
 	}
-	// All shards should have been queried.
 	for i, s := range shards {
 		ms := s.Store.(*shard.MemoryStore)
 		if len(ms.QueryLog()) == 0 {
@@ -67,9 +64,9 @@ func TestRouter_ParseError(t *testing.T) {
 	shards := makeTestShards(3)
 	r := NewRouter(shards, 5*time.Second)
 
-	_, err := r.Execute(context.Background(), "MERGE (n:Foo)")
+	_, err := r.Execute(context.Background(), "")
 	if err == nil {
-		t.Fatal("expected error for unsupported clause")
+		t.Fatal("expected error for empty query")
 	}
 	qe, ok := err.(*QueryError)
 	if !ok {
@@ -84,7 +81,6 @@ func TestRouter_ConsistentShardResolution(t *testing.T) {
 	shards := makeTestShards(3)
 	r := NewRouter(shards, 5*time.Second)
 
-	// Same key should always resolve to same shard.
 	s1 := r.ResolveShardForKey("Alice")
 	s2 := r.ResolveShardForKey("Alice")
 	if s1 != s2 {
@@ -96,19 +92,14 @@ func TestRouter_UnhealthyShard(t *testing.T) {
 	shards := makeTestShards(1)
 	r := NewRouter(shards, 5*time.Second)
 
-	// Make the shard unhealthy by causing a panic in a mock.
-	// Instead, directly test that an unhealthy shard returns error.
 	key := "TestKey"
 	shardID := r.ResolveShardForKey(key)
+	_ = shardID
 
-	// Verify it works when healthy.
 	_, err := r.Execute(context.Background(), "MATCH (p:Person {name: 'TestKey'}) RETURN p")
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	// The shard should have been the target.
-	_ = shardID
 }
 
 func TestRouter_ContextCancellation(t *testing.T) {
@@ -116,16 +107,13 @@ func TestRouter_ContextCancellation(t *testing.T) {
 	r := NewRouter(shards, 5*time.Second)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // Cancel immediately.
+	cancel()
 
-	// Scatter-gather with cancelled context should return partial results.
 	result, err := r.Execute(ctx, "MATCH (p:Person) RETURN p")
 	if err != nil {
-		// Single-shard queries will get context error.
 		return
 	}
 	if result != nil && !result.Partial {
-		// Might complete before cancellation is observed; that's OK.
 		return
 	}
 }
@@ -137,5 +125,88 @@ func TestRouter_EmptyQuery(t *testing.T) {
 	_, err := r.Execute(context.Background(), "")
 	if err == nil {
 		t.Fatal("expected error for empty query")
+	}
+}
+
+// --- Write routing tests ---
+
+func TestRouter_WriteWithShardKey(t *testing.T) {
+	shards := makeTestShards(3)
+	r := NewRouter(shards, 5*time.Second)
+
+	// MERGE with shard key should route to a single shard.
+	result, err := r.Execute(context.Background(), "MERGE (n:Person {name: 'Alice'}) ON CREATE SET n.created = true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result == nil {
+		t.Fatal("expected result")
+	}
+}
+
+func TestRouter_WriteWithoutShardKey_Rejected(t *testing.T) {
+	shards := makeTestShards(3)
+	r := NewRouter(shards, 5*time.Second)
+
+	// SET without shard key should be rejected.
+	_, err := r.Execute(context.Background(), "MATCH (p:Person) SET p.active = true")
+	if err == nil {
+		t.Fatal("expected error for write without shard key")
+	}
+	qe, ok := err.(*QueryError)
+	if !ok {
+		t.Fatalf("expected *QueryError, got %T", err)
+	}
+	if qe.Code != "MISSING_SHARD_KEY" {
+		t.Errorf("expected MISSING_SHARD_KEY, got %s", qe.Code)
+	}
+}
+
+func TestRouter_DeleteWithShardKey(t *testing.T) {
+	shards := makeTestShards(3)
+	r := NewRouter(shards, 5*time.Second)
+
+	result, err := r.Execute(context.Background(), "MATCH (p:Person {name: 'Bob'}) DELETE p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result == nil {
+		t.Fatal("expected result")
+	}
+}
+
+// --- Schema broadcast tests ---
+
+func TestRouter_SchemaBroadcast(t *testing.T) {
+	shards := makeTestShards(3)
+	r := NewRouter(shards, 5*time.Second)
+
+	result, err := r.Execute(context.Background(), "CREATE NODE TABLE Person(name STRING, PRIMARY KEY(name))")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result == nil {
+		t.Fatal("expected result")
+	}
+	// All shards should have received the schema DDL.
+	for i, s := range shards {
+		ms := s.Store.(*shard.MemoryStore)
+		if len(ms.QueryLog()) == 0 {
+			t.Errorf("shard %d did not receive schema DDL", i)
+		}
+	}
+}
+
+func TestRouter_OptionalMatchIsRead(t *testing.T) {
+	shards := makeTestShards(3)
+	r := NewRouter(shards, 5*time.Second)
+
+	// OPTIONAL MATCH without shard key should scatter-gather (not error).
+	result, err := r.Execute(context.Background(), "OPTIONAL MATCH (p:Person) RETURN p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Rows) != 3 {
+		t.Errorf("expected 3 rows from scatter-gather, got %d", len(result.Rows))
 	}
 }
