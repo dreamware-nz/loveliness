@@ -22,8 +22,9 @@ const (
 // extracts enough information to decide where to send the query.
 type ParsedQuery struct {
 	Type      QueryType
-	ShardKeys []string // extracted property values for shard routing
-	Raw       string   // original Cypher string (passed to LadybugDB as-is)
+	ShardKeys []string       // extracted property values for shard routing
+	Raw       string         // original Cypher string (passed to LadybugDB as-is)
+	Traversal *TraversalInfo // non-nil if query contains a relationship traversal
 }
 
 // NeedsScatterGather returns true if no shard key could be extracted,
@@ -89,6 +90,10 @@ func ParseWithSchema(cypher string, reg *schema.Registry) (*ParsedQuery, error) 
 	}
 
 	pq.ShardKeys = dedupe(pq.ShardKeys)
+
+	// Detect traversal patterns for cross-shard resolution.
+	pq.Traversal = extractTraversal(trimmed)
+
 	return pq, nil
 }
 

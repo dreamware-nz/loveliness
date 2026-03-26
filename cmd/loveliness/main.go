@@ -20,6 +20,7 @@ import (
 	"github.com/johnjansen/loveliness/pkg/config"
 	"github.com/johnjansen/loveliness/pkg/logging"
 	"github.com/johnjansen/loveliness/pkg/router"
+	"github.com/johnjansen/loveliness/pkg/schema"
 	"github.com/johnjansen/loveliness/pkg/shard"
 )
 
@@ -72,9 +73,11 @@ func main() {
 	}
 	slog.Info("raft started", "bootstrap", cfg.Bootstrap)
 
-	// Create query router.
+	// Create query router with schema registry for shard key routing
+	// and cross-shard resolution.
 	queryTimeout := time.Duration(cfg.QueryTimeoutMs) * time.Millisecond
-	r := router.NewRouter(shards, queryTimeout)
+	reg := schema.NewRegistry()
+	r := router.NewRouterWithSchema(shards, queryTimeout, reg)
 
 	// Start HTTP server.
 	srv := api.NewServer(r, c, shards, queryTimeout)

@@ -35,7 +35,7 @@ type Result struct {
 //	                         │
 //	                  ┌──────▼───────┐
 //	                  │  Resolve     │──► single shard ──► direct query
-//	                  │  Shard(s)    │
+//	                  │  Shard(s)    │──► cross-shard  ──► multi-hop resolve
 //	                  └──────┬───────┘
 //	                         │
 //	                         └──► all shards ──► scatter-gather ──► merge
@@ -44,6 +44,7 @@ type Router struct {
 	shardCount int
 	timeout    time.Duration
 	schema     *schema.Registry
+	resolver   *Resolver
 }
 
 // NewRouter creates a Router over the given shards.
@@ -55,14 +56,17 @@ func NewRouter(shards []*shard.Shard, timeout time.Duration) *Router {
 	}
 }
 
-// NewRouterWithSchema creates a Router with schema-aware shard key routing.
+// NewRouterWithSchema creates a Router with schema-aware shard key routing
+// and cross-shard resolution.
 func NewRouterWithSchema(shards []*shard.Shard, timeout time.Duration, reg *schema.Registry) *Router {
-	return &Router{
+	r := &Router{
 		shards:     shards,
 		shardCount: len(shards),
 		timeout:    timeout,
 		schema:     reg,
 	}
+	r.resolver = NewResolver(shards, reg, r)
+	return r
 }
 
 // Execute parses a Cypher query, resolves target shards, and executes.
@@ -87,6 +91,18 @@ func (r *Router) Execute(ctx context.Context, cypher string) (*Result, error) {
 
 	if parsed.NeedsScatterGather() {
 		return r.scatterGather(ctx, parsed)
+	}
+
+	// Cross-shard edge creation: write with 2+ shard keys on different shards.
+	if parsed.IsWrite() && len(parsed.ShardKeys) >= 2 && parsed.Traversal != nil && r.resolver != nil {
+		if r.isCrossShard(parsed.ShardKeys) {
+			return r.resolver.HandleCrossShardEdgeCreate(ctx, parsed)
+		}
+	}
+
+	// Cross-shard traversal: read with traversal pattern.
+	if !parsed.IsWrite() && parsed.Traversal != nil && r.resolver != nil && len(parsed.ShardKeys) > 0 {
+		return r.resolver.ResolveTraversal(ctx, parsed)
 	}
 
 	// Route to the shard determined by the first shard key.
@@ -147,6 +163,20 @@ func (r *Router) resolveShard(key string) int {
 // ResolveShardForKey is exported for use by the API layer (write forwarding).
 func (r *Router) ResolveShardForKey(key string) int {
 	return r.resolveShard(key)
+}
+
+// isCrossShard returns true if the shard keys resolve to more than one shard.
+func (r *Router) isCrossShard(keys []string) bool {
+	if len(keys) < 2 {
+		return false
+	}
+	first := r.resolveShard(keys[0])
+	for _, key := range keys[1:] {
+		if r.resolveShard(key) != first {
+			return true
+		}
+	}
+	return false
 }
 
 // queryShard sends a query to a single shard.
