@@ -1,0 +1,54 @@
+services:
+  node1:
+    build: .
+    environment:
+      LOVELINESS_NODE_ID: node-1
+      LOVELINESS_BIND_ADDR: ":8080"
+      LOVELINESS_RAFT_ADDR: "node1:9000"
+      LOVELINESS_GRPC_ADDR: "node1:9001"
+      LOVELINESS_DATA_DIR: /data
+      LOVELINESS_SHARD_COUNT: "3"
+      LOVELINESS_BOOTSTRAP: "true"
+    ports:
+      - "8080:8080"
+    volumes:
+      - node1-data:/data
+
+  node2:
+    build: .
+    environment:
+      LOVELINESS_NODE_ID: node-2
+      LOVELINESS_BIND_ADDR: ":8080"
+      LOVELINESS_RAFT_ADDR: "node2:9000"
+      LOVELINESS_GRPC_ADDR: "node2:9001"
+      LOVELINESS_DATA_DIR: /data
+      LOVELINESS_SHARD_COUNT: "3"
+      LOVELINESS_PEERS: "node1:9000"
+    ports:
+      - "8081:8080"
+    volumes:
+      - node2-data:/data
+    depends_on:
+      - node1
+
+  node3:
+    build: .
+    environment:
+      LOVELINESS_NODE_ID: node-3
+      LOVELINESS_BIND_ADDR: ":8080"
+      LOVELINESS_RAFT_ADDR: "node3:9000"
+      LOVELINESS_GRPC_ADDR: "node3:9001"
+      LOVELINESS_DATA_DIR: /data
+      LOVELINESS_SHARD_COUNT: "3"
+      LOVELINESS_PEERS: "node1:9000"
+    ports:
+      - "8082:8080"
+    volumes:
+      - node3-data:/data
+    depends_on:
+      - node1
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:
