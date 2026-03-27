@@ -158,6 +158,60 @@ LadybugDB runs via CGo (go-ladybug bindings). Each shard has:
 - **Panic recovery** that catches CGo crashes and marks the shard unhealthy instead of crashing the process
 - **Thread pool configuration** (`runtime.NumCPU() / shardCount` threads per shard) to prevent CPU oversubscription
 
+## Core Design Decisions
+
+### Shard keys are declared, not inferred
+
+Every node table has a `PRIMARY KEY` that becomes its shard key. When you run `CREATE NODE TABLE Person(name STRING, age INT64, PRIMARY KEY(name))`, the schema registry records that `Person` is sharded on `name`. All subsequent queries involving `Person` nodes use only the `name` property for routing.
+
+This prevents the critical bug where two queries about the same node route to different shards because they filter on different properties.
+
+### Shards are placed, not replicated everywhere
+
+Each shard has a **primary** (handles reads and writes) and a **replica** (receives replicated writes, can be promoted on failure). A node only opens the LadybugDB instances for shards assigned to it. `pkg/shard/manager.go` watches the Raft FSM's shard map and opens/closes shards as assignments change.
+
+### Queries cross node boundaries transparently
+
+When the router determines a query's target shard is on another node, it forwards the request via TCP+MsgPack (or HTTP fallback). The client sees the same response regardless of which node they hit.
+
+### Write replication is Cypher-level replay
+
+After the primary shard executes a write, the replicator sends the same Cypher statement to the replica node(s). Three consistency levels: `ONE` (fire-and-forget), `QUORUM` (primary + 1 replica, default), `ALL`.
+
+### Rebalancing is leader-driven
+
+When nodes join or leave, the leader computes a migration plan: fix primaries on dead nodes, rebalance overloaded nodes, ensure every shard has a replica on a different node than its primary. `pkg/cluster/rebalancer.go` produces a `[]Move` plan (pure function, testable).
+
+## Raft State Machine
+
+The FSM manages cluster-wide state via four command types:
+
+| Command | Effect |
+|---|---|
+| `CmdAssignShard` | Set shard ownership (primary + replica) |
+| `CmdJoinNode` | Register a node with its addresses |
+| `CmdRemoveNode` | Mark a node as dead |
+| `CmdPromoteReplica` | Promote replica to primary, clear replica slot |
+
+State is snapshotted as JSON and can be restored on any node.
+
+## Component Map
+
+| Package | Responsibility |
+|---|---|
+| `pkg/schema` | Table → shard key mapping, DDL parsing |
+| `pkg/shard` | LadybugDB lifecycle, concurrency control |
+| `pkg/router` | Cypher classification, shard key extraction, routing |
+| `pkg/transport` | TCP+MsgPack inter-node communication with connection pooling |
+| `pkg/replication` | Write fan-out with consistency levels, WAL, catch-up |
+| `pkg/cluster` | Raft FSM, membership, rebalancing, locality |
+| `pkg/bolt` | Neo4j Bolt protocol server (v4.x), PackStream serialization |
+| `pkg/api` | HTTP API, bulk loading, ingest queue, DR |
+| `pkg/backup` | Backup/restore to local disk or S3 |
+| `pkg/ingest` | Log-backed async ingest queue |
+| `pkg/config` | Environment variable configuration |
+| `pkg/logging` | Structured JSON logging |
+
 ## Supported Cypher
 
 Loveliness passes all Cypher through to LadybugDB — the router only classifies queries for routing, it doesn't validate syntax.
