@@ -19,8 +19,18 @@ jobs:
         with:
           go-version: "1.25"
 
-      - name: Install LadybugDB
-        run: curl -fsSL https://install.ladybugdb.com | sh
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Install LadybugDB shared library
+        run: |
+          LBUG_DIR=$(go env GOMODCACHE)/github.com/\!ladybug\!d\!b/go-ladybug@v0.13.1/lib/dynamic/linux-amd64
+          mkdir -p "$LBUG_DIR" /tmp/lbug
+          gh release download --repo LadybugDB/ladybug --pattern "liblbug-linux-x86_64.tar.gz" --dir /tmp/lbug --clobber
+          tar xzf /tmp/lbug/liblbug-linux-x86_64.tar.gz -C "$LBUG_DIR" liblbug.so
+          ls -la "$LBUG_DIR"
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: Build
         run: CGO_ENABLED=1 go build -o loveliness ./cmd/loveliness
@@ -40,12 +50,22 @@ jobs:
         with:
           go-version: "1.25"
 
-      - name: Install LadybugDB
-        run: curl -fsSL https://install.ladybugdb.com | sh
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Install LadybugDB shared library
+        run: |
+          LBUG_DIR=$(go env GOMODCACHE)/github.com/\!ladybug\!d\!b/go-ladybug@v0.13.1/lib/dynamic/linux-amd64
+          mkdir -p "$LBUG_DIR" /tmp/lbug
+          gh release download --repo LadybugDB/ladybug --pattern "liblbug-linux-x86_64.tar.gz" --dir /tmp/lbug --clobber
+          tar xzf /tmp/lbug/liblbug-linux-x86_64.tar.gz -C "$LBUG_DIR" liblbug.so
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
+          version: v1.64.8
+          args: --go=1.24
 
   docker:
     runs-on: ubuntu-latest
