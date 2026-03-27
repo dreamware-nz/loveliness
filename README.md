@@ -116,19 +116,50 @@ Internal cluster communication uses a binary TCP transport with MessagePack seri
 
 ## Neo4j Bolt Protocol Compatibility
 
-Loveliness speaks the **Neo4j Bolt protocol** (v4.x) on port 7687. This means existing Neo4j drivers work with minimal changes — just point them at Loveliness instead of Neo4j.
+Loveliness speaks the **Neo4j Bolt protocol** (v4.x) on port 7687. Existing Neo4j drivers work with minimal changes — just change the connection URL.
+
+Verified end-to-end with the official `neo4j` Python driver (v6.1.0):
+
+```
+=== Neo4j Python Driver → Loveliness Bolt Test ===
+
+1. Testing connectivity...          PASS
+2. Creating schema (IF NOT EXISTS)  PASS
+3. Inserting nodes with $params     PASS (5 nodes)
+4. Inserting edges                  PASS (4 edges)
+5. Querying all people              PASS (5 records)
+6. Querying with parameter          PASS (1 record)
+7. Traversal (who does Alice know?) PASS (2 connections)
+8. Aggregation (AVG)                PASS
+9. Explicit transaction             PASS
+10. Final count                     PASS
+
+ALL TESTS PASSED - Neo4j driver talks to Loveliness!
+```
 
 **Python:**
 ```python
 from neo4j import GraphDatabase
 
-# Just change the URL — same driver, same API
 driver = GraphDatabase.driver("bolt://localhost:7687", auth=("neo4j", "password"))
 
 with driver.session() as session:
+    # Schema — CREATE NODE TABLE IF NOT EXISTS works
+    session.run("CREATE NODE TABLE IF NOT EXISTS Person(name STRING, age INT64, city STRING, PRIMARY KEY(name))")
+
+    # Write with parameter binding
+    session.run("CREATE (p:Person {name: $name, age: $age, city: $city})",
+                name="Alice", age=30, city="Auckland")
+
+    # Read
     result = session.run("MATCH (p:Person {name: $name}) RETURN p.name, p.age", name="Alice")
     for record in result:
         print(record["p.name"], record["p.age"])
+
+    # Traversal
+    result = session.run("MATCH (a:Person {name: $name})-[:KNOWS]->(b) RETURN b.name", name="Alice")
+    for record in result:
+        print("Alice knows", record["b.name"])
 ```
 
 **JavaScript:**
@@ -148,12 +179,14 @@ result, _ := session.Run(ctx, "MATCH (p:Person {name: $name}) RETURN p", map[str
 ```
 
 **What works:**
+- Schema DDL (`CREATE NODE TABLE`, `CREATE REL TABLE`, with `IF NOT EXISTS`)
 - RUN + PULL with batched streaming (including `PULL {n: 100}` for pagination)
 - Parameter binding (`$name`, `$age`) — interpolated into Cypher automatically
 - Explicit transactions (BEGIN/COMMIT/ROLLBACK)
-- RESET for connection recovery
+- RESET for connection recovery after errors
 - ROUTE message for driver routing table discovery
 - GOODBYE for clean disconnect
+- 10+ concurrent driver connections
 
 **What doesn't (yet):**
 - Bolt v5.x features (LOGOFF, TELEMETRY)
@@ -184,7 +217,7 @@ make build
 
 # Start a single-node cluster
 make run
-# → listening on :8080 (HTTP), :9001 (TCP transport)
+# → listening on :8080 (HTTP), :7687 (Bolt), :9001 (TCP transport)
 ```
 
 ### Run a 3-Node Cluster
