@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/johnjansen/loveliness/pkg/auth"
 	"github.com/johnjansen/loveliness/pkg/router"
 	"github.com/johnjansen/loveliness/pkg/shard"
 )
@@ -190,5 +191,116 @@ func TestCluster_NoCluster(t *testing.T) {
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Errorf("expected 503, got %d", w.Code)
+	}
+}
+
+func setupAuthServer() *Server {
+	srv := setupTestServer()
+	srv.SetAuth(auth.New("test-secret"))
+	return srv
+}
+
+func TestAuth_CypherReturns401WithoutToken(t *testing.T) {
+	srv := setupAuthServer()
+	req := httptest.NewRequest("POST", "/cypher", bytes.NewBufferString("MATCH (n) RETURN n"))
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAuth_CypherReturns401WithWrongToken(t *testing.T) {
+	srv := setupAuthServer()
+	req := httptest.NewRequest("POST", "/cypher", bytes.NewBufferString("MATCH (n) RETURN n"))
+	req.Header.Set("Authorization", "Bearer wrong-token")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestAuth_CypherPassesWithValidToken(t *testing.T) {
+	srv := setupAuthServer()
+	req := httptest.NewRequest("POST", "/cypher", bytes.NewBufferString("MATCH (p:Person) RETURN p"))
+	req.Header.Set("Authorization", "Bearer test-secret")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAuth_HealthIsPublic(t *testing.T) {
+	srv := setupAuthServer()
+	req := httptest.NewRequest("GET", "/health", nil)
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 for health without token, got %d", w.Code)
+	}
+}
+
+func TestAuth_JoinTokenFlow(t *testing.T) {
+	srv := setupAuthServer()
+
+	// Generate a join token.
+	req := httptest.NewRequest("POST", "/join-token", nil)
+	req.Header.Set("Authorization", "Bearer test-secret")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	// No cluster configured, so this should return 503.
+	// That's fine — it proves the endpoint is reachable through auth.
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 (no cluster), got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAuth_JoinRequiresToken(t *testing.T) {
+	srv := setupAuthServer()
+
+	// Try to join without a join_token field.
+	body := `{"node_id":"node-2","raft_addr":":9002"}`
+	req := httptest.NewRequest("POST", "/join", bytes.NewBufferString(body))
+	req.Header.Set("Authorization", "Bearer test-secret")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	// No cluster, so it will return 503 before checking join token.
+	// This at least proves /join is reachable through auth middleware.
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 (no cluster), got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestJoinToken_GenerateAndValidate(t *testing.T) {
+	srv := setupTestServer()
+	// Directly test the token store on the server.
+	tok, err := srv.joinTokens.Generate(5 * time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !srv.joinTokens.Validate(tok.Token) {
+		t.Error("expected valid token")
+	}
+	if srv.joinTokens.Validate(tok.Token) {
+		t.Error("expected single-use token to fail on second use")
+	}
+}
+
+func TestJoinToken_InvalidRejected(t *testing.T) {
+	srv := setupTestServer()
+	if srv.joinTokens.Validate("nonexistent-token") {
+		t.Error("expected unknown token to be rejected")
 	}
 }

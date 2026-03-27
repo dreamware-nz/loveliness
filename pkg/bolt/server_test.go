@@ -591,6 +591,85 @@ func TestBoltRelDetection(t *testing.T) {
 	}
 }
 
+func TestBoltAuth_RejectsBadCredentials(t *testing.T) {
+	srv := NewServer("127.0.0.1:0", &mockExecutor{})
+	srv.SetAuth("my-bolt-secret")
+	if err := srv.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Stop()
+
+	conn := boltConnect(t, srv.Addr())
+	defer conn.Close()
+
+	// HELLO with wrong credentials.
+	p := NewPacker()
+	p.PackStructHeader(1, msgHELLO)
+	p.PackMapHeader(2)
+	p.PackString("user_agent")
+	p.PackString("test/1.0")
+	p.PackString("credentials")
+	p.PackString("wrong-secret")
+	sendMessage(conn, p)
+
+	resp := recvMessage(t, conn)
+	if resp.Tag != msgFAILURE {
+		t.Fatalf("expected FAILURE, got 0x%02X", resp.Tag)
+	}
+	meta := resp.Fields[0].(map[string]any)
+	if meta["code"].(string) != "Neo.ClientError.Security.Unauthorized" {
+		t.Errorf("expected Unauthorized error code, got %v", meta["code"])
+	}
+}
+
+func TestBoltAuth_AcceptsValidCredentials(t *testing.T) {
+	srv := NewServer("127.0.0.1:0", &mockExecutor{})
+	srv.SetAuth("my-bolt-secret")
+	if err := srv.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Stop()
+
+	conn := boltConnect(t, srv.Addr())
+	defer conn.Close()
+
+	// HELLO with correct credentials.
+	p := NewPacker()
+	p.PackStructHeader(1, msgHELLO)
+	p.PackMapHeader(2)
+	p.PackString("user_agent")
+	p.PackString("test/1.0")
+	p.PackString("credentials")
+	p.PackString("my-bolt-secret")
+	sendMessage(conn, p)
+
+	resp := recvMessage(t, conn)
+	if resp.Tag != msgSUCCESS {
+		t.Fatalf("expected SUCCESS, got 0x%02X", resp.Tag)
+	}
+}
+
+func TestBoltAuth_NoAuthConfigAcceptsAnything(t *testing.T) {
+	srv := startTestServer(t, &mockExecutor{})
+	// No SetAuth call — auth disabled.
+
+	conn := boltConnect(t, srv.Addr())
+	defer conn.Close()
+
+	// HELLO with no credentials field at all.
+	p := NewPacker()
+	p.PackStructHeader(1, msgHELLO)
+	p.PackMapHeader(1)
+	p.PackString("user_agent")
+	p.PackString("test/1.0")
+	sendMessage(conn, p)
+
+	resp := recvMessage(t, conn)
+	if resp.Tag != msgSUCCESS {
+		t.Fatalf("expected SUCCESS with no auth, got 0x%02X", resp.Tag)
+	}
+}
+
 func TestBoltGoodbye(t *testing.T) {
 	srv := startTestServer(t, &mockExecutor{})
 	conn := boltConnect(t, srv.Addr())
