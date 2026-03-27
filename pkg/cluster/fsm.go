@@ -191,7 +191,7 @@ type fsmSnapshot struct {
 
 func (s *fsmSnapshot) Persist(sink raft.SnapshotSink) error {
 	if _, err := sink.Write(s.data); err != nil {
-		sink.Cancel()
+		_ = sink.Cancel()
 		return err
 	}
 	return sink.Close()

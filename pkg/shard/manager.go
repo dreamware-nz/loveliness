@@ -78,7 +78,7 @@ func (m *Manager) UpdateAssignments(assignments map[int]Assignment) {
 	for id, s := range m.shards {
 		if !want[id] {
 			slog.Info("closing shard", "shard", id, "reason", "reassigned")
-			s.Close()
+			_ = s.Close()
 			delete(m.shards, id)
 		}
 	}

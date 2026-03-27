@@ -178,11 +178,6 @@ func (res *Resolver) resolveFromShards(ctx context.Context, targetsByShard map[i
 		}
 	}
 
-	type resolveResult struct {
-		key  string
-		data map[string]any
-	}
-
 	var mu sync.Mutex
 	resolved := make(map[string]map[string]any)
 	var wg sync.WaitGroup

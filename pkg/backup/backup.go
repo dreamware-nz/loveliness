@@ -54,9 +54,9 @@ func (m *Manager) CreateBackup(w io.Writer, shards []*shard.Shard, walSeq uint64
 	}
 
 	gw := gzip.NewWriter(w)
-	defer gw.Close()
+	defer func() { _ = gw.Close() }()
 	tw := tar.NewWriter(gw)
-	defer tw.Close()
+	defer func() { _ = tw.Close() }()
 
 	// Snapshot each shard database file.
 	for _, s := range shards {
@@ -93,13 +93,17 @@ func (m *Manager) CreateBackup(w io.Writer, shards []*shard.Shard, walSeq uint64
 
 	// Write manifest as the last entry.
 	manifestData, _ := json.MarshalIndent(manifest, "", "  ")
-	tw.WriteHeader(&tar.Header{
+	if err := tw.WriteHeader(&tar.Header{
 		Name:    "manifest.json",
 		Size:    int64(len(manifestData)),
 		Mode:    0640,
 		ModTime: time.Now(),
-	})
-	tw.Write(manifestData)
+	}); err != nil {
+		return nil, fmt.Errorf("write manifest header: %w", err)
+	}
+	if _, err := tw.Write(manifestData); err != nil {
+		return nil, fmt.Errorf("write manifest data: %w", err)
+	}
 
 	return manifest, nil
 }
@@ -111,7 +115,7 @@ func (m *Manager) RestoreBackup(r io.Reader) (*Manifest, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open gzip: %w", err)
 	}
-	defer gr.Close()
+	defer func() { _ = gr.Close() }()
 	tr := tar.NewReader(gr)
 
 	var manifest *Manifest
@@ -174,12 +178,14 @@ func addFileToTar(tw *tar.Writer, srcPath, archiveName string) (int64, error) {
 		return 0, err
 	}
 
-	tw.WriteHeader(&tar.Header{
+	if err := tw.WriteHeader(&tar.Header{
 		Name:    archiveName,
 		Size:    stat.Size(),
 		Mode:    int64(stat.Mode()),
 		ModTime: stat.ModTime(),
-	})
+	}); err != nil {
+		return 0, err
+	}
 
 	if _, err := io.Copy(tw, f); err != nil {
 		return 0, err

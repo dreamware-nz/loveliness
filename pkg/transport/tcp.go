@@ -108,7 +108,7 @@ func (s *TCPServer) handleConn(conn net.Conn) {
 		default:
 		}
 
-		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 		msgType, payload, err := ReadFrame(reader)
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
@@ -119,24 +119,24 @@ func (s *TCPServer) handleConn(conn net.Conn) {
 
 		switch msgType {
 		case MsgPing:
-			WriteFrame(writer, MsgPong, nil)
-			writer.Flush()
+			_ = WriteFrame(writer, MsgPong, nil)
+			_ = writer.Flush()
 
 		case MsgQuery:
 			var req QueryRequest
 			if err := Decode(payload, &req); err != nil {
 				resp := QueryResponse{Error: fmt.Sprintf("decode error: %v", err)}
-				WriteFrame(writer, MsgError, resp)
-				writer.Flush()
+				_ = WriteFrame(writer, MsgError, resp)
+				_ = writer.Flush()
 				continue
 			}
 			s.handleQuery(writer, &req)
-			writer.Flush()
+			_ = writer.Flush()
 
 		default:
 			resp := QueryResponse{Error: fmt.Sprintf("unknown message type: %d", msgType)}
-			WriteFrame(writer, MsgError, resp)
-			writer.Flush()
+			_ = WriteFrame(writer, MsgError, resp)
+			_ = writer.Flush()
 		}
 	}
 }
@@ -145,14 +145,14 @@ func (s *TCPServer) handleQuery(w *bufio.Writer, req *QueryRequest) {
 	sh := s.shards.GetShard(req.ShardID)
 	if sh == nil {
 		resp := QueryResponse{Error: fmt.Sprintf("shard %d not hosted on this node", req.ShardID)}
-		WriteFrame(w, MsgError, resp)
+		_ = WriteFrame(w, MsgError, resp)
 		return
 	}
 
 	result, err := sh.Query(req.Cypher)
 	if err != nil {
 		resp := QueryResponse{Error: err.Error()}
-		WriteFrame(w, MsgError, resp)
+		_ = WriteFrame(w, MsgError, resp)
 		return
 	}
 
@@ -162,5 +162,5 @@ func (s *TCPServer) handleQuery(w *bufio.Writer, req *QueryRequest) {
 	}
 	resp.Stats.CompileTimeMs = result.Stats.CompileTimeMs
 	resp.Stats.ExecTimeMs = result.Stats.ExecTimeMs
-	WriteFrame(w, MsgResult, resp)
+	_ = WriteFrame(w, MsgResult, resp)
 }

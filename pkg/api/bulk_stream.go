@@ -322,7 +322,7 @@ func parseFlushSize(v string) int {
 		return defaultFlushThreshold
 	}
 	var n int
-	fmt.Sscanf(v, "%d", &n)
+	_, _ = fmt.Sscanf(v, "%d", &n)
 	if n < 1000 {
 		return defaultFlushThreshold
 	}

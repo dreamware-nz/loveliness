@@ -171,8 +171,8 @@ func (pa *PartitionAnalyzer) collectTopology(
 			fromCol := fmt.Sprintf("a.%s", shardKeyProp)
 			toCol := fmt.Sprintf("b.%s", shardKeyProp)
 			for _, row := range edgeResp.Rows {
-				fromVal, _ := row[fromCol]
-				toVal, _ := row[toCol]
+				fromVal := row[fromCol]
+				toVal := row[toCol]
 				if fromVal != nil && toVal != nil {
 					edges = append(edges, edgeInfo{
 						from: fmt.Sprintf("%v", fromVal),

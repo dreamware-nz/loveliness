@@ -391,22 +391,6 @@ func benchShortestPath() benchResult {
 	})
 }
 
-func benchAllShortestPaths() benchResult {
-	return runBench("all_shortest_paths", *iters/4, func() (int, error) {
-		a := nodeName(rand.Intn(*nodes))
-		b := nodeName(rand.Intn(*nodes))
-		for b == a {
-			b = nodeName(rand.Intn(*nodes))
-		}
-		q := fmt.Sprintf("MATCH (a:Person {name: '%s'})-[r:KNOWS* ALL SHORTEST 1..6]->(b:Person {name: '%s'}) RETURN length(r)", a, b)
-		res, _, err := cypher(q)
-		if err != nil {
-			return 0, err
-		}
-		return len(res.Rows), nil
-	})
-}
-
 func benchMutualFriends() benchResult {
 	return runBench("mutual_friends", *iters/2, func() (int, error) {
 		a := nodeName(rand.Intn(*nodes))
