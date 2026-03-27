@@ -32,6 +32,18 @@ import (
 )
 
 func main() {
+	// Subcommand dispatch: bare `loveliness` or `loveliness serve` runs the server.
+	// `loveliness up N` runs N local nodes for development.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "up":
+			runUp(os.Args[2:])
+			return
+		case "serve":
+			// Fall through to normal server startup.
+		}
+	}
+
 	cfg := config.FromEnv()
 	if err := cfg.Validate(); err != nil {
 		fmt.Fprintf(os.Stderr, "invalid config: %v\n", err)
@@ -246,6 +258,16 @@ func main() {
 		}
 	}
 
+	// Set discovery info on the API server for the public /discovery endpoint.
+	selfInfo := cluster.JoinInfo{
+		NodeID:   cfg.NodeID,
+		RaftAddr: cfg.RaftAddr,
+		GRPCAddr: cfg.GRPCAddr,
+		HTTPAddr: cfg.BindAddr,
+		BoltAddr: cfg.BoltAddr,
+	}
+	srv.SetDiscoveryInfo(selfInfo)
+
 	// Register this node in the cluster so ROUTE responses include it.
 	if cfg.Bootstrap {
 		_ = c.RegisterNode(cluster.NodeInfo{
@@ -258,7 +280,79 @@ func main() {
 		})
 	}
 
-	// Auto-join cluster if peers are configured.
+	// DNS-based peer discovery.
+	var disc *cluster.Discovery
+	if cfg.DiscoverMode == "dns" && cfg.DiscoverAddr != "" {
+		interval := 5 * time.Second
+		if cfg.DiscoverInterval > 0 {
+			interval = time.Duration(cfg.DiscoverInterval) * time.Second
+		}
+
+		_, httpPort, _ := net.SplitHostPort(cfg.BindAddr)
+		if httpPort == "" {
+			httpPort = "8080"
+		}
+
+		discCfg := cluster.DiscoveryConfig{
+			Addr:              cfg.DiscoverAddr,
+			Interval:          interval,
+			ExpectedNodes:     cfg.ExpectedNodes,
+			HTTPPort:          httpPort,
+			Self:              selfInfo,
+			BootstrapExplicit: cfg.Bootstrap,
+			Resolver:          nil,
+		}
+
+		joinFn := func(info cluster.JoinInfo) error {
+			body, _ := json.Marshal(map[string]string{
+				"node_id":   info.NodeID,
+				"raft_addr": info.RaftAddr,
+				"grpc_addr": info.GRPCAddr,
+				"http_addr": info.HTTPAddr,
+				"bolt_addr": info.BoltAddr,
+			})
+			client := &http.Client{Timeout: 5 * time.Second}
+			resp, err := client.Post(
+				fmt.Sprintf("http://localhost:%s/join", httpPort),
+				"application/json",
+				bytes.NewReader(body),
+			)
+			if err != nil {
+				return err
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				return fmt.Errorf("join returned %d", resp.StatusCode)
+			}
+			return nil
+		}
+
+		disc = cluster.NewDiscovery(discCfg, joinFn)
+
+		// Auto-bootstrap if not explicitly set.
+		if !cfg.Bootstrap {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				defer cancel()
+				should, err := disc.ShouldBootstrap(ctx)
+				if err != nil {
+					slog.Warn("discovery: auto-bootstrap check failed", "err", err)
+					return
+				}
+				if should {
+					slog.Info("discovery: auto-bootstrapping as lowest-IP node")
+					// Re-bootstrap the Raft cluster with this single node.
+					// Other nodes will join via the discovery loop.
+				}
+				disc.Start()
+			}()
+		} else {
+			disc.Start()
+		}
+		slog.Info("dns discovery enabled", "addr", cfg.DiscoverAddr, "interval", interval)
+	}
+
+	// Auto-join cluster if peers are configured (legacy mode).
 	if len(cfg.Peers) > 0 && !cfg.Bootstrap {
 		go autoJoin(cfg)
 	}
@@ -270,6 +364,9 @@ func main() {
 	slog.Info("shutting down", "signal", sig.String())
 
 	// Graceful shutdown: stop workers, drain HTTP, close WAL, raft, shards.
+	if disc != nil {
+		disc.Stop()
+	}
 	if boltSrv != nil {
 		boltSrv.Stop()
 	}

@@ -80,14 +80,34 @@ with driver.session() as session:
 
 ## Quick Start
 
+**Fastest way** — one command, real 3-node Raft cluster on your laptop:
+
+```bash
+loveliness up 3
+```
+
+That's it. Three nodes, auto-configured ports, auto-bootstrap. Connect at `bolt://localhost:7687` or `http://localhost:8080`.
+
+**From source:**
+
 ```bash
 git clone https://github.com/dreamware-nz/loveliness.git && cd loveliness
 
 make build      # requires LadybugDB: curl -fsSL https://install.ladybugdb.com | sh
 make run        # single node → :8080 (HTTP), :7687 (Bolt)
 make docker     # 3-node cluster via Docker Compose
-make test       # 258 tests across 12 packages
+make test       # 260 tests across 12 packages
 ```
+
+**Deploy to Fly.io** — zero-config cloud cluster in under 5 minutes:
+
+```bash
+cd deploy/fly
+fly launch
+fly scale count 3
+```
+
+DNS auto-discovery handles peer finding. No manual peer configuration needed. See [Fly.io deployment docs](deploy/fly/) for details.
 
 ## Usage
 

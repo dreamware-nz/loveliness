@@ -1,0 +1,39 @@
+app = "loveliness"
+primary_region = "sjc"
+
+[build]
+  dockerfile = "../../Dockerfile"
+
+[env]
+  LOVELINESS_DISCOVER = "dns"
+  LOVELINESS_DISCOVER_ADDR = "loveliness.internal"
+  LOVELINESS_SHARD_COUNT = "3"
+  LOVELINESS_BIND_ADDR = "0.0.0.0:8080"
+  LOVELINESS_BOLT_ADDR = "0.0.0.0:7687"
+
+# Static config goes here (shard count, bind addresses, discovery mode).
+# Dynamic config dependent on FLY_PRIVATE_IP goes in start.sh.
+
+[mounts]
+  source = "loveliness_data"
+  destination = "/data"
+
+[[services]]
+  internal_port = 8080
+  protocol = "tcp"
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+  [[services.http_checks]]
+    path = "/health"
+    interval = 5000
+    timeout = 2000
+
+[[services]]
+  internal_port = 7687
+  protocol = "tcp"
+  [[services.ports]]
+    port = 7687
+
+# Raft (:9000) and gRPC (:9001) communicate over Fly's 6PN private network
+# using FLY_PRIVATE_IP. They do NOT need public [[services]] entries.

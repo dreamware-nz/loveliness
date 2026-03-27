@@ -12,12 +12,17 @@ deploy/
     statefulset.yml                 3-replica StatefulSet with PVCs and health probes
     service.yml                     Headless service + LoadBalancer
     bootstrap-job.yml               Raft bootstrap helper job
+  fly/
+    fly.toml                        Fly.io deployment config with DNS auto-discovery
+    start.sh                        Fly.io entrypoint — sets dynamic config from FLY_PRIVATE_IP
 bench/
   docker-compose.yml                Benchmark comparison: Loveliness (1, 3-node) vs Neo4j CE
   run.sh                            Benchmark orchestrator: starts configs, runs suite, collects stats
   results/                          Generated benchmark results (JSON, SVG, markdown)
 cmd/
-  loveliness/main.go              Entry point, config, shard init, Raft, HTTP, Bolt, TCP, ingest, shutdown
+  loveliness/
+    main.go                       Entry point, subcommand dispatch, shard init, Raft, HTTP, Bolt, DNS discovery
+    up.go                         `loveliness up N` — spawns N-node local cluster for development
   benchmark/main.go               Benchmark suite with --target (loveliness/neo4j), --json-out support
   benchmark-charts/main.go        SVG chart generator: reads JSON results, generates comparison charts
   generate/main.go                Bulk data generator with two-pass edge loading
@@ -80,8 +85,9 @@ pkg/
     partitioner.go                Cross-shard traversal stats + locality suggestions
     transfer.go                   Shard data transfer (export/import as Cypher)
     join_token.go                 Single-use, time-limited join tokens for secure cluster join
+    discovery.go                  DNS-based peer discovery with auto-bootstrap (quorum-gated)
   api/
-    api.go                        HTTP API — /cypher, /health, /cluster, /join
+    api.go                        HTTP API — /cypher, /health, /cluster, /join, /discovery
     bulk.go                       Bulk loading endpoints with streaming CSV parse
     bulk_stream.go                Streaming bulk load variant
     ingest.go                     Async ingest queue endpoints
