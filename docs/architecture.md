@@ -209,8 +209,36 @@ State is snapshotted as JSON and can be restored on any node.
 | `pkg/api` | HTTP API, bulk loading, ingest queue, DR |
 | `pkg/backup` | Backup/restore to local disk or S3 |
 | `pkg/ingest` | Log-backed async ingest queue |
+| `pkg/tlsutil` | Shared TLS config: server TLS, mTLS, client TLS |
 | `pkg/config` | Environment variable configuration |
 | `pkg/logging` | Structured JSON logging |
+
+## TLS and Trust Boundaries
+
+```mermaid
+graph LR
+    subgraph External["Client → Node (Server TLS)"]
+        C[Client] -->|TLS| HTTP[HTTP :8080]
+        C -->|TLS| Bolt[Bolt :7687]
+    end
+
+    subgraph Internal["Node → Node (mTLS)"]
+        N1[Node 1] <-->|mTLS| N2[Node 2]
+        N2 <-->|mTLS| N3[Node 3]
+    end
+```
+
+Three trust boundaries, each with its own TLS model:
+
+| Boundary | Transports | TLS type | What it proves |
+|---|---|---|---|
+| **Client → Node** | HTTP `:8080`, Bolt `:7687` | Server TLS | Server is who it claims to be |
+| **Node → Node** | TCP `:9001` (MsgPack), Raft | mTLS | Both sides hold certs signed by the cluster CA |
+| **Admin → Node** | `/join`, `/backup`, `/restore` | Server TLS + auth | Encrypted channel + identity (see auth) |
+
+**mTLS for inter-node traffic:** all nodes share a cluster CA. Each node presents a certificate signed by that CA. Connections from unknown certificates are rejected at the TLS handshake — before any application data is exchanged. This is the foundation for secure cluster join: a node can only communicate with the cluster if it holds a valid cert.
+
+Configuration: `LOVELINESS_TLS_CERT`, `LOVELINESS_TLS_KEY`, `LOVELINESS_TLS_CA`, `LOVELINESS_TLS_MODE`. See [Configuration](configuration.md#tls).
 
 ## Supported Cypher
 

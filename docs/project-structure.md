@@ -63,6 +63,8 @@ pkg/
     queue.go                      Log-backed ingest queue with durable job state
     worker.go                     Sequential background worker for async bulk loading
     shard_adapter.go              Bridge between ingest worker and shard/router
+  tlsutil/
+    tlsutil.go                    Shared TLS config: server TLS, mTLS, client TLS
   cluster/
     fsm.go                        Raft FSM — shard map, node membership, assignments
     cluster.go                    Raft lifecycle — bootstrap, join, failover, leadership

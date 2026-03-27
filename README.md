@@ -106,6 +106,24 @@ kubectl apply -f deploy/k8s/statefulset.yml
 
 StatefulSet with headless service, persistent volumes, health probes. Details: [docs/kubernetes.md](docs/kubernetes.md)
 
+## TLS
+
+All transports support TLS. Three env vars enable it:
+
+```bash
+export LOVELINESS_TLS_CERT=/path/to/server.crt
+export LOVELINESS_TLS_KEY=/path/to/server.key
+export LOVELINESS_TLS_CA=/path/to/ca.crt   # enables mTLS for inter-node traffic
+export LOVELINESS_TLS_MODE=required
+```
+
+| Boundary | What's encrypted | TLS type |
+|---|---|---|
+| Client → Node | HTTP `:8080`, Bolt `:7687` | Server TLS |
+| Node → Node | TCP transport `:9001`, Raft | mTLS (cluster CA) |
+
+Without these vars, all listeners run plaintext (dev default). Details: [docs/configuration.md](docs/configuration.md#tls)
+
 ## Documentation
 
 | Doc | Contents |
@@ -114,7 +132,7 @@ StatefulSet with headless service, persistent volumes, health probes. Details: [
 | [Benchmarks](docs/benchmarks.md) | Performance numbers, comparisons, transport benchmarks |
 | [Bolt Protocol](docs/bolt.md) | Neo4j driver compatibility, examples, test results |
 | [API Reference](docs/api.md) | HTTP endpoints, bulk loading, ingest queue, DR, consistency |
-| [Configuration](docs/configuration.md) | Environment variables, shard count guidance |
+| [Configuration](docs/configuration.md) | Environment variables, TLS, shard count guidance |
 | [Kubernetes](docs/kubernetes.md) | StatefulSet deployment, scaling, backup to S3 |
 | [Project Structure](docs/project-structure.md) | Package layout and file descriptions |
 | [Contributing](CONTRIBUTING.md) | Development setup, PR guidelines |
