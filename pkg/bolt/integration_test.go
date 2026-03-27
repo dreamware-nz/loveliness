@@ -155,7 +155,9 @@ func TestFullBoltSession(t *testing.T) {
 	p.PackString("MATCH (n) RETURN COUNT(n)")
 	p.PackMapHeader(0)
 	p.PackMapHeader(0)
-	sendMessage(conn, p)
+	if err := sendMessage(conn, p); err != nil {
+		t.Fatal("send RUN count:", err)
+	}
 
 	resp = recvMessage(t, conn)
 	assertTag(t, resp, msgSUCCESS, "RUN count")
@@ -165,7 +167,9 @@ func TestFullBoltSession(t *testing.T) {
 	p.PackMapHeader(1)
 	p.PackString("n")
 	p.PackInt(-1)
-	sendMessage(conn, p)
+	if err := sendMessage(conn, p); err != nil {
+		t.Fatal("send PULL count:", err)
+	}
 
 	rec := recvMessage(t, conn)
 	assertTag(t, rec, msgRECORD, "count RECORD")
@@ -187,7 +191,9 @@ func TestFullBoltSession(t *testing.T) {
 	p.PackString("name")
 	p.PackString("Alice")
 	p.PackMapHeader(0) // extra
-	sendMessage(conn, p)
+	if err := sendMessage(conn, p); err != nil {
+		t.Fatal("send RUN params:", err)
+	}
 
 	resp = recvMessage(t, conn)
 	assertTag(t, resp, msgSUCCESS, "RUN with params")
