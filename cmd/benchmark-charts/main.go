@@ -116,15 +116,15 @@ func generateBarChartSVG(title, unit string, labels []string, values []float64, 
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %d %d" font-family="system-ui,-apple-system,sans-serif">`, totalWidth, totalHeight))
+	fmt.Fprintf(&sb, `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %d %d" font-family="system-ui,-apple-system,sans-serif">`, totalWidth, totalHeight)
 	sb.WriteString("\n")
 
 	// Background.
-	sb.WriteString(fmt.Sprintf(`  <rect width="%d" height="%d" fill="#ffffff"/>`, totalWidth, totalHeight))
+	fmt.Fprintf(&sb, `  <rect width="%d" height="%d" fill="#ffffff"/>`, totalWidth, totalHeight)
 	sb.WriteString("\n")
 
 	// Title.
-	sb.WriteString(fmt.Sprintf(`  <text x="%d" y="30" font-size="16" font-weight="bold" fill="#1a1a2e">%s</text>`, labelWidth, title))
+	fmt.Fprintf(&sb, `  <text x="%d" y="30" font-size="16" font-weight="bold" fill="#1a1a2e">%s</text>`, labelWidth, title)
 	sb.WriteString("\n")
 
 	// Bars.
