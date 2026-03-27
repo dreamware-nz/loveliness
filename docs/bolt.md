@@ -54,12 +54,18 @@ result, _ := session.Run(ctx, "MATCH (p:Person {name: $name}) RETURN p", map[str
 - 10+ concurrent driver connections with interleaved sessions
 - Rapid-fire queries (100+ per session without reconnecting)
 
-## What Doesn't (Yet)
+## Recently Added
 
-- Bolt v5.x features (LOGOFF, TELEMETRY)
-- Node/Relationship graph type wrapping (results come back as flat rows, not graph objects)
-- Multi-database selection
-- Bookmark-based causal consistency
+- **Node/Relationship graph type wrapping** — results with `_label`/`_labels` keys are returned as Bolt Node structs (tag `0x4E`); results with `_src`/`_dst`/`_type` keys are returned as Bolt Relationship structs (tag `0x52`). Synthetic IDs are generated via FNV-64a hash for stable identity.
+- **Bolt v5.x message support** — LOGOFF (re-authentication) and TELEMETRY (driver metrics) messages are accepted.
+- **Multi-database parameter** — `db` parameter accepted in RUN extra map and BEGIN extra map (single-database: value is ignored but drivers won't error).
+- **Bookmark tracking** — PULL SUCCESS returns a `bookmark` string; BEGIN and RUN accept `bookmarks` in extra map for causal consistency signaling.
+
+## Limitations
+
+- No real multi-database support (single database, `db` param is accepted but ignored)
+- Bookmarks are connection-scoped sequence numbers, not cluster-wide WAL positions
+- Path graph type not yet returned (paths come back as individual nodes/relationships)
 
 ## Configuration
 

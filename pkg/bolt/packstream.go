@@ -272,6 +272,10 @@ func (p *Packer) PackValue(v any) {
 			p.PackString(k)
 			p.PackValue(v)
 		}
+	case *nodeWrapper:
+		PackNode(p, val.ID, []string{val.Label}, val.Props)
+	case *relWrapper:
+		PackRelationship(p, val.ID, val.StartID, val.EndID, val.Type, val.Props)
 	default:
 		// Fallback: convert to string.
 		p.PackString(fmt.Sprintf("%v", val))

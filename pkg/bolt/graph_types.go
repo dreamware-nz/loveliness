@@ -21,7 +21,6 @@ func PackNode(p *Packer, id int64, labels []string, props map[string]any) {
 		p.PackString(l)
 	}
 	packProps(p, props)
-	// element_id (string representation of id).
 	p.PackString(intToElementID(id))
 }
 
@@ -54,7 +53,6 @@ func packProps(p *Packer, props map[string]any) {
 		p.PackMapHeader(0)
 		return
 	}
-	// Filter out internal properties.
 	clean := make(map[string]any, len(props))
 	for k, v := range props {
 		// Strip "n." or "r." prefixes from column names.
@@ -74,7 +72,6 @@ func packProps(p *Packer, props map[string]any) {
 	}
 }
 
-// intToElementID converts a numeric ID to a string element ID.
 func intToElementID(id int64) string {
 	return "4:" + itoa(id)
 }
@@ -103,30 +100,183 @@ func itoa(i int64) string {
 }
 
 // SyntheticNodeID generates a stable int64 ID from a string key.
-// Used when LadybugDB doesn't expose internal IDs.
 func SyntheticNodeID(label, key string) int64 {
 	h := fnv.New64a()
 	h.Write([]byte(label))
 	h.Write([]byte{0})
 	h.Write([]byte(key))
-	return int64(h.Sum64() & 0x7FFFFFFFFFFFFFFF) // keep positive
+	return int64(h.Sum64() & 0x7FFFFFFFFFFFFFFF)
 }
 
-// RowToFields converts a LadybugDB result row (map[string]any with column
-// names as keys) into an ordered field list matching the column order.
-// If a column looks like a full node (has label + properties), it's packed
-// as a Bolt Node struct.
+// SyntheticRelID generates a stable int64 ID for a relationship.
+func SyntheticRelID(relType, fromKey, toKey string) int64 {
+	h := fnv.New64a()
+	h.Write([]byte(relType))
+	h.Write([]byte{0})
+	h.Write([]byte(fromKey))
+	h.Write([]byte{0})
+	h.Write([]byte(toKey))
+	return int64(h.Sum64() & 0x7FFFFFFFFFFFFFFF)
+}
+
+// RowToFields converts a result row into an ordered field list, wrapping
+// values as Bolt graph types (Node, Relationship) when detected.
+//
+// Detection heuristics:
+//   - A column with no dot (e.g. "p" not "p.name") whose value is a map
+//     with a "_label" or "_labels" key → Node
+//   - A column whose value is a map with "_src" and "_dst" keys → Relationship
+//   - Otherwise returned as-is (scalar, map, list)
 func RowToFields(columns []string, row map[string]any) []any {
 	fields := make([]any, len(columns))
 	for i, col := range columns {
-		fields[i] = row[col]
+		val := row[col]
+		fields[i] = maybeWrapGraphType(col, val)
 	}
 	return fields
 }
 
-// DetectNodeReturn checks if a column name suggests a full node return
-// (e.g., "p" from "RETURN p" where p is a node variable).
+// maybeWrapGraphType checks if a value looks like a node or relationship
+// and returns a packable graph type wrapper. Otherwise returns the value as-is.
+func maybeWrapGraphType(col string, val any) any {
+	m, ok := val.(map[string]any)
+	if !ok {
+		return val
+	}
+
+	// Detect Node: map with "_label" key, or bare column name (no dot).
+	if label, ok := m["_label"]; ok {
+		return wrapNode(label.(string), m)
+	}
+	if labels, ok := m["_labels"]; ok {
+		if ls, ok := labels.([]any); ok && len(ls) > 0 {
+			if l, ok := ls[0].(string); ok {
+				return wrapNode(l, m)
+			}
+		}
+	}
+
+	// Detect Relationship: map with "_src" and "_dst" and "_type".
+	if _, hasSrc := m["_src"]; hasSrc {
+		if _, hasDst := m["_dst"]; hasDst {
+			return wrapRelationship(m)
+		}
+	}
+
+	// Bare variable name (no dot) with a map value that has an "_id" field
+	// could be a node — LadybugDB returns nodes as property maps.
+	if !strings.Contains(col, ".") && len(m) > 0 {
+		if id, ok := m["_id"]; ok {
+			_ = id // has internal ID
+			return wrapNodeFromProps(col, m)
+		}
+	}
+
+	return val
+}
+
+// nodeWrapper is a sentinel type that packRecord can detect.
+type nodeWrapper struct {
+	ID    int64
+	Label string
+	Props map[string]any
+}
+
+type relWrapper struct {
+	ID      int64
+	StartID int64
+	EndID   int64
+	Type    string
+	Props   map[string]any
+}
+
+func wrapNode(label string, m map[string]any) *nodeWrapper {
+	props := make(map[string]any, len(m))
+	var pk string
+	for k, v := range m {
+		if strings.HasPrefix(k, "_") {
+			if k == "_id" || k == "_key" {
+				if s, ok := v.(string); ok {
+					pk = s
+				}
+			}
+			continue
+		}
+		props[k] = v
+	}
+	// Use the first string property as PK fallback if no _id/_key.
+	if pk == "" {
+		for _, v := range props {
+			if s, ok := v.(string); ok {
+				pk = s
+				break
+			}
+		}
+	}
+	return &nodeWrapper{
+		ID:    SyntheticNodeID(label, pk),
+		Label: label,
+		Props: props,
+	}
+}
+
+func wrapNodeFromProps(col string, m map[string]any) *nodeWrapper {
+	props := make(map[string]any, len(m))
+	var pk string
+	for k, v := range m {
+		if strings.HasPrefix(k, "_") {
+			if k == "_id" || k == "_key" {
+				if s, ok := v.(string); ok {
+					pk = s
+				}
+			}
+			continue
+		}
+		props[k] = v
+	}
+	if pk == "" {
+		for _, v := range props {
+			if s, ok := v.(string); ok {
+				pk = s
+				break
+			}
+		}
+	}
+	label := strings.ToUpper(col[:1]) + col[1:]
+	return &nodeWrapper{
+		ID:    SyntheticNodeID(label, pk),
+		Label: label,
+		Props: props,
+	}
+}
+
+func wrapRelationship(m map[string]any) *relWrapper {
+	props := make(map[string]any, len(m))
+	var relType, src, dst string
+	for k, v := range m {
+		switch k {
+		case "_type":
+			relType, _ = v.(string)
+		case "_src":
+			src, _ = v.(string)
+		case "_dst":
+			dst, _ = v.(string)
+		default:
+			if !strings.HasPrefix(k, "_") {
+				props[k] = v
+			}
+		}
+	}
+	return &relWrapper{
+		ID:      SyntheticRelID(relType, src, dst),
+		StartID: SyntheticNodeID("", src),
+		EndID:   SyntheticNodeID("", dst),
+		Type:    relType,
+		Props:   props,
+	}
+}
+
+// DetectNodeReturn checks if a column name suggests a full node return.
 func DetectNodeReturn(col string) bool {
-	// If the column has no dot (not p.name, just p), it might be a node.
 	return !strings.Contains(col, ".")
 }

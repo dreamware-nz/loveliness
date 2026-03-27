@@ -137,6 +137,10 @@ type connection struct {
 	cursor  int
 	qid     int64
 	nextQID int64
+
+	// Bookmark tracking for causal consistency.
+	lastBookmark string
+	bookmarkSeq  int64
 }
 
 func (c *connection) negotiate() error {
@@ -227,6 +231,10 @@ func (c *connection) processMessage() error {
 		return nil
 	case msgROUTE:
 		return c.handleRoute(msg)
+	case msgLOGOFF:
+		return c.handleLogoff(msg)
+	case msgTELEMETRY:
+		return c.handleTelemetry(msg)
 	default:
 		return c.sendFailure("Neo.ClientError.Request.Invalid",
 			fmt.Sprintf("unknown message tag 0x%02X", msg.Tag))
@@ -268,6 +276,21 @@ func (c *connection) handleRun(msg *BoltStruct) error {
 	if len(msg.Fields) >= 2 {
 		if m, ok := msg.Fields[1].(map[string]any); ok {
 			params = m
+		}
+	}
+
+	// Accept extra map (field 2) with db, bookmarks, tx_timeout, tx_metadata, mode.
+	// Single-database: we ignore db selection but accept it for compatibility.
+	if len(msg.Fields) >= 3 {
+		if extra, ok := msg.Fields[2].(map[string]any); ok {
+			if bm, ok := extra["bookmarks"]; ok {
+				if bmList, ok := bm.([]any); ok && len(bmList) > 0 {
+					if s, ok := bmList[len(bmList)-1].(string); ok {
+						c.lastBookmark = s
+					}
+				}
+			}
+			_ = extra["db"]
 		}
 	}
 
@@ -338,6 +361,8 @@ func (c *connection) handlePull(msg *BoltStruct) error {
 		meta["qid"] = c.qid
 	} else {
 		meta["has_more"] = false
+		c.bookmarkSeq++
+		meta["bookmark"] = fmt.Sprintf("loveliness:v1:tx%d", c.bookmarkSeq)
 		c.state = stateReady
 		c.rows = nil
 		c.columns = nil
@@ -363,8 +388,22 @@ func (c *connection) handleBegin(msg *BoltStruct) error {
 	if c.state == stateFailed {
 		return c.sendIgnored()
 	}
-	// We don't have real transaction support across shards yet,
-	// but we accept BEGIN to be protocol-compatible.
+	// Accept extra map with db, bookmarks, tx_timeout, tx_metadata, mode, etc.
+	// We don't enforce any of these but we accept them for compatibility.
+	if len(msg.Fields) >= 1 {
+		if extra, ok := msg.Fields[0].(map[string]any); ok {
+			// Accept bookmarks — track last received for causal consistency.
+			if bm, ok := extra["bookmarks"]; ok {
+				if bmList, ok := bm.([]any); ok && len(bmList) > 0 {
+					if s, ok := bmList[len(bmList)-1].(string); ok {
+						c.lastBookmark = s
+					}
+				}
+			}
+			// Accept db param — single-database, so we ignore the value.
+			_ = extra["db"]
+		}
+	}
 	return c.sendSuccess(nil)
 }
 
@@ -414,6 +453,19 @@ func (c *connection) handleRoute(msg *BoltStruct) error {
 			},
 		},
 	})
+}
+
+func (c *connection) handleLogoff(msg *BoltStruct) error {
+	// LOGOFF (Bolt 5.1+) — de-authenticate the connection.
+	// We accept it and return to authentication state for re-auth.
+	c.state = stateAuthentication
+	return c.sendSuccess(nil)
+}
+
+func (c *connection) handleTelemetry(msg *BoltStruct) error {
+	// TELEMETRY (Bolt 5.4+) — driver usage metrics.
+	// Accept and acknowledge; we don't collect telemetry.
+	return c.sendSuccess(nil)
 }
 
 func (c *connection) sendSuccess(meta map[string]any) error {

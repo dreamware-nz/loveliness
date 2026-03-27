@@ -12,8 +12,10 @@ const (
 	msgBEGIN   byte = 0x11
 	msgCOMMIT  byte = 0x12
 	msgROLLBACK byte = 0x13
-	msgRESET   byte = 0x0F
-	msgROUTE   byte = 0x66
+	msgRESET    byte = 0x0F
+	msgROUTE    byte = 0x66
+	msgLOGOFF   byte = 0x6B
+	msgTELEMETRY byte = 0x54
 
 	// Server messages.
 	msgSUCCESS byte = 0x70

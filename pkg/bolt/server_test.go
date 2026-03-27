@@ -287,6 +287,310 @@ func TestBoltReset(t *testing.T) {
 	}
 }
 
+func TestBoltLogoff(t *testing.T) {
+	srv := startTestServer(t, &mockExecutor{})
+	conn := boltConnect(t, srv.Addr())
+	defer conn.Close()
+
+	// HELLO.
+	p := NewPacker()
+	p.PackStructHeader(1, msgHELLO)
+	p.PackMapHeader(0)
+	sendMessage(conn, p)
+	recvMessage(t, conn)
+
+	// LOGOFF — should succeed and allow re-auth.
+	p.Reset()
+	p.PackStructHeader(0, msgLOGOFF)
+	sendMessage(conn, p)
+
+	resp := recvMessage(t, conn)
+	if resp.Tag != msgSUCCESS {
+		t.Fatalf("expected SUCCESS on LOGOFF, got 0x%02X", resp.Tag)
+	}
+
+	// After LOGOFF, LOGON should work to re-authenticate.
+	p.Reset()
+	p.PackStructHeader(1, msgLOGON)
+	p.PackMapHeader(0)
+	sendMessage(conn, p)
+
+	resp = recvMessage(t, conn)
+	if resp.Tag != msgSUCCESS {
+		t.Fatalf("expected SUCCESS on LOGON after LOGOFF, got 0x%02X", resp.Tag)
+	}
+}
+
+func TestBoltTelemetry(t *testing.T) {
+	srv := startTestServer(t, &mockExecutor{})
+	conn := boltConnect(t, srv.Addr())
+	defer conn.Close()
+
+	// HELLO.
+	p := NewPacker()
+	p.PackStructHeader(1, msgHELLO)
+	p.PackMapHeader(0)
+	sendMessage(conn, p)
+	recvMessage(t, conn)
+
+	// TELEMETRY — should be accepted silently.
+	p.Reset()
+	p.PackStructHeader(1, msgTELEMETRY)
+	p.PackInt(1) // api_type
+	sendMessage(conn, p)
+
+	resp := recvMessage(t, conn)
+	if resp.Tag != msgSUCCESS {
+		t.Fatalf("expected SUCCESS on TELEMETRY, got 0x%02X", resp.Tag)
+	}
+}
+
+func TestBoltBookmarks(t *testing.T) {
+	exec := &mockExecutor{
+		columns: []string{"n"},
+		rows:    []map[string]any{{"n": int64(1)}},
+	}
+	srv := startTestServer(t, exec)
+	conn := boltConnect(t, srv.Addr())
+	defer conn.Close()
+
+	// HELLO.
+	p := NewPacker()
+	p.PackStructHeader(1, msgHELLO)
+	p.PackMapHeader(0)
+	sendMessage(conn, p)
+	recvMessage(t, conn)
+
+	// RUN + PULL — should get bookmark in final SUCCESS.
+	p.Reset()
+	p.PackStructHeader(3, msgRUN)
+	p.PackString("MATCH (n) RETURN n")
+	p.PackMapHeader(0)
+	p.PackMapHeader(0)
+	sendMessage(conn, p)
+	recvMessage(t, conn) // RUN SUCCESS
+
+	p.Reset()
+	p.PackStructHeader(1, msgPULL)
+	p.PackMapHeader(1)
+	p.PackString("n")
+	p.PackInt(-1)
+	sendMessage(conn, p)
+
+	recvMessage(t, conn) // RECORD
+
+	done := recvMessage(t, conn)
+	if done.Tag != msgSUCCESS {
+		t.Fatalf("expected SUCCESS, got 0x%02X", done.Tag)
+	}
+	meta := done.Fields[0].(map[string]any)
+	bm, ok := meta["bookmark"].(string)
+	if !ok || bm == "" {
+		t.Fatal("expected bookmark in PULL SUCCESS metadata")
+	}
+	if bm != "loveliness:v1:tx1" {
+		t.Errorf("expected loveliness:v1:tx1, got %s", bm)
+	}
+
+	// BEGIN with bookmark — should be accepted.
+	p.Reset()
+	p.PackStructHeader(1, msgBEGIN)
+	p.PackMapHeader(1)
+	p.PackString("bookmarks")
+	p.PackListHeader(1)
+	p.PackString(bm)
+	sendMessage(conn, p)
+
+	resp := recvMessage(t, conn)
+	if resp.Tag != msgSUCCESS {
+		t.Fatalf("expected SUCCESS on BEGIN with bookmark, got 0x%02X", resp.Tag)
+	}
+}
+
+func TestBoltMultiDatabaseParam(t *testing.T) {
+	exec := &mockExecutor{
+		columns: []string{"n"},
+		rows:    []map[string]any{{"n": int64(1)}},
+	}
+	srv := startTestServer(t, exec)
+	conn := boltConnect(t, srv.Addr())
+	defer conn.Close()
+
+	// HELLO.
+	p := NewPacker()
+	p.PackStructHeader(1, msgHELLO)
+	p.PackMapHeader(0)
+	sendMessage(conn, p)
+	recvMessage(t, conn)
+
+	// RUN with db in extra map — should be accepted.
+	p.Reset()
+	p.PackStructHeader(3, msgRUN)
+	p.PackString("MATCH (n) RETURN n")
+	p.PackMapHeader(0)
+	p.PackMapHeader(1)
+	p.PackString("db")
+	p.PackString("neo4j")
+	sendMessage(conn, p)
+
+	resp := recvMessage(t, conn)
+	if resp.Tag != msgSUCCESS {
+		t.Fatalf("expected SUCCESS on RUN with db param, got 0x%02X", resp.Tag)
+	}
+
+	// BEGIN with db param.
+	p.Reset()
+	p.PackStructHeader(1, msgPULL)
+	p.PackMapHeader(1)
+	p.PackString("n")
+	p.PackInt(-1)
+	sendMessage(conn, p)
+	recvMessage(t, conn) // RECORD
+	recvMessage(t, conn) // SUCCESS
+
+	p.Reset()
+	p.PackStructHeader(1, msgBEGIN)
+	p.PackMapHeader(1)
+	p.PackString("db")
+	p.PackString("mydb")
+	sendMessage(conn, p)
+
+	resp = recvMessage(t, conn)
+	if resp.Tag != msgSUCCESS {
+		t.Fatalf("expected SUCCESS on BEGIN with db, got 0x%02X", resp.Tag)
+	}
+}
+
+func TestBoltGraphTypeWrapping(t *testing.T) {
+	// Test that nodeWrapper and relWrapper get packed as Bolt Node/Relationship structs.
+	p := NewPacker()
+
+	// Pack a nodeWrapper via PackValue.
+	node := &nodeWrapper{
+		ID:    42,
+		Label: "Person",
+		Props: map[string]any{"name": "Alice", "age": int64(30)},
+	}
+	p.PackValue(node)
+
+	// Unpack and verify it's a struct with tag 0x4E (Node).
+	u := NewUnpacker(bytes.NewReader(p.Bytes()))
+	v, err := u.Unpack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, ok := v.(*BoltStruct)
+	if !ok {
+		t.Fatalf("expected BoltStruct, got %T", v)
+	}
+	if s.Tag != tagNode {
+		t.Fatalf("expected Node tag 0x4E, got 0x%02X", s.Tag)
+	}
+	if len(s.Fields) != 4 {
+		t.Fatalf("expected 4 fields, got %d", len(s.Fields))
+	}
+	if s.Fields[0].(int64) != 42 {
+		t.Errorf("expected ID=42, got %v", s.Fields[0])
+	}
+	labels := s.Fields[1].([]any)
+	if len(labels) != 1 || labels[0].(string) != "Person" {
+		t.Errorf("expected labels=[Person], got %v", labels)
+	}
+
+	// Pack a relWrapper via PackValue.
+	p.Reset()
+	rel := &relWrapper{
+		ID:      99,
+		StartID: 42,
+		EndID:   43,
+		Type:    "KNOWS",
+		Props:   map[string]any{"since": int64(2020)},
+	}
+	p.PackValue(rel)
+
+	u = NewUnpacker(bytes.NewReader(p.Bytes()))
+	v, err = u.Unpack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, ok = v.(*BoltStruct)
+	if !ok {
+		t.Fatalf("expected BoltStruct, got %T", v)
+	}
+	if s.Tag != tagRelationship {
+		t.Fatalf("expected Relationship tag 0x52, got 0x%02X", s.Tag)
+	}
+	if len(s.Fields) != 8 {
+		t.Fatalf("expected 8 fields, got %d", len(s.Fields))
+	}
+	if s.Fields[0].(int64) != 99 {
+		t.Errorf("expected ID=99, got %v", s.Fields[0])
+	}
+	if s.Fields[3].(string) != "KNOWS" {
+		t.Errorf("expected type=KNOWS, got %v", s.Fields[3])
+	}
+}
+
+func TestBoltNodeDetection(t *testing.T) {
+	// Test that RowToFields wraps nodes and relationships correctly.
+	columns := []string{"p"}
+	row := map[string]any{
+		"p": map[string]any{
+			"_label": "Person",
+			"_id":    "alice",
+			"name":   "Alice",
+			"age":    int64(30),
+		},
+	}
+
+	fields := RowToFields(columns, row)
+	if len(fields) != 1 {
+		t.Fatalf("expected 1 field, got %d", len(fields))
+	}
+
+	nw, ok := fields[0].(*nodeWrapper)
+	if !ok {
+		t.Fatalf("expected *nodeWrapper, got %T", fields[0])
+	}
+	if nw.Label != "Person" {
+		t.Errorf("expected label=Person, got %s", nw.Label)
+	}
+	if nw.Props["name"] != "Alice" {
+		t.Errorf("expected name=Alice, got %v", nw.Props["name"])
+	}
+	// Internal keys should be stripped.
+	if _, has := nw.Props["_label"]; has {
+		t.Error("_label should not be in props")
+	}
+	if _, has := nw.Props["_id"]; has {
+		t.Error("_id should not be in props")
+	}
+}
+
+func TestBoltRelDetection(t *testing.T) {
+	columns := []string{"r"}
+	row := map[string]any{
+		"r": map[string]any{
+			"_type": "KNOWS",
+			"_src":  "alice",
+			"_dst":  "bob",
+			"since": int64(2020),
+		},
+	}
+
+	fields := RowToFields(columns, row)
+	rw, ok := fields[0].(*relWrapper)
+	if !ok {
+		t.Fatalf("expected *relWrapper, got %T", fields[0])
+	}
+	if rw.Type != "KNOWS" {
+		t.Errorf("expected type=KNOWS, got %s", rw.Type)
+	}
+	if rw.Props["since"] != int64(2020) {
+		t.Errorf("expected since=2020, got %v", rw.Props["since"])
+	}
+}
+
 func TestBoltGoodbye(t *testing.T) {
 	srv := startTestServer(t, &mockExecutor{})
 	conn := boltConnect(t, srv.Addr())
