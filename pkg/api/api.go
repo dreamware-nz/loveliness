@@ -44,6 +44,9 @@ type Server struct {
 
 	// auth is the optional token authenticator.
 	auth *auth.TokenAuth
+
+	// joinTokens manages single-use, time-limited cluster join tokens.
+	joinTokens *cluster.TokenStore
 }
 
 // NewServer creates a new API server.
@@ -55,6 +58,7 @@ func NewServer(r *router.Router, c *cluster.Cluster, shards []*shard.Shard, reg 
 		schema:     reg,
 		timeout:    timeout,
 		refTracker: make(map[int]map[string]bool),
+		joinTokens: cluster.NewTokenStore(),
 	}
 }
 
@@ -78,6 +82,7 @@ func (s *Server) Handler() http.Handler {
 	protected.HandleFunc("POST /bulk/edges/stream", s.handleBulkEdgesStream)
 	protected.HandleFunc("GET /cluster", s.handleCluster)
 	protected.HandleFunc("POST /join", s.handleJoin)
+	protected.HandleFunc("POST /join-token", s.handleJoinToken)
 	s.registerDRRoutes(protected)
 	s.registerIngestRoutes(protected)
 
@@ -243,10 +248,38 @@ func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
 
 // joinRequest is the JSON body for POST /join.
 type joinRequest struct {
-	NodeID   string `json:"node_id"`
-	RaftAddr string `json:"raft_addr"`
-	GRPCAddr string `json:"grpc_addr"`
-	HTTPAddr string `json:"http_addr"`
+	NodeID    string `json:"node_id"`
+	RaftAddr  string `json:"raft_addr"`
+	GRPCAddr  string `json:"grpc_addr"`
+	HTTPAddr  string `json:"http_addr"`
+	JoinToken string `json:"join_token"`
+}
+
+func (s *Server) handleJoinToken(w http.ResponseWriter, r *http.Request) {
+	if s.cluster == nil {
+		writeError(w, http.StatusServiceUnavailable, "NO_CLUSTER", "node is not part of a cluster", 0)
+		return
+	}
+	if !s.cluster.IsLeader() {
+		writeError(w, http.StatusBadRequest, "NOT_LEADER",
+			fmt.Sprintf("not the leader; leader is at %s", s.cluster.LeaderAddr()), 0)
+		return
+	}
+
+	// Default TTL: 10 minutes.
+	ttl := 10 * time.Minute
+	tok, err := s.joinTokens.Generate(ttl)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "TOKEN_ERROR", err.Error(), 0)
+		return
+	}
+
+	slog.Info("join token generated",
+		"expires_at", tok.ExpiresAt.Format(time.RFC3339),
+		"source_ip", r.RemoteAddr,
+	)
+
+	writeJSON(w, http.StatusOK, tok)
 }
 
 func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
@@ -270,8 +303,32 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate join token (required when auth is enabled).
+	if s.auth != nil && s.auth.Enabled() {
+		if req.JoinToken == "" {
+			slog.Warn("join rejected: missing join token",
+				"node_id", req.NodeID,
+				"source_ip", r.RemoteAddr,
+			)
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "join_token is required", 0)
+			return
+		}
+		if !s.joinTokens.Validate(req.JoinToken) {
+			slog.Warn("join rejected: invalid or expired join token",
+				"node_id", req.NodeID,
+				"source_ip", r.RemoteAddr,
+			)
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "invalid or expired join token", 0)
+			return
+		}
+	}
+
 	if err := s.cluster.Join(req.NodeID, req.RaftAddr); err != nil {
-		slog.Error("join failed", "node_id", req.NodeID, "err", err)
+		slog.Error("join failed",
+			"node_id", req.NodeID,
+			"source_ip", r.RemoteAddr,
+			"err", err,
+		)
 		writeError(w, http.StatusInternalServerError, "JOIN_ERROR", err.Error(), 0)
 		return
 	}
@@ -285,6 +342,12 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 	}); err != nil {
 		slog.Error("register node failed", "node_id", req.NodeID, "err", err)
 	}
+
+	slog.Info("node joined cluster",
+		"node_id", req.NodeID,
+		"raft_addr", req.RaftAddr,
+		"source_ip", r.RemoteAddr,
+	)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "joined", "node_id": req.NodeID})
 }

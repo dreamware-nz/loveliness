@@ -60,6 +60,29 @@ The username is ignored — only the password (credentials) is checked against t
 
 **Disabled by default:** when `LOVELINESS_AUTH_TOKEN` is empty, all endpoints are open (dev mode).
 
+### Secure Cluster Join
+
+When auth is enabled, joining a cluster requires a single-use, time-limited join token:
+
+```bash
+# 1. On the leader: generate a join token (valid 10 minutes, single-use)
+TOKEN=$(curl -s -H "Authorization: Bearer $AUTH_TOKEN" -X POST leader:8080/join-token | jq -r .token)
+
+# 2. On the new node: join using the token
+curl -s -H "Authorization: Bearer $AUTH_TOKEN" -X POST leader:8080/join -d '{
+  "node_id": "node-4",
+  "raft_addr": "node4:9000",
+  "grpc_addr": "node4:9001",
+  "http_addr": "node4:8080",
+  "join_token": "'"$TOKEN"'"
+}'
+```
+
+- Tokens are **single-use** — consumed on successful join
+- Tokens are **time-limited** — expire after 10 minutes
+- All join attempts (success, rejection) are **audit logged** with node ID and source IP
+- Without auth enabled, join tokens are not required (dev mode)
+
 ## TLS
 
 Set `LOVELINESS_TLS_CERT` + `LOVELINESS_TLS_KEY` and `LOVELINESS_TLS_MODE=required` to enable TLS on all listeners (HTTP, Bolt, inter-node TCP).

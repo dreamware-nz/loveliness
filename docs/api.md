@@ -126,17 +126,22 @@ S3 scheduled backups are configured via environment variables (see [Configuratio
 ## Cluster Management
 
 ```bash
-# Health check
+# Health check (always public, no auth required)
 curl -s localhost:8080/health | jq
 
 # Cluster status
 curl -s localhost:8080/cluster | jq
 
-# Add a node
+# Generate a join token (leader only, single-use, 10 min TTL)
+curl -s -X POST localhost:8080/join-token
+# → {"token": "a1b2c3...", "expires_at": "2026-03-27T12:10:00Z"}
+
+# Add a node with join token
 curl -s localhost:8080/join -d '{
   "node_id": "node-4",
   "raft_addr": "node4:9000",
   "grpc_addr": "node4:9001",
-  "http_addr": "node4:8080"
+  "http_addr": "node4:8080",
+  "join_token": "a1b2c3..."
 }'
 ```
