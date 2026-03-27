@@ -205,7 +205,7 @@ State is snapshotted as JSON and can be restored on any node.
 | `pkg/transport` | TCP+MsgPack inter-node communication with connection pooling |
 | `pkg/replication` | Write fan-out with consistency levels, WAL, catch-up |
 | `pkg/cluster` | Raft FSM, membership, rebalancing, locality |
-| `pkg/bolt` | Neo4j Bolt protocol server (v4.x), PackStream serialization |
+| `pkg/bolt` | Neo4j Bolt protocol server (v4.x), PackStream serialization, cluster-aware ROUTE |
 | `pkg/api` | HTTP API, bulk loading, ingest queue, DR |
 | `pkg/backup` | Backup/restore to local disk or S3 |
 | `pkg/ingest` | Log-backed async ingest queue |

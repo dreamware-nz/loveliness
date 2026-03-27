@@ -142,6 +142,7 @@ curl -s localhost:8080/join -d '{
   "raft_addr": "node4:9000",
   "grpc_addr": "node4:9001",
   "http_addr": "node4:8080",
+  "bolt_addr": "node4:7687",
   "join_token": "a1b2c3..."
 }'
 ```

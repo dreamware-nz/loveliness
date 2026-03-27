@@ -61,11 +61,17 @@ Full benchmarks and comparisons with Neo4j, Memgraph, TigerGraph, Neptune, and J
 
 ## Neo4j Driver Compatibility
 
-Speaks Bolt v4.x on `:7687`. Use any Neo4j driver — just change the URL.
+Speaks Bolt v4.x on `:7687`. Use any Neo4j driver — just change the URL. Both `bolt://` (direct) and `neo4j://` (routing with automatic failover) are supported.
 
 ```python
 from neo4j import GraphDatabase
+
+# Direct connection
 driver = GraphDatabase.driver("bolt://localhost:7687")
+
+# Routing + automatic failover (recommended for clusters)
+driver = GraphDatabase.driver("neo4j://localhost:7687")
+
 with driver.session() as session:
     result = session.run("MATCH (p:Person {name: $name}) RETURN p.name, p.age", name="Alice")
 ```

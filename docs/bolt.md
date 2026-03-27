@@ -56,6 +56,7 @@ result, _ := session.Run(ctx, "MATCH (p:Person {name: $name}) RETURN p", map[str
 
 ## Recently Added
 
+- **Cluster-aware ROUTE** — ROUTE responses return all alive cluster nodes: the Raft leader as the WRITE server, all nodes as READ and ROUTE servers. Neo4j drivers using `neo4j://` auto-discover the cluster and handle failover. TTL is 30 seconds for fast topology refresh. Single-node mode falls back to returning only the local address.
 - **Node/Relationship graph type wrapping** — results with `_label`/`_labels` keys are returned as Bolt Node structs (tag `0x4E`); results with `_src`/`_dst`/`_type` keys are returned as Bolt Relationship structs (tag `0x52`). Synthetic IDs are generated via FNV-64a hash for stable identity.
 - **Bolt v5.x message support** — LOGOFF (re-authentication) and TELEMETRY (driver metrics) messages are accepted.
 - **Multi-database parameter** — `db` parameter accepted in RUN extra map and BEGIN extra map (single-database: value is ignored but drivers won't error).
