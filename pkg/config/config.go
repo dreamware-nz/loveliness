@@ -48,6 +48,10 @@ type Config struct {
 	// Empty string disables the Bolt server.
 	BoltAddr string
 
+	// AuthToken is the shared API token for HTTP and Bolt authentication.
+	// Empty string disables authentication (dev mode).
+	AuthToken string
+
 	// TLS configuration.
 	TLSCert       string // path to server certificate
 	TLSKey        string // path to server private key
@@ -141,6 +145,9 @@ func FromEnv() Config {
 	}
 	if v := os.Getenv("LOVELINESS_BOLT_ADDR"); v != "" {
 		c.BoltAddr = v
+	}
+	if v := os.Getenv("LOVELINESS_AUTH_TOKEN"); v != "" {
+		c.AuthToken = v
 	}
 	if v := os.Getenv("LOVELINESS_TLS_CERT"); v != "" {
 		c.TLSCert = v

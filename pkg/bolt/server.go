@@ -2,6 +2,7 @@ package bolt
 
 import (
 	"bytes"
+	"crypto/subtle"
 	"crypto/tls"
 	"encoding/binary"
 	"fmt"
@@ -30,6 +31,7 @@ type Server struct {
 	executor  QueryExecutor
 	addr      string
 	tlsConfig *tls.Config
+	authToken string // shared secret; empty = no auth
 	running   atomic.Bool
 	wg        sync.WaitGroup
 }
@@ -45,6 +47,11 @@ func NewServer(addr string, executor QueryExecutor) *Server {
 // SetTLS configures TLS for the Bolt listener.
 func (s *Server) SetTLS(cfg *tls.Config) {
 	s.tlsConfig = cfg
+}
+
+// SetAuth configures token authentication for the Bolt server.
+func (s *Server) SetAuth(token string) {
+	s.authToken = token
 }
 
 // Start begins accepting connections.
@@ -106,9 +113,10 @@ func (s *Server) handleConnection(conn net.Conn) {
 	defer conn.Close()
 
 	c := &connection{
-		conn:     conn,
-		executor: s.executor,
-		state:    stateNegotiation,
+		conn:      conn,
+		executor:  s.executor,
+		authToken: s.authToken,
+		state:     stateNegotiation,
 	}
 
 	if err := c.negotiate(); err != nil {
@@ -140,9 +148,10 @@ const (
 )
 
 type connection struct {
-	conn     net.Conn
-	executor QueryExecutor
-	state    connState
+	conn      net.Conn
+	executor  QueryExecutor
+	authToken string
+	state     connState
 
 	// Current result set for streaming via PULL.
 	columns []string
@@ -255,8 +264,20 @@ func (c *connection) processMessage() error {
 }
 
 func (c *connection) handleHello(msg *BoltStruct) error {
-	// HELLO {user_agent, ...auth...}
-	// Accept any auth — we don't have authentication yet.
+	// HELLO {user_agent, scheme, principal, credentials, ...}
+	if c.authToken != "" {
+		authenticated := false
+		if len(msg.Fields) >= 1 {
+			if extra, ok := msg.Fields[0].(map[string]any); ok {
+				if creds, ok := extra["credentials"].(string); ok {
+					authenticated = subtle.ConstantTimeCompare([]byte(c.authToken), []byte(creds)) == 1
+				}
+			}
+		}
+		if !authenticated {
+			return c.sendFailure("Neo.ClientError.Security.Unauthorized", "invalid credentials")
+		}
+	}
 	c.state = stateReady
 	return c.sendSuccess(map[string]any{
 		"server":        "Loveliness/1.0.0",

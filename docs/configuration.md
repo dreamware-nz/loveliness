@@ -22,11 +22,43 @@ All configuration is via environment variables.
 | `LOVELINESS_BACKUP_INTERVAL_MIN` | `0` | Minutes between scheduled backups (0 = disabled) |
 | `LOVELINESS_BACKUP_RETENTION` | `3` | Number of backups to retain |
 | `LOVELINESS_BACKUP_DIR` | *(empty)* | Local directory for backups (when S3 is not configured) |
+| `LOVELINESS_AUTH_TOKEN` | *(empty)* | Shared API token for HTTP and Bolt auth (empty = no auth) |
 | `LOVELINESS_TLS_CERT` | *(empty)* | Path to server TLS certificate |
 | `LOVELINESS_TLS_KEY` | *(empty)* | Path to server TLS private key |
 | `LOVELINESS_TLS_CA` | *(empty)* | Path to CA certificate (enables mTLS for inter-node traffic) |
 | `LOVELINESS_TLS_MODE` | `off` | `required` (all TLS), `optional` (TLS available, plaintext accepted), `off` |
 | `LOVELINESS_TLS_CLIENT_AUTH` | `require` | mTLS client auth: `require`, `request`, `none` |
+
+## Authentication
+
+Set `LOVELINESS_AUTH_TOKEN` to enable token authentication across HTTP and Bolt.
+
+**HTTP API:** all endpoints except `/health` require `Authorization: Bearer <token>`.
+
+```bash
+# Authenticated request
+LOVELINESS_AUTH_TOKEN=my-secret ./loveliness &
+
+# Works
+curl -s -H "Authorization: Bearer my-secret" localhost:8080/cypher -d "MATCH (n) RETURN n"
+
+# 401 Unauthorized
+curl -s localhost:8080/cypher -d "MATCH (n) RETURN n"
+
+# Health is always public (for load balancer probes)
+curl -s localhost:8080/health
+```
+
+**Bolt protocol:** pass the token as the `credentials` field in the driver auth:
+
+```python
+from neo4j import GraphDatabase
+driver = GraphDatabase.driver("bolt://localhost:7687", auth=("neo4j", "my-secret"))
+```
+
+The username is ignored — only the password (credentials) is checked against the token.
+
+**Disabled by default:** when `LOVELINESS_AUTH_TOKEN` is empty, all endpoints are open (dev mode).
 
 ## TLS
 

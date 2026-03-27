@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/johnjansen/loveliness/pkg/auth"
 	"github.com/johnjansen/loveliness/pkg/cluster"
 	"github.com/johnjansen/loveliness/pkg/ingest"
 	"github.com/johnjansen/loveliness/pkg/router"
@@ -40,6 +41,9 @@ type Server struct {
 
 	// ingestQueue is the optional log-backed ingest queue for async bulk loading.
 	ingestQueue *ingest.Queue
+
+	// auth is the optional token authenticator.
+	auth *auth.TokenAuth
 }
 
 // NewServer creates a new API server.
@@ -58,19 +62,33 @@ type contextKey string
 
 const requestIDKey contextKey = "request_id"
 
+// SetAuth sets the token authenticator for protected endpoints.
+func (s *Server) SetAuth(a *auth.TokenAuth) {
+	s.auth = a
+}
+
 // Handler returns the HTTP handler with all routes registered.
 func (s *Server) Handler() http.Handler {
+	// Protected routes — require auth when enabled.
+	protected := http.NewServeMux()
+	protected.HandleFunc("POST /cypher", s.handleCypher)
+	protected.HandleFunc("POST /bulk/nodes", s.handleBulkNodes)
+	protected.HandleFunc("POST /bulk/edges", s.handleBulkEdges)
+	protected.HandleFunc("POST /bulk/nodes/stream", s.handleBulkNodesStream)
+	protected.HandleFunc("POST /bulk/edges/stream", s.handleBulkEdgesStream)
+	protected.HandleFunc("GET /cluster", s.handleCluster)
+	protected.HandleFunc("POST /join", s.handleJoin)
+	s.registerDRRoutes(protected)
+	s.registerIngestRoutes(protected)
+
+	// Top-level mux: health is public, everything else goes through auth.
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /cypher", s.handleCypher)
-	mux.HandleFunc("POST /bulk/nodes", s.handleBulkNodes)
-	mux.HandleFunc("POST /bulk/edges", s.handleBulkEdges)
-	mux.HandleFunc("POST /bulk/nodes/stream", s.handleBulkNodesStream)
-	mux.HandleFunc("POST /bulk/edges/stream", s.handleBulkEdgesStream)
 	mux.HandleFunc("GET /health", s.handleHealth)
-	mux.HandleFunc("GET /cluster", s.handleCluster)
-	mux.HandleFunc("POST /join", s.handleJoin)
-	s.registerDRRoutes(mux)
-	s.registerIngestRoutes(mux)
+	if s.auth != nil && s.auth.Enabled() {
+		mux.Handle("/", s.auth.Middleware(protected))
+	} else {
+		mux.Handle("/", protected)
+	}
 	return s.withMiddleware(mux)
 }
 

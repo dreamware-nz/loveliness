@@ -63,6 +63,8 @@ pkg/
     queue.go                      Log-backed ingest queue with durable job state
     worker.go                     Sequential background worker for async bulk loading
     shard_adapter.go              Bridge between ingest worker and shard/router
+  auth/
+    auth.go                       Token-based authentication: HTTP middleware + Bolt credential check
   tlsutil/
     tlsutil.go                    Shared TLS config: server TLS, mTLS, client TLS
   cluster/

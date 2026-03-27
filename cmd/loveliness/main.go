@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/johnjansen/loveliness/pkg/api"
+	"github.com/johnjansen/loveliness/pkg/auth"
 	"github.com/johnjansen/loveliness/pkg/backup"
 	boltpkg "github.com/johnjansen/loveliness/pkg/bolt"
 	"github.com/johnjansen/loveliness/pkg/cluster"
@@ -182,9 +183,16 @@ func main() {
 	ingestWorker.Start()
 	slog.Info("ingest queue initialized", "dir", ingestDir)
 
+	// Set up authentication.
+	tokenAuth := auth.New(cfg.AuthToken)
+	if tokenAuth.Enabled() {
+		slog.Info("authentication enabled")
+	}
+
 	// Start HTTP server with DR extensions.
 	srv := api.NewServer(r, c, shards, reg, queryTimeout)
 	srv.SetDR(dr)
+	srv.SetAuth(tokenAuth)
 	srv.SetIngestQueue(ingestQueue)
 	httpServer := &http.Server{
 		Addr:         cfg.BindAddr,
@@ -227,6 +235,9 @@ func main() {
 				os.Exit(1)
 			}
 			boltSrv.SetTLS(boltTLS)
+		}
+		if cfg.AuthToken != "" {
+			boltSrv.SetAuth(cfg.AuthToken)
 		}
 		if err := boltSrv.Start(); err != nil {
 			slog.Error("bolt server failed", "err", err)
