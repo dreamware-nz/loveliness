@@ -124,6 +124,50 @@ kubectl apply -f deploy/k8s/statefulset.yml
 
 StatefulSet with headless service, persistent volumes, health probes. Details: [docs/kubernetes.md](docs/kubernetes.md)
 
+## High Availability
+
+### What happens when a node goes down?
+
+Loveliness uses Raft consensus with tight timeouts (1s heartbeat, 1s election). When a node fails:
+
+1. **Leader failure**: a new leader is elected within ~1-2 seconds. Writes fail during the election window, then resume on the new leader.
+2. **Follower failure**: reads and writes continue on remaining nodes. Shards that had replicas on the failed node become degraded but remain queryable from their primary.
+3. **Connected node failure**: your client gets a connection error. Reconnect to any other node in the cluster to continue.
+
+Every node can serve both reads and writes. Reads execute locally via scatter-gather (the node forwards sub-queries to peer nodes holding remote shards). Writes to a non-leader node return a `NOT_LEADER` error that includes the current leader's address, so your client knows where to retry.
+
+### Client-side HA setup
+
+Put a load balancer (HAProxy, Nginx, cloud LB) in front of all nodes and use the health endpoint for routing:
+
+```
+GET /health → {"status": "ok", "role": "leader", "shards": {...}}
+```
+
+| Setup | How |
+|---|---|
+| **Load balancer (recommended)** | Point your client at the LB. Health check: `GET /health` returns 200 when the node is healthy. Works for both HTTP `:8080` and Bolt `:7687`. |
+| **Client-side retry** | Connect to any node. On connection failure, round-robin through the other nodes. All nodes accept all queries. |
+| **Kubernetes** | The headless service (`deploy/k8s/service.yml`) already provides DNS-based discovery. The LoadBalancer service handles external traffic. |
+
+Example HAProxy health check:
+
+```
+backend loveliness
+    option httpchk GET /health
+    http-check expect status 200
+    server node1 10.0.0.1:8080 check
+    server node2 10.0.0.2:8080 check
+    server node3 10.0.0.3:8080 check
+```
+
+For Bolt connections, use the same LB on port 7687. Neo4j drivers should use `bolt://` (direct), not `neo4j://` (routing), because Loveliness handles query routing internally — every node already knows how to reach every shard.
+
+### Current limitations
+
+- **Bolt routing protocol**: the `ROUTE` message returns only the connected node's address, so Neo4j driver auto-discovery (`neo4j://` scheme) won't discover other cluster members. Use `bolt://` with a load balancer instead.
+- **No automatic client failover**: the client must handle reconnection. The cluster recovers automatically, but the client needs to reconnect (to any node) after a failure.
+
 ## Security
 
 ### Authentication
