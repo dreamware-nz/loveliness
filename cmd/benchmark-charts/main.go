@@ -140,14 +140,12 @@ func generateBarChartSVG(title, unit string, labels []string, values []float64, 
 		}
 
 		// Label.
-		sb.WriteString(fmt.Sprintf(`  <text x="%d" y="%d" font-size="13" fill="#333" text-anchor="end" dominant-baseline="middle">%s</text>`,
-			labelWidth-10, y+barHeight/2, label))
-		sb.WriteString("\n")
+		fmt.Fprintf(&sb, "  <text x=\"%d\" y=\"%d\" font-size=\"13\" fill=\"#333\" text-anchor=\"end\" dominant-baseline=\"middle\">%s</text>\n",
+			labelWidth-10, y+barHeight/2, label)
 
 		// Bar.
-		sb.WriteString(fmt.Sprintf(`  <rect x="%d" y="%d" width="%d" height="%d" rx="4" fill="%s"/>`,
-			labelWidth, y, barW, barHeight, color))
-		sb.WriteString("\n")
+		fmt.Fprintf(&sb, "  <rect x=\"%d\" y=\"%d\" width=\"%d\" height=\"%d\" rx=\"4\" fill=\"%s\"/>\n",
+			labelWidth, y, barW, barHeight, color)
 
 		// Value label.
 		var valStr string
@@ -158,9 +156,8 @@ func generateBarChartSVG(title, unit string, labels []string, values []float64, 
 		} else {
 			valStr = fmt.Sprintf("%.0f %s", values[i], unit)
 		}
-		sb.WriteString(fmt.Sprintf(`  <text x="%d" y="%d" font-size="12" fill="#666" dominant-baseline="middle">%s</text>`,
-			labelWidth+barW+8, y+barHeight/2, valStr))
-		sb.WriteString("\n")
+		fmt.Fprintf(&sb, "  <text x=\"%d\" y=\"%d\" font-size=\"12\" fill=\"#666\" dominant-baseline=\"middle\">%s</text>\n",
+			labelWidth+barW+8, y+barHeight/2, valStr)
 	}
 
 	sb.WriteString("</svg>\n")
@@ -296,7 +293,7 @@ func main() {
 	// Date and config.
 	for _, name := range configOrder {
 		if r, ok := configs[name]; ok {
-			md.WriteString(fmt.Sprintf("**Date:** %s | **Nodes:** %d | **Edges:** %d\n\n", r.Date, r.Nodes, r.Edges))
+			fmt.Fprintf(&md, "**Date:** %s | **Nodes:** %d | **Edges:** %d\n\n", r.Date, r.Nodes, r.Edges)
 			break
 		}
 	}
@@ -308,11 +305,11 @@ func main() {
 		md.WriteString("|---|---|---|\n")
 		for i, name := range configOrder {
 			if s, ok := stats[name]; ok {
-				md.WriteString(fmt.Sprintf("| %s | **%.0f MiB** | %.1f%% |\n", displayOrder[i], s.PeakRSSMiB, s.AvgCPUPct))
+				fmt.Fprintf(&md, "| %s | **%.0f MiB** | %.1f%% |\n", displayOrder[i], s.PeakRSSMiB, s.AvgCPUPct)
 			}
 		}
 		if clusterTotalRSS > 0 {
-			md.WriteString(fmt.Sprintf("| Loveliness (3) total | **%.0f MiB** | — |\n", clusterTotalRSS))
+			fmt.Fprintf(&md, "| Loveliness (3) total | **%.0f MiB** | — |\n", clusterTotalRSS)
 		}
 		md.WriteString("\n")
 	}
@@ -322,7 +319,7 @@ func main() {
 	md.WriteString("| Benchmark |")
 	for _, d := range displayOrder {
 		if _, ok := configs[configOrder[sort.SearchStrings(displayOrder, d)]]; ok {
-			md.WriteString(fmt.Sprintf(" %s |", d))
+			fmt.Fprintf(&md, " %s |", d)
 		}
 	}
 	md.WriteString("\n|---|")
@@ -351,7 +348,7 @@ func main() {
 	}
 
 	for _, bench := range allBenchNames {
-		md.WriteString(fmt.Sprintf("| %s |", bench))
+		fmt.Fprintf(&md, "| %s |", bench)
 		for _, name := range configOrder {
 			r, ok := configs[name]
 			if !ok {
@@ -363,7 +360,7 @@ func main() {
 				md.WriteString(" — |")
 				continue
 			}
-			md.WriteString(fmt.Sprintf(" **%s** |", fmtUs(b.P50Us)))
+			fmt.Fprintf(&md, " **%s** |", fmtUs(b.P50Us))
 		}
 		md.WriteString("\n")
 	}
@@ -373,7 +370,7 @@ func main() {
 	md.WriteString("## Throughput (QPS)\n\n")
 	md.WriteString("| Benchmark |")
 	for _, d := range displayOrder {
-		md.WriteString(fmt.Sprintf(" %s |", d))
+		fmt.Fprintf(&md, " %s |", d)
 	}
 	md.WriteString("\n|---|")
 	for range configOrder {
@@ -382,7 +379,7 @@ func main() {
 	md.WriteString("\n")
 
 	for _, bench := range allBenchNames {
-		md.WriteString(fmt.Sprintf("| %s |", bench))
+		fmt.Fprintf(&md, "| %s |", bench)
 		for _, name := range configOrder {
 			r, ok := configs[name]
 			if !ok {
@@ -394,7 +391,7 @@ func main() {
 				md.WriteString(" — |")
 				continue
 			}
-			md.WriteString(fmt.Sprintf(" **%.0f** |", b.QPS))
+			fmt.Fprintf(&md, " **%.0f** |", b.QPS)
 		}
 		md.WriteString("\n")
 	}
