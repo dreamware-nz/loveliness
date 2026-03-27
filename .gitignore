@@ -1,5 +1,8 @@
-# Binary
+# Binaries
 /loveliness
+/benchmark
+/generate
+/bin/
 
 # Data directories
 data/
@@ -19,6 +22,9 @@ Thumbs.db
 *.test
 *.out
 coverage.txt
+
+# Logs
+*.log
 
 # Claude skills
 .claude/
