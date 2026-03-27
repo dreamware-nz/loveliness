@@ -161,12 +161,24 @@ backend loveliness
     server node3 10.0.0.3:8080 check
 ```
 
-For Bolt connections, use the same LB on port 7687. Neo4j drivers should use `bolt://` (direct), not `neo4j://` (routing), because Loveliness handles query routing internally — every node already knows how to reach every shard.
+For Bolt connections, you have two options:
 
-### Current limitations
+| Scheme | Behavior |
+|---|---|
+| `neo4j://lb:7687` | Driver sends a ROUTE message, discovers all cluster nodes, and handles failover automatically. Recommended for HA. |
+| `bolt://lb:7687` | Direct connection to a single node via the load balancer. The LB handles failover. |
 
-- **Bolt routing protocol**: the `ROUTE` message returns only the connected node's address, so Neo4j driver auto-discovery (`neo4j://` scheme) won't discover other cluster members. Use `bolt://` with a load balancer instead.
-- **No automatic client failover**: the client must handle reconnection. The cluster recovers automatically, but the client needs to reconnect (to any node) after a failure.
+The `neo4j://` scheme works because Loveliness responds to ROUTE with all alive cluster members — the leader as the WRITE server, all nodes as READ and ROUTE servers. The driver automatically reconnects to another node if the current one goes down. TTL is 30 seconds, so topology changes propagate quickly.
+
+```python
+from neo4j import GraphDatabase
+
+# Automatic failover via driver routing (recommended)
+driver = GraphDatabase.driver("neo4j://any-node:7687")
+
+# Or via load balancer
+driver = GraphDatabase.driver("neo4j://lb:7687")
+```
 
 ## Security
 

@@ -29,6 +29,7 @@ type NodeInfo struct {
 	RaftAddr string `json:"raft_addr"`
 	GRPCAddr string `json:"grpc_addr"`
 	HTTPAddr string `json:"http_addr"`
+	BoltAddr string `json:"bolt_addr"`
 	Alive    bool   `json:"alive"`
 }
 

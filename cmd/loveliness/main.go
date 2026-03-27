@@ -228,6 +228,7 @@ func main() {
 	if cfg.BoltAddr != "" {
 		boltAdapter := boltpkg.NewRouterAdapter(r)
 		boltSrv = boltpkg.NewServer(cfg.BoltAddr, boltAdapter)
+		boltSrv.SetCluster(&clusterTopologyAdapter{cluster: c})
 		if tlsCfg.Enabled() {
 			boltTLS, err := tlsutil.ServerTLSConfig(tlsCfg)
 			if err != nil {
@@ -243,6 +244,18 @@ func main() {
 			slog.Error("bolt server failed", "err", err)
 			os.Exit(1)
 		}
+	}
+
+	// Register this node in the cluster so ROUTE responses include it.
+	if cfg.Bootstrap {
+		_ = c.RegisterNode(cluster.NodeInfo{
+			ID:       cfg.NodeID,
+			RaftAddr: cfg.RaftAddr,
+			GRPCAddr: cfg.GRPCAddr,
+			HTTPAddr: cfg.BindAddr,
+			BoltAddr: cfg.BoltAddr,
+			Alive:    true,
+		})
 	}
 
 	// Auto-join cluster if peers are configured.
@@ -284,6 +297,27 @@ func main() {
 	slog.Info("stopped")
 }
 
+// clusterTopologyAdapter adapts the Cluster to the bolt.ClusterTopology interface.
+type clusterTopologyAdapter struct {
+	cluster *cluster.Cluster
+}
+
+func (a *clusterTopologyAdapter) BoltAddresses() (all []string, leader string) {
+	sm := a.cluster.GetShardMap()
+	leaderAddr := a.cluster.LeaderAddr()
+
+	for _, info := range sm.Nodes {
+		if !info.Alive || info.BoltAddr == "" {
+			continue
+		}
+		all = append(all, info.BoltAddr)
+		if info.RaftAddr == leaderAddr {
+			leader = info.BoltAddr
+		}
+	}
+	return all, leader
+}
+
 // autoJoin attempts to join the cluster via the configured peers.
 // Peers are Raft addresses (e.g., "node1:9000"). We derive the HTTP address
 // by replacing the port with the standard HTTP port (8080).
@@ -296,6 +330,7 @@ func autoJoin(cfg config.Config) {
 		"raft_addr": cfg.RaftAddr,
 		"grpc_addr": cfg.GRPCAddr,
 		"http_addr": cfg.BindAddr,
+		"bolt_addr": cfg.BoltAddr,
 	})
 
 	client := &http.Client{Timeout: 5 * time.Second}

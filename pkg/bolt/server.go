@@ -21,6 +21,13 @@ type QueryExecutor interface {
 	Query(cypher string, params map[string]any) (columns []string, rows []map[string]any, err error)
 }
 
+// ClusterTopology provides cluster node information for Bolt ROUTE responses.
+type ClusterTopology interface {
+	// BoltAddresses returns the Bolt addresses of all alive nodes and the leader's address.
+	// Returns (allAddrs, leaderAddr). If leaderAddr is empty, the cluster has no leader.
+	BoltAddresses() (all []string, leader string)
+}
+
 // Server is a Bolt protocol server that accepts Neo4j driver connections.
 type Server struct {
 	listener  net.Listener
@@ -28,6 +35,7 @@ type Server struct {
 	addr      string
 	tlsConfig *tls.Config
 	authToken string // shared secret; empty = no auth
+	cluster   ClusterTopology
 	running   atomic.Bool
 	wg        sync.WaitGroup
 }
@@ -43,6 +51,11 @@ func NewServer(addr string, executor QueryExecutor) *Server {
 // SetTLS configures TLS for the Bolt listener.
 func (s *Server) SetTLS(cfg *tls.Config) {
 	s.tlsConfig = cfg
+}
+
+// SetCluster configures cluster topology for Bolt ROUTE responses.
+func (s *Server) SetCluster(ct ClusterTopology) {
+	s.cluster = ct
 }
 
 // SetAuth configures token authentication for the Bolt server.
@@ -112,6 +125,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 		conn:      conn,
 		executor:  s.executor,
 		authToken: s.authToken,
+		cluster:   s.cluster,
 		state:     stateNegotiation,
 	}
 
@@ -147,6 +161,7 @@ type connection struct {
 	conn      net.Conn
 	executor  QueryExecutor
 	authToken string
+	cluster   ClusterTopology
 	state     connState
 
 	// Current result set for streaming via PULL.
@@ -462,24 +477,48 @@ func (c *connection) handleReset(msg *BoltStruct) error {
 
 func (c *connection) handleRoute(msg *BoltStruct) error {
 	// ROUTE message (Bolt 4.3+) for multi-database routing.
-	// Return a single server entry pointing at ourselves.
+	// If cluster topology is available, return all alive nodes so that
+	// Neo4j drivers using neo4j:// can discover the full cluster.
+	if c.cluster != nil {
+		all, leader := c.cluster.BoltAddresses()
+		if len(all) > 0 {
+			writeAddrs := make([]any, 0, 1)
+			readAddrs := make([]any, 0, len(all))
+			routeAddrs := make([]any, 0, len(all))
+
+			for _, a := range all {
+				readAddrs = append(readAddrs, a)
+				routeAddrs = append(routeAddrs, a)
+			}
+			if leader != "" {
+				writeAddrs = append(writeAddrs, leader)
+			} else {
+				// No known leader — fall back to local address.
+				writeAddrs = append(writeAddrs, c.conn.LocalAddr().String())
+			}
+
+			return c.sendSuccess(map[string]any{
+				"rt": map[string]any{
+					"ttl": int64(30),
+					"servers": []any{
+						map[string]any{"role": "WRITE", "addresses": writeAddrs},
+						map[string]any{"role": "READ", "addresses": readAddrs},
+						map[string]any{"role": "ROUTE", "addresses": routeAddrs},
+					},
+				},
+			})
+		}
+	}
+
+	// Fallback: single-node mode, return only ourselves.
 	addr := c.conn.LocalAddr().String()
 	return c.sendSuccess(map[string]any{
 		"rt": map[string]any{
 			"ttl": int64(300),
 			"servers": []any{
-				map[string]any{
-					"role":      "WRITE",
-					"addresses": []any{addr},
-				},
-				map[string]any{
-					"role":      "READ",
-					"addresses": []any{addr},
-				},
-				map[string]any{
-					"role":      "ROUTE",
-					"addresses": []any{addr},
-				},
+				map[string]any{"role": "WRITE", "addresses": []any{addr}},
+				map[string]any{"role": "READ", "addresses": []any{addr}},
+				map[string]any{"role": "ROUTE", "addresses": []any{addr}},
 			},
 		},
 	})

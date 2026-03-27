@@ -252,6 +252,7 @@ type joinRequest struct {
 	RaftAddr  string `json:"raft_addr"`
 	GRPCAddr  string `json:"grpc_addr"`
 	HTTPAddr  string `json:"http_addr"`
+	BoltAddr  string `json:"bolt_addr"`
 	JoinToken string `json:"join_token"`
 }
 
@@ -338,6 +339,7 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 		RaftAddr: req.RaftAddr,
 		GRPCAddr: req.GRPCAddr,
 		HTTPAddr: req.HTTPAddr,
+		BoltAddr: req.BoltAddr,
 		Alive:    true,
 	}); err != nil {
 		slog.Error("register node failed", "node_id", req.NodeID, "err", err)
