@@ -23,5 +23,8 @@ RUN ldconfig
 
 COPY --from=builder /loveliness /usr/local/bin/loveliness
 
+RUN useradd -r -s /bin/false loveliness && mkdir -p /data && chown loveliness:loveliness /data
+USER loveliness
+
 EXPOSE 8080 7687 9000 9001
 ENTRYPOINT ["loveliness"]
