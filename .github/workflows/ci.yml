@@ -21,6 +21,8 @@ jobs:
 
       - name: Download dependencies
         run: go mod download
+        env:
+          GOFLAGS: -modcacherw
 
       - name: Install LadybugDB shared library
         run: |
@@ -52,6 +54,8 @@ jobs:
 
       - name: Download dependencies
         run: go mod download
+        env:
+          GOFLAGS: -modcacherw
 
       - name: Install LadybugDB shared library
         run: |
