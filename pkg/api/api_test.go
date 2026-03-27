@@ -23,11 +23,9 @@ func setupTestServer() *Server {
 	return NewServer(r, nil, shards, nil, 5*time.Second)
 }
 
-func TestQuery_ValidCypher(t *testing.T) {
+func TestCypher_ValidQuery(t *testing.T) {
 	srv := setupTestServer()
-	body := `{"cypher": "MATCH (p:Person {name: 'test'}) RETURN p"}`
-	req := httptest.NewRequest("POST", "/query", bytes.NewBufferString(body))
-	req.Header.Set("Content-Type", "application/json")
+	req := httptest.NewRequest("POST", "/cypher", bytes.NewBufferString("MATCH (p:Person {name: 'test'}) RETURN p"))
 	w := httptest.NewRecorder()
 
 	srv.Handler().ServeHTTP(w, req)
@@ -45,10 +43,9 @@ func TestQuery_ValidCypher(t *testing.T) {
 	}
 }
 
-func TestQuery_EmptyBody(t *testing.T) {
+func TestCypher_EmptyBody(t *testing.T) {
 	srv := setupTestServer()
-	req := httptest.NewRequest("POST", "/query", bytes.NewBufferString("{}"))
-	req.Header.Set("Content-Type", "application/json")
+	req := httptest.NewRequest("POST", "/cypher", bytes.NewBufferString(""))
 	w := httptest.NewRecorder()
 
 	srv.Handler().ServeHTTP(w, req)
@@ -58,9 +55,9 @@ func TestQuery_EmptyBody(t *testing.T) {
 	}
 }
 
-func TestQuery_InvalidJSON(t *testing.T) {
+func TestCypher_WhitespaceOnly(t *testing.T) {
 	srv := setupTestServer()
-	req := httptest.NewRequest("POST", "/query", bytes.NewBufferString("not json"))
+	req := httptest.NewRequest("POST", "/cypher", bytes.NewBufferString("   \n\t  "))
 	w := httptest.NewRecorder()
 
 	srv.Handler().ServeHTTP(w, req)
@@ -70,25 +67,9 @@ func TestQuery_InvalidJSON(t *testing.T) {
 	}
 }
 
-func TestQuery_EmptyCypher(t *testing.T) {
+func TestCypher_MergeWithShardKey(t *testing.T) {
 	srv := setupTestServer()
-	body := `{"cypher": ""}`
-	req := httptest.NewRequest("POST", "/query", bytes.NewBufferString(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-
-	srv.Handler().ServeHTTP(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())
-	}
-}
-
-func TestQuery_MergeWithShardKey(t *testing.T) {
-	srv := setupTestServer()
-	body := `{"cypher": "MERGE (n:Person {name: 'Alice'})"}`
-	req := httptest.NewRequest("POST", "/query", bytes.NewBufferString(body))
-	req.Header.Set("Content-Type", "application/json")
+	req := httptest.NewRequest("POST", "/cypher", bytes.NewBufferString("MERGE (n:Person {name: 'Alice'})"))
 	w := httptest.NewRecorder()
 
 	srv.Handler().ServeHTTP(w, req)
@@ -98,26 +79,21 @@ func TestQuery_MergeWithShardKey(t *testing.T) {
 	}
 }
 
-func TestQuery_WriteWithoutShardKey(t *testing.T) {
+func TestCypher_WriteWithoutShardKey(t *testing.T) {
 	srv := setupTestServer()
-	body := `{"cypher": "MATCH (p:Person) SET p.active = true"}`
-	req := httptest.NewRequest("POST", "/query", bytes.NewBufferString(body))
-	req.Header.Set("Content-Type", "application/json")
+	req := httptest.NewRequest("POST", "/cypher", bytes.NewBufferString("MATCH (p:Person) SET p.active = true"))
 	w := httptest.NewRecorder()
 
 	srv.Handler().ServeHTTP(w, req)
 
-	// Writes without shard key should be rejected.
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
-func TestQuery_ScatterGather(t *testing.T) {
+func TestCypher_ScatterGather(t *testing.T) {
 	srv := setupTestServer()
-	body := `{"cypher": "MATCH (p:Person) RETURN p"}`
-	req := httptest.NewRequest("POST", "/query", bytes.NewBufferString(body))
-	req.Header.Set("Content-Type", "application/json")
+	req := httptest.NewRequest("POST", "/cypher", bytes.NewBufferString("MATCH (p:Person) RETURN p"))
 	w := httptest.NewRecorder()
 
 	srv.Handler().ServeHTTP(w, req)
@@ -128,7 +104,6 @@ func TestQuery_ScatterGather(t *testing.T) {
 
 	var result router.Result
 	json.Unmarshal(w.Body.Bytes(), &result)
-	// Scatter-gather across 3 shards, each with 1 node.
 	if len(result.Rows) != 3 {
 		t.Errorf("expected 3 rows from scatter-gather, got %d", len(result.Rows))
 	}
@@ -150,7 +125,6 @@ func TestHealth_Standalone(t *testing.T) {
 	if resp["status"] != "ok" {
 		t.Errorf("expected status ok, got %v", resp["status"])
 	}
-	// Should include shard health.
 	shards, ok := resp["shards"].(map[string]any)
 	if !ok {
 		t.Fatal("expected shards in health response")
@@ -176,18 +150,16 @@ func TestHealth_RequestID(t *testing.T) {
 	if reqID == "" {
 		t.Error("expected X-Request-ID header")
 	}
-	if len(reqID) != 16 { // 8 bytes = 16 hex chars
+	if len(reqID) != 16 {
 		t.Errorf("expected 16-char request ID, got %d: %s", len(reqID), reqID)
 	}
 }
 
 func TestHealth_DegradedWithUnhealthyShard(t *testing.T) {
-	// Create shards, one of which panics (becomes unhealthy).
 	shards := make([]*shard.Shard, 2)
 	shards[0] = shard.NewShard(0, shard.NewMemoryStore(), 4)
 	shards[1] = shard.NewShard(1, &panicStore{}, 4)
 
-	// Trigger the panic to mark shard 1 unhealthy.
 	shards[1].Query("MATCH (n) RETURN n")
 
 	r := router.NewRouter(shards, 5*time.Second)
@@ -204,14 +176,13 @@ func TestHealth_DegradedWithUnhealthyShard(t *testing.T) {
 	}
 }
 
-// panicStore panics on every query (for testing degraded health).
 type panicStore struct{}
 
 func (s *panicStore) Query(string) (*shard.QueryResponse, error) { panic("boom") }
 func (s *panicStore) Close() error                               { return nil }
 
 func TestCluster_NoCluster(t *testing.T) {
-	srv := setupTestServer() // no cluster configured
+	srv := setupTestServer()
 	req := httptest.NewRequest("GET", "/cluster", nil)
 	w := httptest.NewRecorder()
 

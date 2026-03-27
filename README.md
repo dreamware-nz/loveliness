@@ -69,13 +69,13 @@ make test       # 221 tests across 10 packages
 
 ```bash
 # Schema (broadcast to all shards)
-curl -s localhost:8080/query -d '{"cypher": "CREATE NODE TABLE Person(name STRING, age INT64, PRIMARY KEY(name))"}'
+curl -s localhost:8080/cypher -d "CREATE NODE TABLE Person(name STRING, age INT64, PRIMARY KEY(name))"
 
 # Write (routed to owning shard)
-curl -s localhost:8080/query -d '{"cypher": "CREATE (p:Person {name: '\''Alice'\'', age: 30})"}'
+curl -s localhost:8080/cypher -d "CREATE (p:Person {name: 'Alice', age: 30})"
 
 # Read (Bloom filter → single shard)
-curl -s localhost:8080/query -d '{"cypher": "MATCH (p:Person {name: '\''Alice'\''}) RETURN p"}'
+curl -s localhost:8080/cypher -d "MATCH (p:Person {name: 'Alice'}) RETURN p"
 
 # Bulk load
 curl -s localhost:8080/bulk/nodes -H "X-Table: Person" --data-binary @persons.csv

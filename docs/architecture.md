@@ -10,7 +10,7 @@ graph TB
     end
 
     subgraph Node["Loveliness Node"]
-        API[HTTP API<br/>/query /ingest /bulk]
+        API[HTTP API<br/>/cypher /ingest /bulk]
         BoltSrv[Bolt Server<br/>PackStream v4.x]
         Router[Query Router<br/>parse → Bloom → route/scatter]
         Raft[Raft Consensus]

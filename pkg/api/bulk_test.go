@@ -26,50 +26,6 @@ func setupTestServerWithSchema() *Server {
 	return NewServer(r, nil, shards, reg, 5*time.Second)
 }
 
-// --- POST /cypher tests ---
-
-func TestCypher_RawTextBody(t *testing.T) {
-	srv := setupTestServerWithSchema()
-	req := httptest.NewRequest("POST", "/cypher", bytes.NewBufferString("MATCH (p:Person {name: 'test'}) RETURN p"))
-	w := httptest.NewRecorder()
-
-	srv.Handler().ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-}
-
-func TestCypher_EmptyBody(t *testing.T) {
-	srv := setupTestServerWithSchema()
-	req := httptest.NewRequest("POST", "/cypher", bytes.NewBufferString(""))
-	w := httptest.NewRecorder()
-
-	srv.Handler().ServeHTTP(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected 400, got %d", w.Code)
-	}
-}
-
-func TestCypher_ScatterGather(t *testing.T) {
-	srv := setupTestServerWithSchema()
-	req := httptest.NewRequest("POST", "/cypher", bytes.NewBufferString("MATCH (p:Person) RETURN p"))
-	w := httptest.NewRecorder()
-
-	srv.Handler().ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-
-	var result router.Result
-	json.Unmarshal(w.Body.Bytes(), &result)
-	if len(result.Rows) != 3 {
-		t.Errorf("expected 3 rows, got %d", len(result.Rows))
-	}
-}
-
 // --- POST /bulk/nodes tests ---
 
 func TestBulkNodes_MissingHeader(t *testing.T) {

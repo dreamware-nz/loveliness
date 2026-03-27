@@ -61,7 +61,6 @@ const requestIDKey contextKey = "request_id"
 // Handler returns the HTTP handler with all routes registered.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /query", s.handleQuery)
 	mux.HandleFunc("POST /cypher", s.handleCypher)
 	mux.HandleFunc("POST /bulk/nodes", s.handleBulkNodes)
 	mux.HandleFunc("POST /bulk/edges", s.handleBulkEdges)
@@ -111,11 +110,6 @@ func generateRequestID() string {
 	return hex.EncodeToString(b)
 }
 
-// queryRequest is the JSON body for POST /query.
-type queryRequest struct {
-	Cypher string `json:"cypher"`
-}
-
 // errorResponse is a structured error returned to the client.
 type errorResponse struct {
 	Error struct {
@@ -139,42 +133,6 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
-}
-
-func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
-	var req queryRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid JSON body", 0)
-		return
-	}
-	if req.Cypher == "" {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "cypher field is required", 0)
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), s.timeout)
-	defer cancel()
-
-	result, err := s.router.Execute(ctx, req.Cypher)
-	if err != nil {
-		if qe, ok := err.(*router.QueryError); ok {
-			status := http.StatusInternalServerError
-			switch qe.Code {
-			case "CYPHER_PARSE_ERROR", "MISSING_SHARD_KEY":
-				status = http.StatusBadRequest
-			case "SHARD_UNAVAILABLE":
-				status = http.StatusServiceUnavailable
-			case "QUERY_TIMEOUT":
-				status = http.StatusGatewayTimeout
-			}
-			writeError(w, status, qe.Code, qe.Message, qe.ShardID)
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error(), 0)
-		return
-	}
-
-	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) handleCypher(w http.ResponseWriter, r *http.Request) {

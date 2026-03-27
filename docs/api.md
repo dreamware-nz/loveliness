@@ -2,20 +2,20 @@
 
 All endpoints are on the HTTP port (default `:8080`).
 
+## Query Endpoint
+
+`POST /cypher` — send raw Cypher as the request body, get JSON results back.
+
 ## Schema
 
 LadybugDB requires schema before inserting data. The `PRIMARY KEY` becomes the **shard key**.
 
 ```bash
 # Create a node table — sharded on 'name'
-curl -s localhost:8080/query -d '{
-  "cypher": "CREATE NODE TABLE Person(name STRING, age INT64, city STRING, PRIMARY KEY(name))"
-}'
+curl -s localhost:8080/cypher -d "CREATE NODE TABLE Person(name STRING, age INT64, city STRING, PRIMARY KEY(name))"
 
 # Create a relationship table
-curl -s localhost:8080/query -d '{
-  "cypher": "CREATE REL TABLE KNOWS(FROM Person TO Person, since INT64)"
-}'
+curl -s localhost:8080/cypher -d "CREATE REL TABLE KNOWS(FROM Person TO Person, since INT64)"
 ```
 
 Schema DDL is automatically broadcast to all shards.
@@ -24,23 +24,17 @@ Schema DDL is automatically broadcast to all shards.
 
 **Point lookup (single shard via Bloom filter):**
 ```bash
-curl -s localhost:8080/query -d '{
-  "cypher": "MATCH (p:Person {name: '\''Alice'\''}) RETURN p.name, p.age, p.city"
-}'
+curl -s localhost:8080/cypher -d "MATCH (p:Person {name: 'Alice'}) RETURN p.name, p.age, p.city"
 ```
 
 **Scan (scatter-gather):**
 ```bash
-curl -s localhost:8080/query -d '{
-  "cypher": "MATCH (p:Person) RETURN p.name, p.age ORDER BY p.age LIMIT 10"
-}'
+curl -s localhost:8080/cypher -d "MATCH (p:Person) RETURN p.name, p.age ORDER BY p.age LIMIT 10"
 ```
 
 **Traversal:**
 ```bash
-curl -s localhost:8080/query -d '{
-  "cypher": "MATCH (a:Person {name: '\''Alice'\''})-[:KNOWS]->(b) RETURN b.name"
-}'
+curl -s localhost:8080/cypher -d "MATCH (a:Person {name: 'Alice'})-[:KNOWS]->(b) RETURN b.name"
 ```
 
 **Response format:**
@@ -56,14 +50,10 @@ curl -s localhost:8080/query -d '{
 
 ```bash
 # Create a node
-curl -s localhost:8080/query -d '{
-  "cypher": "CREATE (p:Person {name: '\''Alice'\'', age: 30, city: '\''Auckland'\''})"
-}'
+curl -s localhost:8080/cypher -d "CREATE (p:Person {name: 'Alice', age: 30, city: 'Auckland'})"
 
 # Create an edge (routed to source node's shard)
-curl -s localhost:8080/query -d '{
-  "cypher": "MATCH (a:Person {name: '\''Alice'\''}), (b:Person {name: '\''Bob'\''}) CREATE (a)-[:KNOWS {since: 2024}]->(b)"
-}'
+curl -s localhost:8080/cypher -d "MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}) CREATE (a)-[:KNOWS {since: 2024}]->(b)"
 ```
 
 ## Bulk Loading

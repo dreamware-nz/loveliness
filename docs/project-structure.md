@@ -70,7 +70,7 @@ pkg/
     partitioner.go                Cross-shard traversal stats + locality suggestions
     transfer.go                   Shard data transfer (export/import as Cypher)
   api/
-    api.go                        HTTP API — /query, /health, /cluster, /join
+    api.go                        HTTP API — /cypher, /health, /cluster, /join
     bulk.go                       Bulk loading endpoints with streaming CSV parse
     bulk_stream.go                Streaming bulk load variant
     ingest.go                     Async ingest queue endpoints
