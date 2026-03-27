@@ -1,0 +1,313 @@
+package bolt
+
+import (
+	"bytes"
+	"io"
+	"net"
+	"testing"
+)
+
+// mockExecutor implements QueryExecutor for tests.
+type mockExecutor struct {
+	columns []string
+	rows    []map[string]any
+	err     error
+}
+
+func (m *mockExecutor) Query(cypher string, params map[string]any) ([]string, []map[string]any, error) {
+	if m.err != nil {
+		return nil, nil, m.err
+	}
+	return m.columns, m.rows, nil
+}
+
+func startTestServer(t *testing.T, exec QueryExecutor) *Server {
+	t.Helper()
+	srv := NewServer("127.0.0.1:0", exec)
+	if err := srv.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(srv.Stop)
+	return srv
+}
+
+func boltConnect(t *testing.T, addr string) net.Conn {
+	t.Helper()
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Send magic preamble.
+	conn.Write(boltMagic)
+
+	// Send version proposals: [4.4, 0, 0, 0]
+	versions := make([]byte, 16)
+	versions[2] = 4 // minor
+	versions[3] = 4 // major
+	conn.Write(versions)
+
+	// Read agreed version.
+	agreed := make([]byte, 4)
+	io.ReadFull(conn, agreed)
+	if agreed[3] != 4 {
+		t.Fatalf("expected Bolt 4.x, got %v", agreed)
+	}
+
+	return conn
+}
+
+func sendMessage(conn net.Conn, p *Packer) error {
+	return WriteMessage(conn, p.Bytes())
+}
+
+func recvMessage(t *testing.T, conn net.Conn) *BoltStruct {
+	t.Helper()
+	data, err := ReadMessage(conn)
+	if err != nil {
+		t.Fatal("recv:", err)
+	}
+	u := NewUnpacker(bytes.NewReader(data))
+	v, err := u.Unpack()
+	if err != nil {
+		t.Fatal("unpack:", err)
+	}
+	s, ok := v.(*BoltStruct)
+	if !ok {
+		t.Fatalf("expected struct, got %T", v)
+	}
+	return s
+}
+
+func TestBoltHandshake(t *testing.T) {
+	srv := startTestServer(t, &mockExecutor{})
+	conn := boltConnect(t, srv.Addr())
+	defer conn.Close()
+
+	// Send HELLO.
+	p := NewPacker()
+	p.PackStructHeader(1, msgHELLO)
+	p.PackMapHeader(1)
+	p.PackString("user_agent")
+	p.PackString("test/1.0")
+	sendMessage(conn, p)
+
+	resp := recvMessage(t, conn)
+	if resp.Tag != msgSUCCESS {
+		t.Fatalf("expected SUCCESS, got 0x%02X", resp.Tag)
+	}
+
+	meta := resp.Fields[0].(map[string]any)
+	if meta["server"].(string) != "Loveliness/1.0.0" {
+		t.Errorf("unexpected server: %v", meta["server"])
+	}
+}
+
+func TestBoltRunAndPull(t *testing.T) {
+	exec := &mockExecutor{
+		columns: []string{"name", "age"},
+		rows: []map[string]any{
+			{"name": "Alice", "age": int64(30)},
+			{"name": "Bob", "age": int64(25)},
+		},
+	}
+	srv := startTestServer(t, exec)
+	conn := boltConnect(t, srv.Addr())
+	defer conn.Close()
+
+	// HELLO.
+	p := NewPacker()
+	p.PackStructHeader(1, msgHELLO)
+	p.PackMapHeader(1)
+	p.PackString("user_agent")
+	p.PackString("test/1.0")
+	sendMessage(conn, p)
+	recvMessage(t, conn) // SUCCESS
+
+	// RUN.
+	p.Reset()
+	p.PackStructHeader(3, msgRUN)
+	p.PackString("MATCH (p:Person) RETURN p.name, p.age")
+	p.PackMapHeader(0) // params
+	p.PackMapHeader(0) // extra
+	sendMessage(conn, p)
+
+	resp := recvMessage(t, conn)
+	if resp.Tag != msgSUCCESS {
+		t.Fatalf("RUN: expected SUCCESS, got 0x%02X", resp.Tag)
+	}
+	meta := resp.Fields[0].(map[string]any)
+	fields := meta["fields"].([]any)
+	if len(fields) != 2 {
+		t.Fatalf("expected 2 fields, got %d", len(fields))
+	}
+
+	// PULL all.
+	p.Reset()
+	p.PackStructHeader(1, msgPULL)
+	p.PackMapHeader(1)
+	p.PackString("n")
+	p.PackInt(-1)
+	sendMessage(conn, p)
+
+	// Should get 2 RECORD messages then SUCCESS.
+	r1 := recvMessage(t, conn)
+	if r1.Tag != msgRECORD {
+		t.Fatalf("expected RECORD, got 0x%02X", r1.Tag)
+	}
+	r2 := recvMessage(t, conn)
+	if r2.Tag != msgRECORD {
+		t.Fatalf("expected RECORD, got 0x%02X", r2.Tag)
+	}
+
+	done := recvMessage(t, conn)
+	if done.Tag != msgSUCCESS {
+		t.Fatalf("expected SUCCESS after records, got 0x%02X", done.Tag)
+	}
+	doneMeta := done.Fields[0].(map[string]any)
+	if doneMeta["has_more"].(bool) != false {
+		t.Error("expected has_more=false")
+	}
+}
+
+func TestBoltPullBatched(t *testing.T) {
+	rows := make([]map[string]any, 10)
+	for i := range rows {
+		rows[i] = map[string]any{"n": int64(i)}
+	}
+	exec := &mockExecutor{
+		columns: []string{"n"},
+		rows:    rows,
+	}
+	srv := startTestServer(t, exec)
+	conn := boltConnect(t, srv.Addr())
+	defer conn.Close()
+
+	// HELLO.
+	p := NewPacker()
+	p.PackStructHeader(1, msgHELLO)
+	p.PackMapHeader(0)
+	sendMessage(conn, p)
+	recvMessage(t, conn)
+
+	// RUN.
+	p.Reset()
+	p.PackStructHeader(3, msgRUN)
+	p.PackString("MATCH (n) RETURN n")
+	p.PackMapHeader(0)
+	p.PackMapHeader(0)
+	sendMessage(conn, p)
+	recvMessage(t, conn) // SUCCESS
+
+	// PULL 3 at a time.
+	p.Reset()
+	p.PackStructHeader(1, msgPULL)
+	p.PackMapHeader(1)
+	p.PackString("n")
+	p.PackInt(3)
+	sendMessage(conn, p)
+
+	// 3 records + SUCCESS with has_more=true.
+	for i := 0; i < 3; i++ {
+		r := recvMessage(t, conn)
+		if r.Tag != msgRECORD {
+			t.Fatalf("record %d: expected RECORD, got 0x%02X", i, r.Tag)
+		}
+	}
+	s := recvMessage(t, conn)
+	if s.Tag != msgSUCCESS {
+		t.Fatalf("expected SUCCESS, got 0x%02X", s.Tag)
+	}
+	meta := s.Fields[0].(map[string]any)
+	if meta["has_more"].(bool) != true {
+		t.Error("expected has_more=true")
+	}
+}
+
+func TestBoltParamInterpolation(t *testing.T) {
+	cases := []struct {
+		cypher   string
+		params   map[string]any
+		expected string
+	}{
+		{
+			"MATCH (p {name: $name}) RETURN p",
+			map[string]any{"name": "Alice"},
+			"MATCH (p {name: 'Alice'}) RETURN p",
+		},
+		{
+			"MATCH (p) WHERE p.age > $age RETURN p",
+			map[string]any{"age": int64(25)},
+			"MATCH (p) WHERE p.age > 25 RETURN p",
+		},
+		{
+			"MATCH (p {active: $flag}) RETURN p",
+			map[string]any{"flag": true},
+			"MATCH (p {active: true}) RETURN p",
+		},
+		{
+			"RETURN $val",
+			map[string]any{"val": nil},
+			"RETURN NULL",
+		},
+	}
+
+	for _, tc := range cases {
+		got := interpolateParams(tc.cypher, tc.params)
+		if got != tc.expected {
+			t.Errorf("interpolate(%q, %v)\n  got:  %q\n  want: %q", tc.cypher, tc.params, got, tc.expected)
+		}
+	}
+}
+
+func TestBoltReset(t *testing.T) {
+	exec := &mockExecutor{
+		columns: []string{"n"},
+		rows:    []map[string]any{{"n": int64(1)}},
+	}
+	srv := startTestServer(t, exec)
+	conn := boltConnect(t, srv.Addr())
+	defer conn.Close()
+
+	// HELLO.
+	p := NewPacker()
+	p.PackStructHeader(1, msgHELLO)
+	p.PackMapHeader(0)
+	sendMessage(conn, p)
+	recvMessage(t, conn)
+
+	// RESET should always succeed.
+	p.Reset()
+	p.PackStructHeader(0, msgRESET)
+	sendMessage(conn, p)
+
+	resp := recvMessage(t, conn)
+	if resp.Tag != msgSUCCESS {
+		t.Fatalf("expected SUCCESS on RESET, got 0x%02X", resp.Tag)
+	}
+}
+
+func TestBoltGoodbye(t *testing.T) {
+	srv := startTestServer(t, &mockExecutor{})
+	conn := boltConnect(t, srv.Addr())
+	defer conn.Close()
+
+	// HELLO.
+	p := NewPacker()
+	p.PackStructHeader(1, msgHELLO)
+	p.PackMapHeader(0)
+	sendMessage(conn, p)
+	recvMessage(t, conn)
+
+	// GOODBYE — server should close the connection.
+	p.Reset()
+	p.PackStructHeader(0, msgGOODBYE)
+	sendMessage(conn, p)
+
+	// Next read should fail (connection closed by server).
+	buf := make([]byte, 1)
+	_, err := conn.Read(buf)
+	if err == nil {
+		t.Error("expected connection to be closed after GOODBYE")
+	}
+}

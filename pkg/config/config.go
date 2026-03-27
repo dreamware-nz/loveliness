@@ -43,6 +43,10 @@ type Config struct {
 	BackupRetention int
 	// BackupDir is the local directory for backup archives (used when S3 is not configured).
 	BackupDir string
+
+	// BoltAddr is the address for the Neo4j Bolt protocol listener.
+	// Empty string disables the Bolt server.
+	BoltAddr string
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -58,6 +62,7 @@ func DefaultConfig() Config {
 		MaxConcurrentQueries: 16,
 		QueryTimeoutMs:       30000,
 		BackupRetention:      3,
+		BoltAddr:             ":7687",
 	}
 }
 
@@ -124,6 +129,9 @@ func FromEnv() Config {
 	}
 	if v := os.Getenv("LOVELINESS_BACKUP_DIR"); v != "" {
 		c.BackupDir = v
+	}
+	if v := os.Getenv("LOVELINESS_BOLT_ADDR"); v != "" {
+		c.BoltAddr = v
 	}
 	return c
 }

@@ -73,12 +73,12 @@ Internal cluster communication uses a binary TCP transport with MessagePack seri
 ```
                          ┌──────────────────────────────────────────────────┐
          HTTP Client ──► │                Loveliness Node                   │
-                         │                                                  │
-                         │  ┌──────────┐  ┌───────────┐  ┌──────────────┐  │
-                         │  │ HTTP API │  │   Raft    │  │ TCP Transport│  │
-                         │  │  /query  │  │ Consensus │  │  MsgPack     │  │
-                         │  │  /ingest │  │           │  │  Pool+Framed │  │
-                         │  └────┬─────┘  └─────┬─────┘  └──────┬───────┘  │
+        Bolt Client ──►  │                                                  │
+                         │  ┌──────────┐  ┌──────────┐  ┌───────────┐  ┌──────────────┐  │
+                         │  │ HTTP API │  │Bolt :7687│  │   Raft    │  │ TCP Transport│  │
+                         │  │  /query  │  │ PackStream│  │ Consensus │  │  MsgPack     │  │
+                         │  │  /ingest │  │ Neo4j SDK│  │           │  │  Pool+Framed │  │
+                         │  └────┬─────┘  └────┬─────┘  └─────┬─────┘  └──────┬───────┘  │
                          │       │              │                │          │
                          │  ┌────▼──────────────▼────────────────▼───────┐  │
                          │  │              Query Router                   │  │
@@ -113,6 +113,57 @@ Internal cluster communication uses a binary TCP transport with MessagePack seri
 - **WAL + backup/restore** — per-shard write-ahead log with backup to local disk or S3
 - **Log-backed ingest queue** — async bulk loading with durable job state
 - **TCP+MsgPack transport** — binary framed protocol for inter-node queries, 2-4x faster than HTTP+JSON
+
+## Neo4j Bolt Protocol Compatibility
+
+Loveliness speaks the **Neo4j Bolt protocol** (v4.x) on port 7687. This means existing Neo4j drivers work with minimal changes — just point them at Loveliness instead of Neo4j.
+
+**Python:**
+```python
+from neo4j import GraphDatabase
+
+# Just change the URL — same driver, same API
+driver = GraphDatabase.driver("bolt://localhost:7687", auth=("neo4j", "password"))
+
+with driver.session() as session:
+    result = session.run("MATCH (p:Person {name: $name}) RETURN p.name, p.age", name="Alice")
+    for record in result:
+        print(record["p.name"], record["p.age"])
+```
+
+**JavaScript:**
+```javascript
+const neo4j = require('neo4j-driver');
+const driver = neo4j.driver('bolt://localhost:7687');
+const session = driver.session();
+const result = await session.run('MATCH (p:Person) RETURN p.name LIMIT 10');
+result.records.forEach(r => console.log(r.get('p.name')));
+```
+
+**Go:**
+```go
+driver, _ := neo4j.NewDriverWithContext("bolt://localhost:7687", neo4j.NoAuth())
+session := driver.NewSession(ctx, neo4j.SessionConfig{})
+result, _ := session.Run(ctx, "MATCH (p:Person {name: $name}) RETURN p", map[string]any{"name": "Alice"})
+```
+
+**What works:**
+- RUN + PULL with batched streaming (including `PULL {n: 100}` for pagination)
+- Parameter binding (`$name`, `$age`) — interpolated into Cypher automatically
+- Explicit transactions (BEGIN/COMMIT/ROLLBACK)
+- RESET for connection recovery
+- ROUTE message for driver routing table discovery
+- GOODBYE for clean disconnect
+
+**What doesn't (yet):**
+- Bolt v5.x features (LOGOFF, TELEMETRY)
+- Node/Relationship graph type wrapping (results come back as flat rows, not graph objects)
+- Multi-database selection
+- Bookmark-based causal consistency
+
+**Configuration:**
+- Default port: `:7687` (standard Neo4j Bolt port)
+- Set `LOVELINESS_BOLT_ADDR=:7688` to change, or empty string to disable
 
 ## Quick Start
 
@@ -351,6 +402,7 @@ All configuration is via environment variables:
 | `LOVELINESS_BACKUP_INTERVAL_MIN` | `0` | Minutes between scheduled backups (0 = disabled) |
 | `LOVELINESS_BACKUP_RETENTION` | `3` | Number of backups to retain |
 | `LOVELINESS_BACKUP_DIR` | *(empty)* | Local directory for backups (when S3 is not configured) |
+| `LOVELINESS_BOLT_ADDR` | `:7687` | Neo4j Bolt protocol listen address (empty to disable) |
 
 ### Choosing shard count
 
@@ -452,6 +504,13 @@ pkg/
     queue.go                      Log-backed ingest queue with durable job state
     worker.go                     Sequential background worker for async bulk loading
     shard_adapter.go              Bridge between ingest worker and shard/router
+  bolt/
+    packstream.go                 PackStream binary serialization (Neo4j wire format)
+    messages.go                   Bolt message types (HELLO, RUN, PULL, SUCCESS, RECORD, etc.)
+    chunking.go                   Bolt chunked transfer framing
+    server.go                     Bolt protocol state machine and TCP server
+    graph_types.go                Node/Relationship packing helpers
+    router_adapter.go             Bridges Bolt QueryExecutor to Loveliness Router
   cluster/
     fsm.go                        Raft FSM — shard map, node membership, assignments
     cluster.go                    Raft lifecycle — bootstrap, join, failover, leadership

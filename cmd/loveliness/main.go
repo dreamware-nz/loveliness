@@ -17,6 +17,7 @@ import (
 
 	"github.com/johnjansen/loveliness/pkg/api"
 	"github.com/johnjansen/loveliness/pkg/backup"
+	boltpkg "github.com/johnjansen/loveliness/pkg/bolt"
 	"github.com/johnjansen/loveliness/pkg/cluster"
 	"github.com/johnjansen/loveliness/pkg/config"
 	"github.com/johnjansen/loveliness/pkg/ingest"
@@ -179,6 +180,17 @@ func main() {
 		}
 	}()
 
+	// Start Bolt protocol server (Neo4j wire compatibility).
+	var boltSrv *boltpkg.Server
+	if cfg.BoltAddr != "" {
+		boltAdapter := boltpkg.NewRouterAdapter(r)
+		boltSrv = boltpkg.NewServer(cfg.BoltAddr, boltAdapter)
+		if err := boltSrv.Start(); err != nil {
+			slog.Error("bolt server failed", "err", err)
+			os.Exit(1)
+		}
+	}
+
 	// Auto-join cluster if peers are configured.
 	if len(cfg.Peers) > 0 && !cfg.Bootstrap {
 		go autoJoin(cfg)
@@ -191,6 +203,9 @@ func main() {
 	slog.Info("shutting down", "signal", sig.String())
 
 	// Graceful shutdown: stop workers, drain HTTP, close WAL, raft, shards.
+	if boltSrv != nil {
+		boltSrv.Stop()
+	}
 	tcpSrv.Stop()
 	ingestWorker.Stop()
 	if dr.Scheduler != nil {
