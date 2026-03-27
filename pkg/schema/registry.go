@@ -98,6 +98,11 @@ func ParseCreateNodeTable(cypher string) (tableName, primaryKey string, err erro
 
 	// Extract table name: comes after "CREATE NODE TABLE", handling variable whitespace.
 	rest := strings.TrimSpace(trimmed[len("CREATE NODE TABLE"):])
+	// Skip optional IF NOT EXISTS.
+	restUpper := strings.ToUpper(rest)
+	if strings.HasPrefix(restUpper, "IF NOT EXISTS") {
+		rest = strings.TrimSpace(rest[len("IF NOT EXISTS"):])
+	}
 	// Table name ends at '(' or whitespace
 	nameEnd := strings.IndexAny(rest, "( \t")
 	if nameEnd == -1 {
