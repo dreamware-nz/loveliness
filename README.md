@@ -1,5 +1,10 @@
 # Loveliness
 
+[![CI](https://github.com/dreamware-nz/loveliness/actions/workflows/ci.yml/badge.svg)](https://github.com/dreamware-nz/loveliness/actions/workflows/ci.yml)
+[![Go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go)](https://go.dev)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Docker](https://img.shields.io/docker/v/dreamwarenz/loveliness?label=Docker%20Hub&logo=docker)](https://hub.docker.com/r/dreamwarenz/loveliness)
+
 A clustered graph database built on [LadybugDB](https://github.com/LadybugDB/ladybug) — like Elasticsearch is to Lucene, Loveliness is to LadybugDB.
 
 > *A "loveliness" is the collective noun for a group of ladybugs.*
@@ -56,7 +61,7 @@ git clone https://github.com/dreamware-nz/loveliness.git && cd loveliness
 
 make build      # requires LadybugDB: curl -fsSL https://install.ladybugdb.com | sh
 make run        # single node → :8080 (HTTP), :7687 (Bolt)
-make docker     # 3-node cluster
+make docker     # 3-node cluster via Docker Compose
 make test       # 221 tests across 10 packages
 ```
 
@@ -81,6 +86,26 @@ curl -s -X POST localhost:8080/ingest/nodes -H "X-Table: Person" --data-binary @
 
 Full API reference: [docs/api.md](docs/api.md)
 
+## Docker
+
+```bash
+# Single image
+docker run -p 8080:8080 -p 7687:7687 dreamwarenz/loveliness
+
+# 3-node cluster
+docker compose up
+```
+
+## Kubernetes
+
+```bash
+kubectl apply -f deploy/k8s/namespace.yml
+kubectl apply -f deploy/k8s/service.yml
+kubectl apply -f deploy/k8s/statefulset.yml
+```
+
+StatefulSet with headless service, persistent volumes, health probes. Details: [docs/kubernetes.md](docs/kubernetes.md)
+
 ## Documentation
 
 | Doc | Contents |
@@ -90,8 +115,10 @@ Full API reference: [docs/api.md](docs/api.md)
 | [Bolt Protocol](docs/bolt.md) | Neo4j driver compatibility, examples, test results |
 | [API Reference](docs/api.md) | HTTP endpoints, bulk loading, ingest queue, DR, consistency |
 | [Configuration](docs/configuration.md) | Environment variables, shard count guidance |
+| [Kubernetes](docs/kubernetes.md) | StatefulSet deployment, scaling, backup to S3 |
 | [Project Structure](docs/project-structure.md) | Package layout and file descriptions |
+| [Contributing](CONTRIBUTING.md) | Development setup, PR guidelines |
 
 ## License
 
-MIT
+[MIT](LICENSE)

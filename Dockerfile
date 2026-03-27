@@ -19,5 +19,5 @@ RUN ldconfig
 
 COPY --from=builder /loveliness /usr/local/bin/loveliness
 
-EXPOSE 8080 9000 9001
+EXPOSE 8080 7687 9000 9001
 ENTRYPOINT ["loveliness"]

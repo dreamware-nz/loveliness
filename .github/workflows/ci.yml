@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Install LadybugDB
+        run: curl -fsSL https://install.ladybugdb.com | sh
+
+      - name: Build
+        run: CGO_ENABLED=1 go build -o loveliness ./cmd/loveliness
+
+      - name: Test
+        run: go test ./pkg/... -count=1 -timeout 120s
+
+      - name: Race detector
+        run: go test ./pkg/... -race -count=1 -timeout 180s
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Install LadybugDB
+        run: curl -fsSL https://install.ladybugdb.com | sh
+
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t loveliness:ci .

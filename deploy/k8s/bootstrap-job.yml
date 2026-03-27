@@ -1,0 +1,26 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: loveliness-bootstrap
+  namespace: loveliness
+spec:
+  template:
+    spec:
+      containers:
+        - name: bootstrap
+          image: dreamwarenz/loveliness:latest
+          command: ["sh", "-c"]
+          args:
+            - |
+              # Wait for pod-0 DNS to resolve.
+              until getent hosts loveliness-0.loveliness.loveliness.svc.cluster.local; do
+                echo "Waiting for loveliness-0..."
+                sleep 2
+              done
+              # Trigger bootstrap on pod-0 via env override.
+              echo "Bootstrap target is ready. The StatefulSet init handles bootstrap."
+          env:
+            - name: LOVELINESS_BOOTSTRAP
+              value: "true"
+      restartPolicy: Never
+  backoffLimit: 3

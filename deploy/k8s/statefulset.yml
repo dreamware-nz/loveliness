@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: loveliness
+  namespace: loveliness
+spec:
+  serviceName: loveliness
+  replicas: 3
+  selector:
+    matchLabels:
+      app: loveliness
+  template:
+    metadata:
+      labels:
+        app: loveliness
+    spec:
+      containers:
+        - name: loveliness
+          image: dreamwarenz/loveliness:latest
+          ports:
+            - containerPort: 8080
+              name: http
+            - containerPort: 7687
+              name: bolt
+            - containerPort: 9000
+              name: raft
+            - containerPort: 9001
+              name: transport
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: LOVELINESS_NODE_ID
+              value: "$(POD_NAME)"
+            - name: LOVELINESS_BIND_ADDR
+              value: ":8080"
+            - name: LOVELINESS_BOLT_ADDR
+              value: ":7687"
+            - name: LOVELINESS_RAFT_ADDR
+              value: "$(POD_NAME).loveliness.loveliness.svc.cluster.local:9000"
+            - name: LOVELINESS_GRPC_ADDR
+              value: "$(POD_NAME).loveliness.loveliness.svc.cluster.local:9001"
+            - name: LOVELINESS_DATA_DIR
+              value: /data
+            - name: LOVELINESS_SHARD_COUNT
+              value: "16"
+            - name: LOVELINESS_PEERS
+              value: "loveliness-0.loveliness.loveliness.svc.cluster.local:9000"
+            - name: LOVELINESS_BOOTSTRAP
+              value: "false"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 50Gi

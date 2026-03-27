@@ -1,6 +1,16 @@
 # Project Structure
 
 ```
+.github/
+  workflows/
+    ci.yml                          CI pipeline: test, lint, Docker build
+    release.yml                     Release: GoReleaser binaries + Docker Hub push
+deploy/
+  k8s/
+    namespace.yml                   Kubernetes namespace
+    statefulset.yml                 3-replica StatefulSet with PVCs and health probes
+    service.yml                     Headless service + LoadBalancer
+    bootstrap-job.yml               Raft bootstrap helper job
 cmd/
   loveliness/main.go              Entry point, config, shard init, Raft, HTTP, Bolt, TCP, ingest, shutdown
   benchmark/main.go               Benchmark suite (point lookups, traversals, writes, aggregations)
