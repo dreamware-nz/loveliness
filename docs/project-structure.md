@@ -1,6 +1,7 @@
 # Project Structure
 
 ```
+.golangci.yml                       Linter config: errcheck exclusions, staticcheck tuning
 .github/
   workflows/
     ci.yml                          CI pipeline: test, lint, Docker build
@@ -73,6 +74,7 @@ pkg/
     rebalancer.go                 Shard migration planning and execution
     partitioner.go                Cross-shard traversal stats + locality suggestions
     transfer.go                   Shard data transfer (export/import as Cypher)
+    join_token.go                 Single-use, time-limited join tokens for secure cluster join
   api/
     api.go                        HTTP API — /cypher, /health, /cluster, /join
     bulk.go                       Bulk loading endpoints with streaming CSV parse

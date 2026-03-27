@@ -62,7 +62,7 @@ git clone https://github.com/dreamware-nz/loveliness.git && cd loveliness
 make build      # requires LadybugDB: curl -fsSL https://install.ladybugdb.com | sh
 make run        # single node → :8080 (HTTP), :7687 (Bolt)
 make docker     # 3-node cluster via Docker Compose
-make test       # 221 tests across 10 packages
+make test       # 258 tests across 12 packages
 ```
 
 ## Usage
