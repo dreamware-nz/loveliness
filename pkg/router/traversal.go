@@ -38,7 +38,8 @@ func extractTraversal(cypher string) *TraversalInfo {
 		// Incoming: swap source and target.
 		info.SourceVar, info.TargetVar = info.TargetVar, info.SourceVar
 		info.SourceLabel, info.TargetLabel = info.TargetLabel, info.SourceLabel
-	} else if info = findTraversalPattern(cypher, ")-"); info != nil {
+	} else {
+		info = findTraversalPattern(cypher, ")-")
 		// Undirected.
 	}
 

@@ -97,7 +97,7 @@ func (w *Worker) processAll() {
 
 func (w *Worker) processJob(job *Job) {
 	slog.Info("ingest: processing job", "id", job.ID, "type", job.Type)
-	w.queue.UpdateStatus(job.ID, StatusRunning, 0, nil, "")
+	_ = w.queue.UpdateStatus(job.ID, StatusRunning, 0, nil, "")
 
 	start := time.Now()
 	var loaded int64
@@ -117,7 +117,7 @@ func (w *Worker) processJob(job *Job) {
 	if errMsg != "" {
 		status = StatusFailed
 	}
-	w.queue.UpdateStatus(job.ID, status, loaded, errs, errMsg)
+	_ = w.queue.UpdateStatus(job.ID, status, loaded, errs, errMsg)
 
 	slog.Info("ingest: job done",
 		"id", job.ID,

@@ -1,7 +1,6 @@
 package router
 
 import (
-	"hash"
 	"hash/fnv"
 	"math"
 	"sync"
@@ -109,7 +108,7 @@ func (bf *BloomFilter) Reset() {
 // hashes computes two independent hash values using double hashing.
 // All k hash positions are derived as h1 + i*h2.
 func (bf *BloomFilter) hashes(key string) (uint64, uint64) {
-	var h hash.Hash64 = fnv.New64a()
+	h := fnv.New64a()
 	h.Write([]byte(key))
 	h1 := h.Sum64()
 

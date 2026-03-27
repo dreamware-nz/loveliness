@@ -301,11 +301,11 @@ func (s *Server) handleWALCatchup(w http.ResponseWriter, r *http.Request) {
 
 	shardIDStr := r.PathValue("shardID")
 	var shardID int
-	fmt.Sscanf(shardIDStr, "%d", &shardID)
+	_, _ = fmt.Sscanf(shardIDStr, "%d", &shardID)
 
 	var afterSeq uint64
 	if v := r.URL.Query().Get("after"); v != "" {
-		fmt.Sscanf(v, "%d", &afterSeq)
+		_, _ = fmt.Sscanf(v, "%d", &afterSeq)
 	}
 
 	entries, err := s.dr.WAL.ReadFrom(shardID, afterSeq)

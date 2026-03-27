@@ -183,10 +183,6 @@ func (pe *PipelineExecutor) pipelineHop(
 ) ([]map[string]any, []string, []ShardError) {
 
 	// Extract unique keys and group by shard.
-	type shardBatch struct {
-		shardID int
-		keys    []string
-	}
 	keyToShard := make(map[string]int)
 	seen := make(map[string]bool)
 

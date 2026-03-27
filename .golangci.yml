@@ -1,0 +1,47 @@
+version: "2"
+
+linters:
+  default: standard
+  settings:
+    errcheck:
+      exclude-functions:
+        - (io.Closer).Close
+        - (net.Conn).Close
+        - (net.Conn).SetReadDeadline
+        - (net.Conn).SetWriteDeadline
+        - (net.Conn).Write
+        - (net.Listener).Close
+        - (*net.TCPConn).SetNoDelay
+        - (*net.TCPConn).SetKeepAlive
+        - (*net.TCPConn).SetKeepAlivePeriod
+        - (*os.File).Close
+        - (*os.File).WriteString
+        - os.Remove
+        - os.RemoveAll
+        - (*bufio.Writer).Flush
+        - (*encoding/csv.Writer).Write
+        - (*encoding/json.Encoder).Encode
+        - encoding/json.Marshal
+        - encoding/json.Unmarshal
+        - encoding/pem.Encode
+        - (*io.PipeWriter).Close
+        - io.ReadFull
+        - (*github.com/vmihailenco/msgpack/v5.Encoder).Encode
+        - github.com/vmihailenco/msgpack/v5.Marshal
+        - github.com/vmihailenco/msgpack/v5.Unmarshal
+        - (*net/http.Response).Body.Close
+
+    staticcheck:
+      checks:
+        - "all"
+        - "-QF1003"
+        - "-ST1000"
+
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+      - path: cmd/
+        linters:
+          - errcheck

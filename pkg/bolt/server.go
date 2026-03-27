@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/subtle"
 	"crypto/tls"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"log/slog"
@@ -16,9 +15,6 @@ import (
 
 // Bolt handshake magic preamble.
 var boltMagic = []byte{0x60, 0x60, 0xB0, 0x17}
-
-// Supported Bolt version (4.4).
-var supportedVersion = [4]byte{0x00, 0x02, 0x04, 0x04} // range 4.2..4.4
 
 // QueryExecutor executes Cypher and returns results.
 type QueryExecutor interface {
@@ -193,7 +189,7 @@ func (c *connection) negotiate() error {
 			break
 		}
 		// Also accept non-range proposals.
-		if major == 4 && minor >= 0 {
+		if major == 4 {
 			agreed = [4]byte{0, 0, minor, major}
 			break
 		}
@@ -580,11 +576,6 @@ func toAnySlice(ss []string) []any {
 	return out
 }
 
-// Addr returns the listen address as host:port for client version negotiation.
-func (c *connection) localAddr() string {
-	return c.conn.LocalAddr().String()
-}
-
 // WriteVersionNeg writes a version negotiation response directly (for testing).
 func WriteVersionNeg(w io.Writer, version [4]byte) error {
 	_, err := w.Write(version[:])
@@ -596,13 +587,4 @@ func ReadVersionNeg(r io.Reader) ([4]byte, error) {
 	var v [4]byte
 	_, err := io.ReadFull(r, v[:])
 	return v, err
-}
-
-// readUint32BE reads a big-endian uint32.
-func readUint32BE(r io.Reader) (uint32, error) {
-	b := make([]byte, 4)
-	if _, err := io.ReadFull(r, b); err != nil {
-		return 0, err
-	}
-	return binary.BigEndian.Uint32(b), nil
 }
