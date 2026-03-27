@@ -39,17 +39,23 @@ func boltConnect(t *testing.T, addr string) net.Conn {
 	}
 
 	// Send magic preamble.
-	conn.Write(boltMagic)
+	if _, err := conn.Write(boltMagic); err != nil {
+		t.Fatal("write magic:", err)
+	}
 
 	// Send version proposals: [4.4, 0, 0, 0]
 	versions := make([]byte, 16)
 	versions[2] = 4 // minor
 	versions[3] = 4 // major
-	conn.Write(versions)
+	if _, err := conn.Write(versions); err != nil {
+		t.Fatal("write versions:", err)
+	}
 
 	// Read agreed version.
 	agreed := make([]byte, 4)
-	io.ReadFull(conn, agreed)
+	if _, err := io.ReadFull(conn, agreed); err != nil {
+		t.Fatal("read agreed version:", err)
+	}
 	if agreed[3] != 4 {
 		t.Fatalf("expected Bolt 4.x, got %v", agreed)
 	}

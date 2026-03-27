@@ -85,7 +85,7 @@ func (q *Queue) Enqueue(jobType JobType, headers map[string]string, dataPath str
 		if err := copyFile(dataPath, destData); err != nil {
 			return "", fmt.Errorf("move data file: %w", err)
 		}
-		os.Remove(dataPath)
+		_ = os.Remove(dataPath)
 	}
 
 	job := &Job{

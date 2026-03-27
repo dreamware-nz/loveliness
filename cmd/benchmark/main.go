@@ -209,9 +209,9 @@ func seed() {
 	t0 := time.Now()
 	var buf bytes.Buffer
 	w := csv.NewWriter(&buf)
-	w.Write([]string{"name", "age", "city"})
+	_ = w.Write([]string{"name", "age", "city"})
 	for i := 0; i < *nodes; i++ {
-		w.Write([]string{
+		_ = w.Write([]string{
 			nodeName(i),
 			strconv.Itoa(18 + rand.Intn(62)),
 			cities[rand.Intn(len(cities))],
@@ -226,14 +226,14 @@ func seed() {
 	t0 = time.Now()
 	buf.Reset()
 	w = csv.NewWriter(&buf)
-	w.Write([]string{"from", "to", "since"})
+	_ = w.Write([]string{"from", "to", "since"})
 	for i := 0; i < *edges; i++ {
 		a := rand.Intn(*nodes)
 		b := rand.Intn(*nodes)
 		for b == a {
 			b = rand.Intn(*nodes)
 		}
-		w.Write([]string{nodeName(a), nodeName(b), strconv.Itoa(2015 + rand.Intn(11))})
+		_ = w.Write([]string{nodeName(a), nodeName(b), strconv.Itoa(2015 + rand.Intn(11))})
 	}
 	w.Flush()
 	bulkPost("/bulk/edges", "", "KNOWS", "Person", &buf)
@@ -258,7 +258,7 @@ func bulkPost(path, tableName, relTable, nodeTable string, body *bytes.Buffer) {
 		fmt.Fprintf(os.Stderr, "bulk load failed: %v\n", err)
 		os.Exit(1)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	b, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusMultiStatus {
 		fmt.Fprintf(os.Stderr, "bulk load HTTP %d: %s\n", resp.StatusCode, string(b))

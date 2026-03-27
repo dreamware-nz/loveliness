@@ -80,7 +80,7 @@ func (s *Server) Start() error {
 func (s *Server) Stop() {
 	s.running.Store(false)
 	if s.listener != nil {
-		s.listener.Close()
+		_ = s.listener.Close()
 	}
 	s.wg.Wait()
 }
