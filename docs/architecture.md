@@ -209,6 +209,7 @@ State is snapshotted as JSON and can be restored on any node.
 | `pkg/api` | HTTP API, bulk loading, ingest queue, DR |
 | `pkg/backup` | Backup/restore to local disk or S3 |
 | `pkg/ingest` | Log-backed async ingest queue |
+| `pkg/auth` | Token authentication: HTTP Bearer middleware, Bolt credential check |
 | `pkg/tlsutil` | Shared TLS config: server TLS, mTLS, client TLS |
 | `pkg/config` | Environment variable configuration |
 | `pkg/logging` | Structured JSON logging |

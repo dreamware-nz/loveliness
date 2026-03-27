@@ -106,7 +106,23 @@ kubectl apply -f deploy/k8s/statefulset.yml
 
 StatefulSet with headless service, persistent volumes, health probes. Details: [docs/kubernetes.md](docs/kubernetes.md)
 
-## TLS
+## Security
+
+### Authentication
+
+One env var enables token auth across HTTP and Bolt:
+
+```bash
+export LOVELINESS_AUTH_TOKEN=my-secret
+```
+
+- **HTTP**: all endpoints except `/health` require `Authorization: Bearer <token>`
+- **Bolt**: pass the token as the password in your driver auth (`auth=("neo4j", "my-secret")`)
+- **Disabled by default**: empty token = open access (dev mode)
+
+Details: [docs/configuration.md](docs/configuration.md#authentication)
+
+### TLS
 
 All transports support TLS. Three env vars enable it:
 
