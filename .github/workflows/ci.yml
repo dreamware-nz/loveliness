@@ -26,11 +26,14 @@ jobs:
 
       - name: Install LadybugDB shared library
         run: |
-          LBUG_DIR=$(go env GOMODCACHE)/github.com/\!ladybug\!d\!b/go-ladybug@v0.13.1/lib/dynamic/linux-amd64
-          mkdir -p "$LBUG_DIR" /tmp/lbug
           gh release download --repo LadybugDB/ladybug --pattern "liblbug-linux-x86_64.tar.gz" --dir /tmp/lbug --clobber
-          tar xzf /tmp/lbug/liblbug-linux-x86_64.tar.gz -C "$LBUG_DIR" liblbug.so
-          ls -la "$LBUG_DIR"
+          tar xzf /tmp/lbug/liblbug-linux-x86_64.tar.gz -C /tmp/lbug liblbug.so
+          sudo cp /tmp/lbug/liblbug.so /usr/local/lib/
+          sudo ln -sf /usr/local/lib/liblbug.so /usr/local/lib/liblbug.so.0
+          sudo ldconfig
+          LBUG_DIR=$(go env GOMODCACHE)/github.com/\!ladybug\!d\!b/go-ladybug@v0.13.1/lib/dynamic/linux-amd64
+          mkdir -p "$LBUG_DIR"
+          ln -sf /usr/local/lib/liblbug.so "$LBUG_DIR/liblbug.so"
         env:
           GH_TOKEN: ${{ github.token }}
 
@@ -59,17 +62,20 @@ jobs:
 
       - name: Install LadybugDB shared library
         run: |
-          LBUG_DIR=$(go env GOMODCACHE)/github.com/\!ladybug\!d\!b/go-ladybug@v0.13.1/lib/dynamic/linux-amd64
-          mkdir -p "$LBUG_DIR" /tmp/lbug
           gh release download --repo LadybugDB/ladybug --pattern "liblbug-linux-x86_64.tar.gz" --dir /tmp/lbug --clobber
-          tar xzf /tmp/lbug/liblbug-linux-x86_64.tar.gz -C "$LBUG_DIR" liblbug.so
+          tar xzf /tmp/lbug/liblbug-linux-x86_64.tar.gz -C /tmp/lbug liblbug.so
+          sudo cp /tmp/lbug/liblbug.so /usr/local/lib/
+          sudo ln -sf /usr/local/lib/liblbug.so /usr/local/lib/liblbug.so.0
+          sudo ldconfig
+          LBUG_DIR=$(go env GOMODCACHE)/github.com/\!ladybug\!d\!b/go-ladybug@v0.13.1/lib/dynamic/linux-amd64
+          mkdir -p "$LBUG_DIR"
+          ln -sf /usr/local/lib/liblbug.so "$LBUG_DIR/liblbug.so"
         env:
           GH_TOKEN: ${{ github.token }}
 
       - uses: golangci/golangci-lint-action@v6
         with:
-          version: v1.64.8
-          args: --go=1.24
+          version: v2.11.4
 
   docker:
     runs-on: ubuntu-latest
