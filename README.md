@@ -377,6 +377,27 @@ Per-shard probabilistic index (5M keys, 1% false positive rate, ~6MB each). Poin
 ### Phase C: Edge-Cut Replication
 When an edge crosses shard boundaries, the target node is replicated (with full properties) to the source shard. This means 1-hop traversals almost always resolve locally without cross-shard communication.
 
+**Why doesn't this cascade?** If Alice (shard 0) knows Bob (shard 1), Bob's properties get copied to shard 0. But Bob's *edges* are not copied — only his properties. The ref copy is a read-only property stub, not a full graph participant.
+
+```
+Shard 0 (owns Alice)              Shard 1 (owns Bob)              Shard 2 (owns Charlie)
+┌──────────────────────┐          ┌──────────────────────┐        ┌──────────────────────┐
+│ Alice (primary)      │          │ Bob (primary)        │        │ Charlie (primary)    │
+│   edges: → Bob       │          │   edges: → Charlie   │        │   edges: → Dave      │
+│                      │          │                      │        │                      │
+│ Bob (ref copy)       │          │ Charlie (ref copy)   │        │                      │
+│   properties: ✓      │          │   properties: ✓      │        │                      │
+│   edges: ✗ (none)    │          │   edges: ✗ (none)    │        │                      │
+└──────────────────────┘          └──────────────────────┘        └──────────────────────┘
+```
+
+This means:
+- **1-hop** (Alice→Bob): Resolves locally on shard 0. Bob's ref copy has his properties. **No cross-shard call.**
+- **2-hop** (Alice→Bob→Charlie): Shard 0 resolves Alice→Bob locally, but Bob's ref copy has no edges. To find Bob→Charlie, the router must go to shard 1 where Bob's primary lives. **One cross-shard call.**
+- **N-hop**: Each hop beyond the first requires a cross-shard call. Replication does not cascade — shard 0 never gets Charlie or Dave.
+
+This is a deliberate trade-off: ref copies are cheap (one extra MERGE per border node) and make the most common query pattern (1-hop neighborhood) fast, without the storage explosion that full-depth replication would cause. At 15M nodes with 4 shards, ~75% of edges cross shard boundaries, which would mean replicating the entire graph to every shard if edges were included — defeating the purpose of sharding.
+
 ### Phase D: Graph-Aware Partitioning
 Label propagation community detection identifies tightly-connected subgraphs. Used to suggest shard migrations that reduce cross-shard edge cuts.
 
