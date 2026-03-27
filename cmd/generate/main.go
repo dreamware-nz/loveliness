@@ -82,12 +82,12 @@ func main() {
 
 		var buf bytes.Buffer
 		w := csv.NewWriter(&buf)
-		w.Write([]string{"name", "age", "city"})
+		_ = w.Write([]string{"name", "age", "city"})
 		for i := offset; i < end; i++ {
 			name := nodeName(i)
 			age := strconv.Itoa(18 + rand.Intn(62))
 			city := cities[rand.Intn(len(cities))]
-			w.Write([]string{name, age, city})
+			_ = w.Write([]string{name, age, city})
 		}
 		w.Flush()
 
@@ -237,7 +237,7 @@ func mustCypher(client *http.Client, cypher string) {
 		fmt.Fprintf(os.Stderr, "cypher failed: %v\n  query: %s\n", err, cypher)
 		os.Exit(1)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		fmt.Fprintf(os.Stderr, "cypher failed (status %d): %s\n  query: %s\n", resp.StatusCode, body, cypher)
@@ -268,7 +268,7 @@ func bulkPost(client *http.Client, url, tableName, relTable, nodeTable string, c
 	if err != nil {
 		return 0, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusMultiStatus {
