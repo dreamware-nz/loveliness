@@ -6,43 +6,113 @@ A clustered graph database built on [LadybugDB](https://github.com/LadybugDB/lad
 
 ## What is this?
 
-LadybugDB is a Kuzu fork — a fast, embedded, columnar graph engine with Cypher support. It's excellent on a single machine but has no clustering story. Loveliness wraps LadybugDB in a distributed layer: declared shard keys, Raft consensus, cross-node query forwarding, write replication with tunable consistency, automatic shard rebalancing, and locality-aware placement.
+LadybugDB is a Kuzu fork — a fast, embedded, columnar graph engine with Cypher support. It's excellent on a single machine but has no clustering story. Loveliness wraps LadybugDB in a distributed layer: FNV-32a hash-based sharding, Raft consensus, cross-node query forwarding, Bloom filter shard routing, edge-cut replication, WAL-based disaster recovery, and a binary TCP transport for inter-node communication.
 
 Every node runs a single Go binary. No external dependencies besides LadybugDB itself.
+
+## Performance
+
+Benchmarked on Apple M1 Pro, single node, 4 shards.
+
+### At 15.7M nodes / 10M edges
+
+| Query Type | P50 Latency | QPS (8 workers) |
+|---|---|---|
+| Point lookup (PK) | **425us** | **10,758** |
+| Range filter (LIMIT 20) | **1.2ms** | 774 |
+| Count all nodes | **2.1ms** | 457 |
+| Count filtered (by city) | **56ms** | 15 |
+| Aggregation (avg/min/max) | **57ms** | 16 |
+| Group-by (10 cities) | **138ms** | 7 |
+| 1-hop traversal | **673us** | 1,106 |
+| 2-hop traversal | **162ms** | 5 |
+| Variable-length path (1..3) | **1.8ms** | 369 |
+| Mutual friends (triangle) | **1.1ms** | 838 |
+| Shortest path (1..6) | **1.1ms** | 188 |
+| Single write | **365us** | 2,526 |
+| Merge/upsert | **5.0ms** | 190 |
+
+### Bulk loading throughput
+
+| Operation | Throughput | Notes |
+|---|---|---|
+| Node loading (COPY FROM) | **70–190K nodes/sec** | Degrades with B-tree depth at scale |
+| Edge loading (2-pass) | **9.6K edges/sec** | Pass 1: ref nodes, Pass 2: edges |
+
+### How we compare (estimated, 10–15M node scale)
+
+| Benchmark | Loveliness | Neo4j | Memgraph | TigerGraph | Neptune | JanusGraph |
+|---|---|---|---|---|---|---|
+| Point lookup P50 | **425us** | 200–500us | 50–150us | 300–800us | 5–15ms | 2–10ms |
+| Concurrent read QPS | **10.7K** | 10–30K | 30–80K | 20–50K | 2–5K | 1–3K |
+| 1-hop traversal P50 | **673us** | 200–600us | 100–300us | 500us–1ms | 5–20ms | 2–10ms |
+| 2-hop traversal P50 | **162ms** | 10–50ms | 5–20ms | 20–80ms | 50–200ms | 50–200ms |
+| Single write P50 | **365us** | 1–5ms | 100–300us | 1–2ms | 5–15ms | 5–20ms |
+| Bulk load (nodes/sec) | **70–190K** | 30–80K online | 50–100K | 200K–1M | 50–150K | 10–50K |
+
+**Where we win:** Point lookups (Bloom filter routing avoids unnecessary shard hits), single writes (lightweight transaction model), 1-hop traversals (edge-cut replication keeps most hops local), operational simplicity (single binary, no JVM, no external storage).
+
+**Where we lose:** Multi-hop fan-out (scatter-gather + serialization per hop vs native pointer chasing), concurrent throughput ceiling (CGo boundary tax on every query), query optimizer maturity (Neo4j has 15 years of cost-based optimization).
+
+**Where we're different:** Sharded from day one (Neo4j Fabric is an afterthought), columnar storage under the hood (analytics queries are better than expected for a graph DB), horizontal scalability by adding nodes.
+
+### Inter-node transport: TCP+MessagePack vs HTTP+JSON
+
+Internal cluster communication uses a binary TCP transport with MessagePack serialization instead of HTTP+JSON. Micro-benchmarks on 1000-row result sets:
+
+| Scenario | HTTP+JSON | TCP+MsgPack | Speedup |
+|---|---|---|---|
+| Single query (250 rows) | 551us | 269us | **2.1x** |
+| Scatter-gather 4 shards | 1,339us | 658us | **2.0x** |
+| 8-worker concurrent | 397us | 94us | **4.2x** |
+| Marshal 1000 rows | 481us | 198us | **2.4x** |
+| Unmarshal 1000 rows | 1,247us | 442us | **2.8x** |
 
 ## Architecture
 
 ```
-                         ┌─────────────────────────────────────────────┐
-         HTTP Client ──► │              Loveliness Node                │
-                         │                                             │
-                         │  ┌──────────┐  ┌───────────┐  ┌─────────┐  │
-                         │  │ HTTP API │  │   Raft    │  │Transport│  │
-                         │  │ /query   │  │ Consensus │  │ Client  │  │
-                         │  └────┬─────┘  └─────┬─────┘  └────┬────┘  │
-                         │       │              │              │       │
-                         │  ┌────▼──────────────▼──────────────▼────┐  │
-                         │  │           Query Router                 │  │
-                         │  │  parse → schema lookup → route/forward │  │
-                         │  └──┬──────────────────────────────┬─────┘  │
-                         │     │ local                  remote│        │
-                         │  ┌──▼───┐  ┌──────┐         POST /internal │
-                         │  │Shard │  │Shard │         /query → peer  │
-                         │  │  0   │  │  5   │                        │
-                         │  └──────┘  └──────┘                        │
-                         │  (only shards assigned to this node)       │
-                         └─────────────────────────────────────────────┘
+                         ┌──────────────────────────────────────────────────┐
+         HTTP Client ──► │                Loveliness Node                   │
+                         │                                                  │
+                         │  ┌──────────┐  ┌───────────┐  ┌──────────────┐  │
+                         │  │ HTTP API │  │   Raft    │  │ TCP Transport│  │
+                         │  │  /query  │  │ Consensus │  │  MsgPack     │  │
+                         │  │  /ingest │  │           │  │  Pool+Framed │  │
+                         │  └────┬─────┘  └─────┬─────┘  └──────┬───────┘  │
+                         │       │              │                │          │
+                         │  ┌────▼──────────────▼────────────────▼───────┐  │
+                         │  │              Query Router                   │  │
+                         │  │  parse → Bloom filter → route/scatter      │  │
+                         │  │                                             │  │
+                         │  │  Optimizations:                             │  │
+                         │  │   A. Aggregate merging (AVG→SUM+COUNT)     │  │
+                         │  │   B. Bloom filter shard routing             │  │
+                         │  │   C. Edge-cut replication                   │  │
+                         │  │   D. Graph-aware partitioning               │  │
+                         │  │   E. Pipeline execution                     │  │
+                         │  └──┬──────────────────────────────────┬─────┘  │
+                         │     │ local                      remote│        │
+                         │  ┌──▼───┐  ┌──────┐          TCP+msgpack       │
+                         │  │Shard │  │Shard │          to peer node      │
+                         │  │  0   │  │  1   │                            │
+                         │  └──────┘  └──────┘                            │
+                         │                                                  │
+                         │  ┌──────────────────────────────────────────┐   │
+                         │  │  WAL │ Backup │ Ingest Queue │ Replicas │   │
+                         │  └──────────────────────────────────────────┘   │
+                         └──────────────────────────────────────────────────┘
 ```
 
 **Key properties:**
 
-- **Declared shard keys** — each node table has a PRIMARY KEY that determines shard routing. `Person(name STRING, PRIMARY KEY(name))` means all Person queries route on `name`, not on arbitrary string values.
-- **Shard placement** — shards are assigned to specific nodes (primary + replica). Nodes only open their assigned shards, not all shards.
-- **Cross-node query forwarding** — if the target shard is on another node, the query is transparently forwarded via internal HTTP.
-- **Write replication** — after writing to the primary shard, the write fans out to replicas with tunable consistency (ONE, QUORUM, ALL).
-- **Automatic rebalancing** — when nodes join or leave, the leader computes a migration plan and redistributes shards.
-- **Locality-aware placement** — tracks cross-shard traversal statistics and suggests colocation to reduce network hops.
-- **Raft consensus** — cluster state (shard map, node membership, schema) is replicated via hashicorp/raft.
+- **Declared shard keys** — each node table has a PRIMARY KEY that determines shard routing via FNV-32a hashing
+- **Bloom filter routing** — per-shard probabilistic index (5M keys, 1% FPR, ~6MB per shard) routes point lookups to a single shard instead of scatter-gathering
+- **Edge-cut replication** — border nodes are replicated with full properties across shards so 1-hop traversals resolve locally
+- **Aggregate pushdown** — AVG is rewritten to SUM+COUNT per shard, merged at the router; ORDER BY, LIMIT, and DISTINCT applied post-merge
+- **Pipeline execution** — multi-hop traversals overlap across shards
+- **WAL + backup/restore** — per-shard write-ahead log with backup to local disk or S3
+- **Log-backed ingest queue** — async bulk loading with durable job state
+- **TCP+MsgPack transport** — binary framed protocol for inter-node queries, 2-4x faster than HTTP+JSON
 
 ## Quick Start
 
@@ -63,7 +133,7 @@ make build
 
 # Start a single-node cluster
 make run
-# → listening on :8080
+# → listening on :8080 (HTTP), :9001 (TCP transport)
 ```
 
 ### Run a 3-Node Cluster
@@ -129,13 +199,54 @@ curl -s localhost:8080/query -d '{
 }'
 ```
 
-Write queries **must** include the shard key (the PRIMARY KEY property). If you omit it, the router returns `MISSING_SHARD_KEY` because scatter-gathering writes would mutate data on the wrong shards.
+### 3. Bulk Loading
 
-### 3. Query Data
+For large datasets, use the bulk loading endpoints or the async ingest queue.
+
+**Synchronous bulk load:**
+```bash
+# Bulk load nodes from CSV
+curl -s localhost:8080/bulk/nodes \
+  -H "Content-Type: text/csv" \
+  -H "X-Table: Person" \
+  --data-binary @persons.csv
+
+# Bulk load edges (two-pass for cross-shard performance)
+# Pass 1: Create reference nodes
+curl -s localhost:8080/bulk/edges \
+  -H "X-Rel-Table: KNOWS" -H "X-From-Table: Person" -H "X-To-Table: Person" \
+  -H "X-Refs-Only: true" \
+  --data-binary @edges.csv
+
+# Pass 2: Load edges (refs already exist)
+curl -s localhost:8080/bulk/edges \
+  -H "X-Rel-Table: KNOWS" -H "X-From-Table: Person" -H "X-To-Table: Person" \
+  -H "X-Skip-Refs: true" \
+  --data-binary @edges.csv
+```
+
+**Async ingest queue (for large loads):**
+```bash
+# Submit a node ingest job — returns immediately with job ID
+curl -s -X POST localhost:8080/ingest/nodes \
+  -H "X-Table: Person" \
+  --data-binary @persons.csv
+# → {"job_id": "20260327-120000-abc123", "status": "pending"}
+
+# Poll job status
+curl -s localhost:8080/ingest/jobs/20260327-120000-abc123
+# → {"status": "completed", "loaded": 5000000, ...}
+
+# List all jobs
+curl -s localhost:8080/ingest/jobs
+```
+
+The ingest queue spools the CSV to disk, returns 202 Accepted, and processes jobs sequentially in the background. Jobs survive server restarts.
+
+### 4. Query Data
 
 **Point lookup (single shard):**
 ```bash
-# Routes directly to Alice's shard — fast, no fan-out
 curl -s localhost:8080/query -d '{
   "cypher": "MATCH (p:Person {name: '\''Alice'\''}) RETURN p.name, p.age, p.city"
 }'
@@ -143,7 +254,6 @@ curl -s localhost:8080/query -d '{
 
 **Scan (scatter-gather):**
 ```bash
-# No shard key → fans out to all shards, merges results
 curl -s localhost:8080/query -d '{
   "cypher": "MATCH (p:Person) RETURN p.name, p.age ORDER BY p.age LIMIT 10"
 }'
@@ -151,7 +261,6 @@ curl -s localhost:8080/query -d '{
 
 **Traversal:**
 ```bash
-# Who does Alice know?
 curl -s localhost:8080/query -d '{
   "cypher": "MATCH (a:Person {name: '\''Alice'\''})-[:KNOWS]->(b) RETURN b.name"
 }'
@@ -166,17 +275,32 @@ curl -s localhost:8080/query -d '{
 }
 ```
 
-If some shards fail during a scatter-gather, you get partial results:
-```json
-{
-  "columns": ["p.name"],
-  "rows": [...],
-  "partial": true,
-  "errors": [{"shard_id": 2, "error": "shard 2 is unhealthy"}]
-}
+### 5. Disaster Recovery
+
+**Backup and restore:**
+```bash
+# Stream a backup archive
+curl -s localhost:8080/backup -o backup.tar.gz
+
+# Restore from archive
+curl -s -X POST localhost:8080/restore --data-binary @backup.tar.gz
+
+# WAL status
+curl -s localhost:8080/wal/status
 ```
 
-### 4. Write Consistency
+**CSV export:**
+```bash
+# Export a node table
+curl -s localhost:8080/export/Person
+
+# Export edges
+curl -s localhost:8080/export/Person/edges/KNOWS
+```
+
+**S3 scheduled backups** are configured via environment variables (see Configuration).
+
+### 6. Write Consistency
 
 Control how many replicas must acknowledge a write by passing the `consistency` parameter:
 
@@ -186,41 +310,22 @@ Control how many replicas must acknowledge a write by passing the `consistency` 
 | `QUORUM` | Ack after primary + 1 replica (default) | Safe default for most workloads |
 | `ALL` | Ack after all replicas confirm | Maximum durability |
 
-### 5. Monitor the Cluster
+### 7. Monitor the Cluster
 
-**Health check:**
 ```bash
+# Health check
 curl -s localhost:8080/health | jq
-# {
-#   "status": "ok",          # or "degraded" if any shard is unhealthy
-#   "role": "leader",        # or "follower"
-#   "node_id": "node-1",
-#   "shards": {"0": "healthy", "1": "healthy", "2": "healthy"}
-# }
-```
 
-**Cluster status:**
-```bash
+# Cluster status
 curl -s localhost:8080/cluster | jq
-# {
-#   "is_leader": true,
-#   "leader": "node1:9000",
-#   "node_id": "node-1",
-#   "shard_map": {"0": {"primary": "node-1", "replica": "node-2"}, ...},
-#   "nodes": {"node-1": {"alive": true, ...}, ...}
-# }
-```
 
-**Add a node:**
-```bash
-# On the leader — add node-4 to the cluster
+# Add a node
 curl -s localhost:8080/join -d '{
   "node_id": "node-4",
   "raft_addr": "node4:9000",
   "grpc_addr": "node4:9001",
   "http_addr": "node4:8080"
 }'
-# Rebalancer automatically migrates shards to the new node
 ```
 
 ## Configuration
@@ -232,13 +337,20 @@ All configuration is via environment variables:
 | `LOVELINESS_NODE_ID` | `node-1` | Unique node identifier |
 | `LOVELINESS_BIND_ADDR` | `:8080` | HTTP API listen address |
 | `LOVELINESS_RAFT_ADDR` | `:9000` | Raft consensus address |
-| `LOVELINESS_GRPC_ADDR` | `:9001` | Internal gRPC address |
+| `LOVELINESS_GRPC_ADDR` | `:9001` | TCP transport address (msgpack) |
 | `LOVELINESS_DATA_DIR` | `./data` | Base directory for shard data and Raft state |
 | `LOVELINESS_SHARD_COUNT` | `3` | Total number of shards |
 | `LOVELINESS_BOOTSTRAP` | `false` | Bootstrap a new cluster (first node only) |
 | `LOVELINESS_PEERS` | *(empty)* | Comma-separated list of peer Raft addresses |
 | `LOVELINESS_MAX_CONCURRENT_QUERIES` | `16` | Max concurrent CGo calls per shard |
 | `LOVELINESS_QUERY_TIMEOUT_MS` | `30000` | Per-shard query timeout in milliseconds |
+| `LOVELINESS_S3_BUCKET` | *(empty)* | S3 bucket for backup storage |
+| `LOVELINESS_S3_REGION` | *(empty)* | AWS region for S3 |
+| `LOVELINESS_S3_PREFIX` | *(empty)* | Key prefix within the S3 bucket |
+| `LOVELINESS_S3_ENDPOINT` | *(empty)* | Custom S3 endpoint (MinIO, R2, etc.) |
+| `LOVELINESS_BACKUP_INTERVAL_MIN` | `0` | Minutes between scheduled backups (0 = disabled) |
+| `LOVELINESS_BACKUP_RETENTION` | `3` | Number of backups to retain |
+| `LOVELINESS_BACKUP_DIR` | *(empty)* | Local directory for backups (when S3 is not configured) |
 
 ### Choosing shard count
 
@@ -252,43 +364,86 @@ Shards are fixed at cluster creation — you can't reshard later without rebuild
 
 Rule: your shard count is the maximum number of nodes you can ever use. 16 shards = up to 16 nodes.
 
-## API Reference
+## Query Optimization Phases
 
-### `POST /query`
+Loveliness applies five optimization phases to distributed queries:
 
-Execute a Cypher query. The router parses the query, looks up the table's shard key from the schema registry, and routes to the appropriate shard(s).
+### Phase A: Aggregate Merging
+Rewrites `AVG(x)` to `SUM(x)` + `COUNT(x)` per shard, then merges at the router. Also handles post-merge `ORDER BY`, `LIMIT`, and `DISTINCT`.
 
-**Request:**
-```json
-{"cypher": "MATCH (p:Person {name: 'Alice'}) RETURN p"}
+### Phase B: Bloom Filter Routing
+Per-shard probabilistic index (5M keys, 1% false positive rate, ~6MB each). Point lookups check the Bloom filter first — if only one shard reports "maybe", the query skips the other shards entirely.
+
+### Phase C: Edge-Cut Replication
+When an edge crosses shard boundaries, the target node is replicated (with full properties) to the source shard. This means 1-hop traversals almost always resolve locally without cross-shard communication.
+
+### Phase D: Graph-Aware Partitioning
+Label propagation community detection identifies tightly-connected subgraphs. Used to suggest shard migrations that reduce cross-shard edge cuts.
+
+### Phase E: Pipeline Execution
+Multi-hop traversals overlap across shards — while shard 0 processes hop 2, shard 1 processes hop 1. Reduces serial round-trip latency.
+
+## Project Structure
+
 ```
-
-**Error codes:**
-
-| Code | HTTP Status | Meaning |
-|---|---|---|
-| `CYPHER_PARSE_ERROR` | 400 | Empty or unparseable query |
-| `MISSING_SHARD_KEY` | 400 | Write query has no shard key for routing |
-| `SHARD_UNAVAILABLE` | 503 | Target shard is unhealthy |
-| `QUERY_TIMEOUT` | 504 | Query exceeded timeout |
-| `BROADCAST_PARTIAL` | 500 | Schema DDL failed on some shards |
-| `QUERY_ERROR` | 500 | LadybugDB execution error |
-
-### `GET /health`
-
-Node health with per-shard status. Returns `"status": "degraded"` if any shard is unhealthy.
-
-### `GET /cluster`
-
-Cluster status: shard map (which node owns which shard), node list, current leader.
-
-### `POST /join`
-
-Join a new node to the cluster. Must be called on the leader. Triggers automatic shard rebalancing.
-
-### `POST /internal/query`
-
-Internal endpoint for node-to-node query forwarding. Not intended for external clients.
+cmd/
+  loveliness/main.go              Entry point, config, shard init, Raft, HTTP, TCP, ingest, shutdown
+  benchmark/main.go               Benchmark suite (point lookups, traversals, writes, aggregations)
+  generate/main.go                Bulk data generator with two-pass edge loading
+pkg/
+  config/config.go                Configuration from environment variables
+  logging/logging.go              Structured JSON logging (log/slog)
+  schema/
+    registry.go                   Schema registry — maps tables to shard key properties
+  shard/
+    store.go                      Store interface (abstracts LadybugDB)
+    lbug_store.go                 Production Store via go-ladybug CGo bindings
+    memory_store.go               In-memory mock Store for testing
+    shard.go                      Shard wrapper — semaphore concurrency + CGo panic recovery
+    manager.go                    Shard lifecycle manager — opens/closes by assignment
+  router/
+    parser.go                     Cypher classifier + schema-aware shard key extraction
+    router.go                     Query routing — single-shard, scatter-gather, broadcast
+    aggregate.go                  Phase A: distributed aggregate merging
+    bloom.go                      Phase B: per-shard Bloom filter index
+    edgecut.go                    Phase C: edge-cut border node replication
+    partition.go                  Phase D: label propagation community detection
+    pipeline.go                   Phase E: overlapping multi-hop pipeline execution
+  transport/
+    codec.go                      MsgPack wire format: length-prefixed frames with type byte
+    tcp.go                        TCP server: persistent connections, buffered I/O
+    pool.go                       TCP connection pool: lazy dial, auto-eviction
+    client.go                     Unified client: TCP+msgpack preferred, HTTP+JSON fallback
+    handler.go                    HTTP /internal/query endpoint (legacy fallback)
+    shard_set.go                  Lightweight shard slice adapter
+  replication/
+    wal.go                        Per-shard write-ahead log with fsync and crash recovery
+    catchup.go                    Replica WAL catch-up with configurable batch size
+    readpref.go                   Read preference routing (PRIMARY/PREFER_REPLICA/NEAREST)
+  backup/
+    backup.go                     Backup manager: gzip'd tar of shard data + manifest
+    export.go                     CSV export with scatter-gather dedup
+    s3store.go                    S3 backup store (AWS, MinIO, R2)
+    localstore.go                 Local filesystem backup store
+    scheduler.go                  Scheduled backup with retention pruning
+    store.go                      Backup store interface
+  ingest/
+    queue.go                      Log-backed ingest queue with durable job state
+    worker.go                     Sequential background worker for async bulk loading
+    shard_adapter.go              Bridge between ingest worker and shard/router
+  cluster/
+    fsm.go                        Raft FSM — shard map, node membership, assignments
+    cluster.go                    Raft lifecycle — bootstrap, join, failover, leadership
+    rebalancer.go                 Shard migration planning and execution
+    partitioner.go                Cross-shard traversal stats + locality suggestions
+    transfer.go                   Shard data transfer (export/import as Cypher)
+  api/
+    api.go                        HTTP API — /query, /health, /cluster, /join
+    bulk.go                       Bulk loading endpoints with streaming CSV parse
+    bulk_stream.go                Streaming bulk load variant
+    ingest.go                     Async ingest queue endpoints
+    dr.go                         DR endpoints — backup, restore, export, WAL status
+```
 
 ## Supported Cypher
 
@@ -299,53 +454,7 @@ Loveliness passes all Cypher through to LadybugDB — the router only classifies
 | **Reads** | `MATCH`, `OPTIONAL MATCH`, `WITH`, `UNWIND`, `CALL`, `RETURN`, `ORDER BY`, `LIMIT` | Shard key → single shard; no key → scatter-gather |
 | **Writes** | `CREATE`, `MERGE`, `SET`, `DELETE`, `DETACH DELETE`, `REMOVE` | Shard key required; routes to owning shard |
 | **Schema DDL** | `CREATE NODE TABLE`, `CREATE REL TABLE`, `DROP TABLE`, `ALTER` | Broadcast to all shards |
-
-## Project Structure
-
-```
-cmd/loveliness/main.go          Entry point, config, shard init, Raft, HTTP, auto-join, graceful shutdown
-pkg/
-  config/config.go              Configuration from environment variables
-  logging/logging.go            Structured JSON logging (log/slog)
-  schema/
-    registry.go                 Schema registry — maps tables to shard key properties
-    registry_test.go            Tests for DDL parsing and registry operations
-  shard/
-    store.go                    Store interface (abstracts LadybugDB)
-    lbug_store.go               Production Store via go-ladybug CGo bindings
-    memory_store.go             In-memory mock Store for testing
-    shard.go                    Shard wrapper — semaphore concurrency control + CGo panic recovery
-    shard_test.go               Concurrency, health, panic recovery tests
-    manager.go                  Shard lifecycle manager — opens/closes shards based on assignments
-    manager_test.go             Shard placement reconciliation tests
-  router/
-    parser.go                   Cypher classifier + schema-aware shard key extraction
-    parser_test.go              Parsing, classification, key extraction tests
-    router.go                   Query routing — single-shard, scatter-gather, broadcast
-    router_test.go              Routing, timeout, partial result tests
-  transport/
-    client.go                   HTTP client pool for peer nodes
-    handler.go                  Internal /internal/query endpoint
-    transport_test.go           Cross-node forwarding tests
-  replication/
-    replicator.go               Write fan-out with consistency levels (ONE/QUORUM/ALL)
-    replicator_test.go          Replication, timeout, consistency tests
-  cluster/
-    fsm.go                      Raft FSM — shard map, node membership, shard assignments
-    fsm_test.go                 FSM apply, snapshot, restore tests
-    cluster.go                  Raft lifecycle — bootstrap, join, failover, leadership
-    rebalancer.go               Shard migration planning and execution
-    rebalancer_test.go          Rebalance algorithm tests
-    partitioner.go              Cross-shard traversal stats + locality suggestions
-    partitioner_test.go         Partitioning tests
-  api/
-    api.go                      HTTP API — /query, /health, /cluster, /join + middleware
-    api_test.go                 API endpoint tests
-Dockerfile                      Multi-stage build with LadybugDB shared library
-docker-compose.yml              3-node cluster for local development
-Makefile                        build, test, run, docker, cover, lint, race
-ARCHITECTURE.md                 Detailed architecture and design decisions
-```
+| **Bulk** | `COPY FROM` | Via `/bulk/nodes` or `/bulk/edges` endpoints |
 
 ## How It Works
 
@@ -354,29 +463,26 @@ ARCHITECTURE.md                 Detailed architecture and design decisions
 1. Client sends `POST /query {"cypher": "MATCH (p:Person {name: 'Alice'}) RETURN p"}`
 2. **Parser** classifies the query (read/write/schema) and extracts labels (`Person`)
 3. **Schema registry** looks up Person's shard key → `name`
-4. **Parser** finds the `name` property value → `"Alice"` (ignores other properties)
-5. **Router** hashes: `fnv32a("Alice") % num_shards` → shard 7
-6. **Shard map** lookup: shard 7's primary is `node-2`
-7. If local → execute directly on the LadybugDB instance
-8. If remote → forward via `POST /internal/query` to node-2
-9. Return result to client
+4. **Bloom filter** checks which shards might have `"Alice"` → shard 2
+5. **Router** sends query to shard 2 only (instead of all 4)
+6. If shard is local → execute directly via CGo
+7. If remote → forward via TCP+msgpack to the owning node
+8. Return result to client
 
-### Write lifecycle (with replication)
+### Write lifecycle
 
 1. Router sends write to **primary** shard on the owning node
-2. Primary executes the Cypher against LadybugDB
-3. **Replicator** fans out the same Cypher to replica node(s)
-4. With `QUORUM`: wait for primary + 1 replica ACK, then respond
-5. With `ONE`: respond immediately, replicate async
-6. With `ALL`: wait for all replicas
+2. **WAL** appends the Cypher before execution (for crash recovery and replica catch-up)
+3. Primary executes the Cypher against LadybugDB
+4. **Replicator** fans out to replica node(s) per consistency level
+5. Response returned to client
 
-### Cluster membership
+### Edge-cut replication
 
-1. First node starts with `LOVELINESS_BOOTSTRAP=true` → becomes Raft leader
-2. Additional nodes start with `LOVELINESS_PEERS=node1:9000` → auto-join via HTTP
-3. Leader assigns shards round-robin: 16 shards across 3 nodes = ~5 shards each
-4. Each shard gets a primary and a replica on different nodes
-5. When a node joins/leaves, the **rebalancer** computes migrations and redistributes
+When Alice (shard 0) creates an edge to Bob (shard 2):
+1. A **reference node** for Bob is created on shard 0 with full properties
+2. The edge is stored on shard 0 (edges live with their source)
+3. `MATCH (a:Person {name: 'Alice'})-[:KNOWS]->(b)` resolves entirely on shard 0 — no cross-shard hop needed
 
 ### CGo safety
 
@@ -396,6 +502,10 @@ make cover
 
 # Lint (requires golangci-lint)
 make lint
+
+# Run benchmarks at scale
+go run ./cmd/generate -nodes 5000000 -edge-ratio 1.0
+go run ./cmd/benchmark -skip-seed -nodes 5000000 -edges 5000000
 
 # Clean build artifacts and data
 make clean

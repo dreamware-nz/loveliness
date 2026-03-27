@@ -11,9 +11,11 @@ import (
 
 // DRExtension holds disaster recovery dependencies injected into the Server.
 type DRExtension struct {
-	BackupMgr  *backup.Manager
-	WAL        *replication.WAL
+	BackupMgr    *backup.Manager
+	WAL          *replication.WAL
 	ReplicaState *replication.ReplicaState
+	BackupStore  backup.BackupStore // S3 or local backup storage
+	Scheduler    *backup.Scheduler  // periodic backup scheduler
 }
 
 // SetDR attaches DR capabilities to the server.
@@ -29,6 +31,10 @@ func (s *Server) registerDRRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /export/{table}/edges/{relTable}", s.handleExportEdges)
 	mux.HandleFunc("GET /wal/status", s.handleWALStatus)
 	mux.HandleFunc("GET /wal/catchup/{shardID}", s.handleWALCatchup)
+	mux.HandleFunc("POST /backup/store", s.handleBackupToStore)
+	mux.HandleFunc("POST /restore/store/{key}", s.handleRestoreFromStore)
+	mux.HandleFunc("GET /backup/store", s.handleListBackups)
+	mux.HandleFunc("DELETE /backup/store/{key}", s.handleDeleteBackup)
 }
 
 // handleBackup streams a compressed tar archive of all shard data.
@@ -50,7 +56,6 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 	manifest, err := s.dr.BackupMgr.CreateBackup(w, s.shards, walSeq)
 	if err != nil {
 		slog.Error("backup failed", "err", err)
-		// Can't write error JSON since we already started streaming.
 		return
 	}
 	slog.Info("backup complete",
@@ -60,7 +65,6 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 
 // handleRestore accepts a compressed tar archive and restores shard data.
 // POST /restore (Content-Type: application/gzip)
-// WARNING: This overwrites existing shard data. Server should be drained first.
 func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	if s.dr == nil || s.dr.BackupMgr == nil {
 		writeError(w, http.StatusServiceUnavailable, "NO_DR", "backup not configured", 0)
@@ -74,12 +78,113 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":      "restored",
-		"shards":      manifest.ShardCount,
+		"status":       "restored",
+		"shards":       manifest.ShardCount,
 		"wal_sequence": manifest.WALSequence,
-		"created_at":  manifest.CreatedAt,
-		"note":        "restart the server to load restored data",
+		"created_at":   manifest.CreatedAt,
+		"note":         "restart the server to load restored data",
 	})
+}
+
+// handleBackupToStore creates a backup and stores it in the configured backup store (S3 or local).
+// POST /backup/store
+func (s *Server) handleBackupToStore(w http.ResponseWriter, r *http.Request) {
+	if s.dr == nil || s.dr.Scheduler == nil {
+		writeError(w, http.StatusServiceUnavailable, "NO_STORE", "backup store not configured", 0)
+		return
+	}
+
+	manifest, key, err := s.dr.Scheduler.RunNow()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "BACKUP_ERROR", err.Error(), 0)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":       "stored",
+		"key":          key,
+		"shards":       manifest.ShardCount,
+		"wal_sequence": manifest.WALSequence,
+	})
+}
+
+// handleRestoreFromStore restores from a backup in the store by key.
+// POST /restore/store/{key}
+func (s *Server) handleRestoreFromStore(w http.ResponseWriter, r *http.Request) {
+	if s.dr == nil || s.dr.BackupStore == nil || s.dr.BackupMgr == nil {
+		writeError(w, http.StatusServiceUnavailable, "NO_STORE", "backup store not configured", 0)
+		return
+	}
+
+	key := r.PathValue("key")
+	if key == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "backup key required", 0)
+		return
+	}
+
+	rc, err := s.dr.BackupStore.Get(key)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "backup not found: "+err.Error(), 0)
+		return
+	}
+	defer rc.Close()
+
+	manifest, err := s.dr.BackupMgr.RestoreBackup(rc)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "RESTORE_ERROR", err.Error(), 0)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":       "restored",
+		"key":          key,
+		"shards":       manifest.ShardCount,
+		"wal_sequence": manifest.WALSequence,
+		"created_at":   manifest.CreatedAt,
+		"note":         "restart the server to load restored data",
+	})
+}
+
+// handleListBackups returns all backups in the store.
+// GET /backup/store
+func (s *Server) handleListBackups(w http.ResponseWriter, r *http.Request) {
+	if s.dr == nil || s.dr.BackupStore == nil {
+		writeError(w, http.StatusServiceUnavailable, "NO_STORE", "backup store not configured", 0)
+		return
+	}
+
+	metas, err := s.dr.BackupStore.List()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "LIST_ERROR", err.Error(), 0)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"backups": metas,
+		"count":   len(metas),
+	})
+}
+
+// handleDeleteBackup deletes a backup from the store by key.
+// DELETE /backup/store/{key}
+func (s *Server) handleDeleteBackup(w http.ResponseWriter, r *http.Request) {
+	if s.dr == nil || s.dr.BackupStore == nil {
+		writeError(w, http.StatusServiceUnavailable, "NO_STORE", "backup store not configured", 0)
+		return
+	}
+
+	key := r.PathValue("key")
+	if key == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "backup key required", 0)
+		return
+	}
+
+	if err := s.dr.BackupStore.Delete(key); err != nil {
+		writeError(w, http.StatusInternalServerError, "DELETE_ERROR", err.Error(), 0)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted", "key": key})
 }
 
 // handleExport streams all rows of a node table as CSV.
@@ -91,7 +196,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pkColumn := "name" // default
+	pkColumn := "name"
 	if s.schema != nil {
 		if pk := s.schema.GetShardKey(tableName); pk != "" {
 			pkColumn = pk
@@ -117,7 +222,7 @@ func (s *Server) handleExportEdges(w http.ResponseWriter, r *http.Request) {
 	relTable := r.PathValue("relTable")
 	toTable := r.URL.Query().Get("to")
 	if toTable == "" {
-		toTable = fromTable // default: same table for both endpoints
+		toTable = fromTable
 	}
 
 	if fromTable == "" || relTable == "" {

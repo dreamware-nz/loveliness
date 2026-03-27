@@ -29,6 +29,20 @@ type Config struct {
 	MaxConcurrentQueries int
 	// QueryTimeoutMs is the per-shard query timeout in milliseconds.
 	QueryTimeoutMs uint64
+
+	// S3 backup configuration.
+	S3Bucket   string
+	S3Region   string
+	S3Prefix   string
+	S3Endpoint string // custom endpoint for MinIO/R2/etc.
+
+	// BackupIntervalMin is the interval in minutes between scheduled backups.
+	// Zero disables scheduled backups.
+	BackupIntervalMin int
+	// BackupRetention is the number of backups to retain (oldest are pruned).
+	BackupRetention int
+	// BackupDir is the local directory for backup archives (used when S3 is not configured).
+	BackupDir string
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -43,6 +57,7 @@ func DefaultConfig() Config {
 		Bootstrap:            false,
 		MaxConcurrentQueries: 16,
 		QueryTimeoutMs:       30000,
+		BackupRetention:      3,
 	}
 }
 
@@ -84,6 +99,31 @@ func FromEnv() Config {
 		if n, err := strconv.ParseUint(v, 10, 64); err == nil {
 			c.QueryTimeoutMs = n
 		}
+	}
+	if v := os.Getenv("LOVELINESS_S3_BUCKET"); v != "" {
+		c.S3Bucket = v
+	}
+	if v := os.Getenv("LOVELINESS_S3_REGION"); v != "" {
+		c.S3Region = v
+	}
+	if v := os.Getenv("LOVELINESS_S3_PREFIX"); v != "" {
+		c.S3Prefix = v
+	}
+	if v := os.Getenv("LOVELINESS_S3_ENDPOINT"); v != "" {
+		c.S3Endpoint = v
+	}
+	if v := os.Getenv("LOVELINESS_BACKUP_INTERVAL_MIN"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.BackupIntervalMin = n
+		}
+	}
+	if v := os.Getenv("LOVELINESS_BACKUP_RETENTION"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.BackupRetention = n
+		}
+	}
+	if v := os.Getenv("LOVELINESS_BACKUP_DIR"); v != "" {
+		c.BackupDir = v
 	}
 	return c
 }

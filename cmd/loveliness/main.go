@@ -19,11 +19,13 @@ import (
 	"github.com/johnjansen/loveliness/pkg/backup"
 	"github.com/johnjansen/loveliness/pkg/cluster"
 	"github.com/johnjansen/loveliness/pkg/config"
+	"github.com/johnjansen/loveliness/pkg/ingest"
 	"github.com/johnjansen/loveliness/pkg/logging"
 	"github.com/johnjansen/loveliness/pkg/replication"
 	"github.com/johnjansen/loveliness/pkg/router"
 	"github.com/johnjansen/loveliness/pkg/schema"
 	"github.com/johnjansen/loveliness/pkg/shard"
+	"github.com/johnjansen/loveliness/pkg/transport"
 )
 
 func main() {
@@ -97,13 +99,71 @@ func main() {
 	slog.Info("WAL initialized", "dir", walDir, "sequence", wal.LastSequence())
 	r.SetWAL(wal)
 
-	// Start HTTP server with DR extensions.
-	srv := api.NewServer(r, c, shards, reg, queryTimeout)
-	srv.SetDR(&api.DRExtension{
-		BackupMgr:    backup.NewManager(cfg.DataDir, cfg.NodeID),
+	// Initialize backup store (S3 if configured, otherwise local).
+	backupMgr := backup.NewManager(cfg.DataDir, cfg.NodeID)
+	dr := &api.DRExtension{
+		BackupMgr:    backupMgr,
 		WAL:          wal,
 		ReplicaState: replication.NewReplicaState(),
-	})
+	}
+
+	if cfg.S3Bucket != "" {
+		s3Store, err := backup.NewS3Store(context.Background(), backup.S3Config{
+			Bucket:   cfg.S3Bucket,
+			Region:   cfg.S3Region,
+			Prefix:   cfg.S3Prefix,
+			Endpoint: cfg.S3Endpoint,
+		})
+		if err != nil {
+			slog.Error("S3 backup store init failed", "err", err)
+			os.Exit(1)
+		}
+		dr.BackupStore = s3Store
+		slog.Info("S3 backup store configured", "bucket", cfg.S3Bucket, "prefix", cfg.S3Prefix)
+	} else if cfg.BackupDir != "" {
+		localStore, err := backup.NewLocalStore(cfg.BackupDir)
+		if err != nil {
+			slog.Error("local backup store init failed", "err", err)
+			os.Exit(1)
+		}
+		dr.BackupStore = localStore
+		slog.Info("local backup store configured", "dir", cfg.BackupDir)
+	}
+
+	if cfg.BackupIntervalMin > 0 && dr.BackupStore != nil {
+		sched := backup.NewScheduler(
+			backupMgr, dr.BackupStore, shards,
+			func() uint64 { return wal.LastSequence() },
+			time.Duration(cfg.BackupIntervalMin)*time.Minute,
+			cfg.BackupRetention,
+		)
+		dr.Scheduler = sched
+		sched.Start()
+	}
+
+	// Start TCP transport server for msgpack-based inter-node communication.
+	tcpSrv := transport.NewTCPServer(transport.NewShardSet(shards))
+	if err := tcpSrv.Listen(cfg.GRPCAddr); err != nil {
+		slog.Error("tcp transport listen failed", "addr", cfg.GRPCAddr, "err", err)
+		os.Exit(1)
+	}
+
+	// Initialize log-backed ingest queue and worker.
+	ingestDir := filepath.Join(cfg.DataDir, "ingest")
+	ingestQueue, err := ingest.NewQueue(ingestDir)
+	if err != nil {
+		slog.Error("ingest queue init failed", "err", err)
+		os.Exit(1)
+	}
+	shardAdapter := ingest.NewShardAdapter(shards, r.ResolveShardForKey)
+	ingestWorker := ingest.NewWorker(ingestQueue, shardAdapter, shardAdapter, 50_000)
+	ingestWorker.Start()
+	slog.Info("ingest queue initialized", "dir", ingestDir)
+
+	// Start HTTP server with DR extensions.
+	srv := api.NewServer(r, c, shards, reg, queryTimeout)
+	srv.SetDR(dr)
+	srv.SetIngestQueue(ingestQueue)
 	httpServer := &http.Server{
 		Addr:         cfg.BindAddr,
 		Handler:      srv.Handler(),
@@ -130,7 +190,12 @@ func main() {
 	sig := <-sigCh
 	slog.Info("shutting down", "signal", sig.String())
 
-	// Graceful shutdown: drain in-flight HTTP requests.
+	// Graceful shutdown: stop workers, drain HTTP, close WAL, raft, shards.
+	tcpSrv.Stop()
+	ingestWorker.Stop()
+	if dr.Scheduler != nil {
+		dr.Scheduler.Stop()
+	}
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer shutdownCancel()
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {

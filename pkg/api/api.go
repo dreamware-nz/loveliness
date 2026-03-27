@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/johnjansen/loveliness/pkg/cluster"
+	"github.com/johnjansen/loveliness/pkg/ingest"
 	"github.com/johnjansen/loveliness/pkg/router"
 	"github.com/johnjansen/loveliness/pkg/schema"
 	"github.com/johnjansen/loveliness/pkg/shard"
@@ -36,6 +37,9 @@ type Server struct {
 
 	// dr holds optional disaster recovery extensions (WAL, backup, replica state).
 	dr *DRExtension
+
+	// ingestQueue is the optional log-backed ingest queue for async bulk loading.
+	ingestQueue *ingest.Queue
 }
 
 // NewServer creates a new API server.
@@ -61,10 +65,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /cypher", s.handleCypher)
 	mux.HandleFunc("POST /bulk/nodes", s.handleBulkNodes)
 	mux.HandleFunc("POST /bulk/edges", s.handleBulkEdges)
+	mux.HandleFunc("POST /bulk/nodes/stream", s.handleBulkNodesStream)
+	mux.HandleFunc("POST /bulk/edges/stream", s.handleBulkEdgesStream)
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /cluster", s.handleCluster)
 	mux.HandleFunc("POST /join", s.handleJoin)
 	s.registerDRRoutes(mux)
+	s.registerIngestRoutes(mux)
 	return s.withMiddleware(mux)
 }
 

@@ -12,27 +12,30 @@ import (
 
 // QueryRequest is the payload for internal shard queries between nodes.
 type QueryRequest struct {
-	ShardID int    `json:"shard_id"`
-	Cypher  string `json:"cypher"`
+	ShardID int    `json:"shard_id" msgpack:"shard_id"`
+	Cypher  string `json:"cypher" msgpack:"cypher"`
 }
 
 // QueryResponse is the result of an internal shard query.
 type QueryResponse struct {
-	Columns []string         `json:"columns"`
-	Rows    []map[string]any `json:"rows"`
+	Columns []string         `json:"columns" msgpack:"columns"`
+	Rows    []map[string]any `json:"rows" msgpack:"rows"`
 	Stats   struct {
-		CompileTimeMs float64 `json:"compile_time_ms,omitempty"`
-		ExecTimeMs    float64 `json:"exec_time_ms,omitempty"`
-	} `json:"stats,omitempty"`
-	Error string `json:"error,omitempty"`
+		CompileTimeMs float64 `json:"compile_time_ms,omitempty" msgpack:"compile_time_ms,omitempty"`
+		ExecTimeMs    float64 `json:"exec_time_ms,omitempty" msgpack:"exec_time_ms,omitempty"`
+	} `json:"stats,omitempty" msgpack:"stats,omitempty"`
+	Error string `json:"error,omitempty" msgpack:"error,omitempty"`
 }
 
-// Client manages HTTP connections to peer nodes for internal query forwarding.
+// Client manages connections to peer nodes for internal query forwarding.
+// It prefers TCP+msgpack when a TCP address is registered, falling back
+// to HTTP+JSON for backwards compatibility.
 type Client struct {
-	mu      sync.RWMutex
-	clients map[string]*http.Client // nodeID → HTTP client
-	addrs   map[string]string       // nodeID → HTTP address
-	timeout time.Duration
+	mu       sync.RWMutex
+	clients  map[string]*http.Client // nodeID → HTTP client
+	addrs    map[string]string       // nodeID → HTTP address
+	timeout  time.Duration
+	tcpPool  *TCPPool
 }
 
 // NewClient creates a transport client with the given timeout.
@@ -41,6 +44,7 @@ func NewClient(timeout time.Duration) *Client {
 		clients: make(map[string]*http.Client),
 		addrs:   make(map[string]string),
 		timeout: timeout,
+		tcpPool: NewTCPPool(4, timeout),
 	}
 }
 
@@ -61,16 +65,38 @@ func (c *Client) SetPeer(nodeID, httpAddr string) {
 	}
 }
 
-// RemovePeer removes a peer node.
+// SetPeerTCP registers a peer's TCP transport address for msgpack comms.
+func (c *Client) SetPeerTCP(nodeID, tcpAddr string) {
+	c.tcpPool.SetPeer(nodeID, tcpAddr)
+}
+
+// RemovePeer removes a peer node from both HTTP and TCP pools.
 func (c *Client) RemovePeer(nodeID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.addrs, nodeID)
 	delete(c.clients, nodeID)
+	c.tcpPool.RemovePeer(nodeID)
 }
 
 // QueryRemote sends a Cypher query to a specific shard on a remote node.
+// Prefers TCP+msgpack when available, falls back to HTTP+JSON.
 func (c *Client) QueryRemote(nodeID string, shardID int, cypher string) (*QueryResponse, error) {
+	// Try TCP first.
+	c.tcpPool.mu.RLock()
+	_, hasTCP := c.tcpPool.peers[nodeID]
+	c.tcpPool.mu.RUnlock()
+
+	if hasTCP {
+		return c.tcpPool.QueryRemoteTCP(nodeID, shardID, cypher)
+	}
+
+	// Fall back to HTTP+JSON.
+	return c.queryRemoteHTTP(nodeID, shardID, cypher)
+}
+
+// queryRemoteHTTP is the original HTTP+JSON transport path.
+func (c *Client) queryRemoteHTTP(nodeID string, shardID int, cypher string) (*QueryResponse, error) {
 	c.mu.RLock()
 	addr, ok := c.addrs[nodeID]
 	client, hasClient := c.clients[nodeID]
@@ -110,4 +136,9 @@ func (c *Client) QueryRemote(nodeID string, shardID int, cypher string) (*QueryR
 	}
 
 	return &qr, nil
+}
+
+// Close shuts down the TCP pool.
+func (c *Client) Close() {
+	c.tcpPool.Close()
 }
