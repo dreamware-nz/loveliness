@@ -71,13 +71,15 @@ func cypher(query string) (*queryResult, time.Duration, error) {
 	if err != nil {
 		return nil, elapsed, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		return nil, elapsed, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
 	}
 	var result queryResult
-	json.Unmarshal(body, &result)
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, elapsed, fmt.Errorf("unmarshal: %w", err)
+	}
 	return &result, elapsed, nil
 }
 

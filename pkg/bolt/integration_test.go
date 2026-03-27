@@ -82,7 +82,9 @@ func TestFullBoltSession(t *testing.T) {
 	p.PackString("basic")
 	p.PackString("routing")
 	p.PackMapHeader(0)
-	sendMessage(conn, p)
+	if err := sendMessage(conn, p); err != nil {
+		t.Fatal("send HELLO:", err)
+	}
 
 	resp := recvMessage(t, conn)
 	assertTag(t, resp, msgSUCCESS, "HELLO")
@@ -97,7 +99,9 @@ func TestFullBoltSession(t *testing.T) {
 	p.PackString("MATCH (p:Person) RETURN p.name, p.age, p.city")
 	p.PackMapHeader(0) // params
 	p.PackMapHeader(0) // extra
-	sendMessage(conn, p)
+	if err := sendMessage(conn, p); err != nil {
+		t.Fatal("send RUN:", err)
+	}
 
 	resp = recvMessage(t, conn)
 	assertTag(t, resp, msgSUCCESS, "RUN person")
@@ -116,7 +120,9 @@ func TestFullBoltSession(t *testing.T) {
 	p.PackMapHeader(1)
 	p.PackString("n")
 	p.PackInt(-1)
-	sendMessage(conn, p)
+	if err := sendMessage(conn, p); err != nil {
+		t.Fatal("send PULL:", err)
+	}
 
 	// Expect 3 RECORD messages.
 	names := []string{}
@@ -385,11 +391,17 @@ func TestBoltConcurrentConnections(t *testing.T) {
 			defer conn.Close()
 
 			// Handshake.
-			conn.Write(boltMagic)
+			if _, err := conn.Write(boltMagic); err != nil {
+				errs <- fmt.Errorf("client %d: write magic: %w", id, err)
+				return
+			}
 			versions := make([]byte, 16)
 			versions[2] = 4
 			versions[3] = 4
-			conn.Write(versions)
+			if _, err := conn.Write(versions); err != nil {
+				errs <- fmt.Errorf("client %d: write versions: %w", id, err)
+				return
+			}
 			agreed := make([]byte, 4)
 			if _, err := conn.Read(agreed); err != nil {
 				errs <- fmt.Errorf("client %d: version: %w", id, err)
