@@ -2,6 +2,7 @@ package transport
 
 import (
 	"bufio"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"net"
@@ -18,10 +19,11 @@ type ShardQuerier interface {
 
 // TCPServer listens for msgpack-over-TCP connections from peer nodes.
 type TCPServer struct {
-	shards   ShardQuerier
-	listener net.Listener
-	wg       sync.WaitGroup
-	stopCh   chan struct{}
+	shards    ShardQuerier
+	listener  net.Listener
+	tlsConfig *tls.Config
+	wg        sync.WaitGroup
+	stopCh    chan struct{}
 }
 
 // NewTCPServer creates a TCP transport server.
@@ -32,9 +34,20 @@ func NewTCPServer(shards ShardQuerier) *TCPServer {
 	}
 }
 
+// SetTLS configures mTLS for the transport listener.
+func (s *TCPServer) SetTLS(cfg *tls.Config) {
+	s.tlsConfig = cfg
+}
+
 // Listen starts accepting connections on the given address.
 func (s *TCPServer) Listen(addr string) error {
-	ln, err := net.Listen("tcp", addr)
+	var ln net.Listener
+	var err error
+	if s.tlsConfig != nil {
+		ln, err = tls.Listen("tcp", addr, s.tlsConfig)
+	} else {
+		ln, err = net.Listen("tcp", addr)
+	}
 	if err != nil {
 		return fmt.Errorf("tcp listen: %w", err)
 	}

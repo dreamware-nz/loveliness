@@ -2,6 +2,8 @@ package transport
 
 import (
 	"bufio"
+	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"sync"
@@ -18,11 +20,12 @@ type connEntry struct {
 
 // TCPPool manages persistent TCP connections to peer nodes.
 type TCPPool struct {
-	mu      sync.RWMutex
-	peers   map[string]string      // nodeID → TCP address
-	conns   map[string][]*connEntry // nodeID → pooled connections
-	poolSize int
-	timeout  time.Duration
+	mu        sync.RWMutex
+	peers     map[string]string       // nodeID → TCP address
+	conns     map[string][]*connEntry  // nodeID → pooled connections
+	poolSize  int
+	timeout   time.Duration
+	tlsConfig *tls.Config
 }
 
 // NewTCPPool creates a connection pool.
@@ -36,6 +39,11 @@ func NewTCPPool(poolSize int, timeout time.Duration) *TCPPool {
 		poolSize: poolSize,
 		timeout:  timeout,
 	}
+}
+
+// SetTLS configures mTLS for outbound connections.
+func (p *TCPPool) SetTLS(cfg *tls.Config) {
+	p.tlsConfig = cfg
 }
 
 // SetPeer registers a peer's TCP address and pre-warms connections.
@@ -139,7 +147,19 @@ func (p *TCPPool) getConn(nodeID string) (*connEntry, error) {
 }
 
 func (p *TCPPool) dial(addr string) (*connEntry, error) {
-	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	var conn net.Conn
+	var err error
+	if p.tlsConfig != nil {
+		dialer := &tls.Dialer{
+			Config: p.tlsConfig,
+			NetDialer: &net.Dialer{Timeout: 5 * time.Second},
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		conn, err = dialer.DialContext(ctx, "tcp", addr)
+	} else {
+		conn, err = net.DialTimeout("tcp", addr, 5*time.Second)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("tcp dial %s: %w", addr, err)
 	}

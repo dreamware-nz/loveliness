@@ -26,6 +26,7 @@ import (
 	"github.com/johnjansen/loveliness/pkg/router"
 	"github.com/johnjansen/loveliness/pkg/schema"
 	"github.com/johnjansen/loveliness/pkg/shard"
+	"github.com/johnjansen/loveliness/pkg/tlsutil"
 	"github.com/johnjansen/loveliness/pkg/transport"
 )
 
@@ -142,8 +143,28 @@ func main() {
 		sched.Start()
 	}
 
+	// Build TLS configurations if enabled.
+	tlsCfg := tlsutil.Config{
+		CertFile:   cfg.TLSCert,
+		KeyFile:    cfg.TLSKey,
+		CAFile:     cfg.TLSCA,
+		Mode:       cfg.TLSMode,
+		ClientAuth: cfg.TLSClientAuth,
+	}
+	if tlsCfg.Enabled() {
+		slog.Info("TLS enabled", "mode", cfg.TLSMode, "cert", cfg.TLSCert, "ca", cfg.TLSCA)
+	}
+
 	// Start TCP transport server for msgpack-based inter-node communication.
 	tcpSrv := transport.NewTCPServer(transport.NewShardSet(shards))
+	if tlsCfg.Enabled() && tlsCfg.CAFile != "" {
+		mtls, err := tlsutil.MutualTLSConfig(tlsCfg)
+		if err != nil {
+			slog.Error("inter-node mTLS config failed", "err", err)
+			os.Exit(1)
+		}
+		tcpSrv.SetTLS(mtls)
+	}
 	if err := tcpSrv.Listen(cfg.GRPCAddr); err != nil {
 		slog.Error("tcp transport listen failed", "addr", cfg.GRPCAddr, "err", err)
 		os.Exit(1)
@@ -173,10 +194,24 @@ func main() {
 	}
 
 	go func() {
-		slog.Info("http listening", "addr", cfg.BindAddr)
-		if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
-			slog.Error("http server error", "err", err)
-			os.Exit(1)
+		if tlsCfg.Enabled() {
+			slog.Info("https listening", "addr", cfg.BindAddr)
+			serverTLS, err := tlsutil.ServerTLSConfig(tlsCfg)
+			if err != nil {
+				slog.Error("http TLS config failed", "err", err)
+				os.Exit(1)
+			}
+			httpServer.TLSConfig = serverTLS
+			if err := httpServer.ListenAndServeTLS("", ""); err != http.ErrServerClosed {
+				slog.Error("https server error", "err", err)
+				os.Exit(1)
+			}
+		} else {
+			slog.Info("http listening", "addr", cfg.BindAddr)
+			if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
+				slog.Error("http server error", "err", err)
+				os.Exit(1)
+			}
 		}
 	}()
 
@@ -185,6 +220,14 @@ func main() {
 	if cfg.BoltAddr != "" {
 		boltAdapter := boltpkg.NewRouterAdapter(r)
 		boltSrv = boltpkg.NewServer(cfg.BoltAddr, boltAdapter)
+		if tlsCfg.Enabled() {
+			boltTLS, err := tlsutil.ServerTLSConfig(tlsCfg)
+			if err != nil {
+				slog.Error("bolt TLS config failed", "err", err)
+				os.Exit(1)
+			}
+			boltSrv.SetTLS(boltTLS)
+		}
 		if err := boltSrv.Start(); err != nil {
 			slog.Error("bolt server failed", "err", err)
 			os.Exit(1)

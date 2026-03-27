@@ -47,6 +47,13 @@ type Config struct {
 	// BoltAddr is the address for the Neo4j Bolt protocol listener.
 	// Empty string disables the Bolt server.
 	BoltAddr string
+
+	// TLS configuration.
+	TLSCert       string // path to server certificate
+	TLSKey        string // path to server private key
+	TLSCA         string // path to CA certificate (for mTLS)
+	TLSMode       string // "required", "optional", "off"
+	TLSClientAuth string // "require", "request", "none"
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -63,6 +70,8 @@ func DefaultConfig() Config {
 		QueryTimeoutMs:       30000,
 		BackupRetention:      3,
 		BoltAddr:             ":7687",
+		TLSMode:              "off",
+		TLSClientAuth:        "require",
 	}
 }
 
@@ -132,6 +141,21 @@ func FromEnv() Config {
 	}
 	if v := os.Getenv("LOVELINESS_BOLT_ADDR"); v != "" {
 		c.BoltAddr = v
+	}
+	if v := os.Getenv("LOVELINESS_TLS_CERT"); v != "" {
+		c.TLSCert = v
+	}
+	if v := os.Getenv("LOVELINESS_TLS_KEY"); v != "" {
+		c.TLSKey = v
+	}
+	if v := os.Getenv("LOVELINESS_TLS_CA"); v != "" {
+		c.TLSCA = v
+	}
+	if v := os.Getenv("LOVELINESS_TLS_MODE"); v != "" {
+		c.TLSMode = v
+	}
+	if v := os.Getenv("LOVELINESS_TLS_CLIENT_AUTH"); v != "" {
+		c.TLSClientAuth = v
 	}
 	return c
 }

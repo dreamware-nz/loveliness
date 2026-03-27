@@ -2,6 +2,7 @@ package bolt
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -25,11 +26,12 @@ type QueryExecutor interface {
 
 // Server is a Bolt protocol server that accepts Neo4j driver connections.
 type Server struct {
-	listener net.Listener
-	executor QueryExecutor
-	addr     string
-	running  atomic.Bool
-	wg       sync.WaitGroup
+	listener  net.Listener
+	executor  QueryExecutor
+	addr      string
+	tlsConfig *tls.Config
+	running   atomic.Bool
+	wg        sync.WaitGroup
 }
 
 // NewServer creates a new Bolt server.
@@ -40,9 +42,20 @@ func NewServer(addr string, executor QueryExecutor) *Server {
 	}
 }
 
+// SetTLS configures TLS for the Bolt listener.
+func (s *Server) SetTLS(cfg *tls.Config) {
+	s.tlsConfig = cfg
+}
+
 // Start begins accepting connections.
 func (s *Server) Start() error {
-	ln, err := net.Listen("tcp", s.addr)
+	var ln net.Listener
+	var err error
+	if s.tlsConfig != nil {
+		ln, err = tls.Listen("tcp", s.addr, s.tlsConfig)
+	} else {
+		ln, err = net.Listen("tcp", s.addr)
+	}
 	if err != nil {
 		return fmt.Errorf("bolt listen: %w", err)
 	}

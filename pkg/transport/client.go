@@ -2,6 +2,7 @@ package transport
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -63,6 +64,11 @@ func (c *Client) SetPeer(nodeID, httpAddr string) {
 			},
 		}
 	}
+}
+
+// SetTLS configures mTLS for outbound TCP connections.
+func (c *Client) SetTLS(cfg *tls.Config) {
+	c.tcpPool.SetTLS(cfg)
 }
 
 // SetPeerTCP registers a peer's TCP transport address for msgpack comms.

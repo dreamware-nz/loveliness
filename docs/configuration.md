@@ -22,6 +22,21 @@ All configuration is via environment variables.
 | `LOVELINESS_BACKUP_INTERVAL_MIN` | `0` | Minutes between scheduled backups (0 = disabled) |
 | `LOVELINESS_BACKUP_RETENTION` | `3` | Number of backups to retain |
 | `LOVELINESS_BACKUP_DIR` | *(empty)* | Local directory for backups (when S3 is not configured) |
+| `LOVELINESS_TLS_CERT` | *(empty)* | Path to server TLS certificate |
+| `LOVELINESS_TLS_KEY` | *(empty)* | Path to server TLS private key |
+| `LOVELINESS_TLS_CA` | *(empty)* | Path to CA certificate (enables mTLS for inter-node traffic) |
+| `LOVELINESS_TLS_MODE` | `off` | `required` (all TLS), `optional` (TLS available, plaintext accepted), `off` |
+| `LOVELINESS_TLS_CLIENT_AUTH` | `require` | mTLS client auth: `require`, `request`, `none` |
+
+## TLS
+
+Set `LOVELINESS_TLS_CERT` + `LOVELINESS_TLS_KEY` and `LOVELINESS_TLS_MODE=required` to enable TLS on all listeners (HTTP, Bolt, inter-node TCP).
+
+**Client-facing (HTTP + Bolt):** standard TLS — server proves identity, clients verify.
+
+**Inter-node (TCP transport):** mTLS when `LOVELINESS_TLS_CA` is set. Both sides present certs signed by the cluster CA. Connections from unknown certs are rejected.
+
+See [issue #2](https://github.com/dreamware-nz/loveliness/issues/2) for the full trust boundary design.
 
 ## Choosing Shard Count
 
