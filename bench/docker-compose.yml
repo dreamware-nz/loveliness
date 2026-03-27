@@ -1,0 +1,104 @@
+# Benchmark comparison: Loveliness (1-node, 3-node) vs Neo4j Community Edition.
+# Usage: ./bench/run.sh
+#
+# Each container gets a 2GB memory limit for fair comparison.
+# The 3-node cluster gets 2GB per node (6GB total) — the cost story
+# compares per-node RSS, not total allocation.
+
+services:
+  # --- Single-node Loveliness ---
+  loveliness-single:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      LOVELINESS_NODE_ID: bench-single
+      LOVELINESS_BIND_ADDR: ":8080"
+      LOVELINESS_DATA_DIR: /data
+      LOVELINESS_SHARD_COUNT: "4"
+      LOVELINESS_BOOTSTRAP: "true"
+      LOVELINESS_RAFT_ADDR: "loveliness-single:9000"
+      LOVELINESS_GRPC_ADDR: "loveliness-single:9001"
+    ports:
+      - "18080:8080"
+    mem_limit: 2g
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:8080/health || exit 1"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  # --- 3-node Loveliness cluster ---
+  loveliness-c1:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      LOVELINESS_NODE_ID: bench-c1
+      LOVELINESS_BIND_ADDR: ":8080"
+      LOVELINESS_DATA_DIR: /data
+      LOVELINESS_SHARD_COUNT: "4"
+      LOVELINESS_BOOTSTRAP: "true"
+      LOVELINESS_RAFT_ADDR: "loveliness-c1:9000"
+      LOVELINESS_GRPC_ADDR: "loveliness-c1:9001"
+    ports:
+      - "28080:8080"
+    mem_limit: 2g
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:8080/health || exit 1"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  loveliness-c2:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      LOVELINESS_NODE_ID: bench-c2
+      LOVELINESS_BIND_ADDR: ":8080"
+      LOVELINESS_DATA_DIR: /data
+      LOVELINESS_SHARD_COUNT: "4"
+      LOVELINESS_PEERS: "loveliness-c1:9000"
+      LOVELINESS_RAFT_ADDR: "loveliness-c2:9000"
+      LOVELINESS_GRPC_ADDR: "loveliness-c2:9001"
+    mem_limit: 2g
+    depends_on:
+      loveliness-c1:
+        condition: service_healthy
+
+  loveliness-c3:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      LOVELINESS_NODE_ID: bench-c3
+      LOVELINESS_BIND_ADDR: ":8080"
+      LOVELINESS_DATA_DIR: /data
+      LOVELINESS_SHARD_COUNT: "4"
+      LOVELINESS_PEERS: "loveliness-c1:9000"
+      LOVELINESS_RAFT_ADDR: "loveliness-c3:9000"
+      LOVELINESS_GRPC_ADDR: "loveliness-c3:9001"
+    mem_limit: 2g
+    depends_on:
+      loveliness-c1:
+        condition: service_healthy
+
+  # --- Neo4j Community Edition ---
+  neo4j:
+    image: neo4j:5-community
+    environment:
+      NEO4J_AUTH: none
+      NEO4J_server_memory_heap_initial__size: 512m
+      NEO4J_server_memory_heap_max__size: 1g
+      NEO4J_server_memory_pagecache_size: 512m
+    ports:
+      - "37474:7474"
+      - "37687:7687"
+    mem_limit: 2g
+    healthcheck:
+      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "", "RETURN 1"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 30s

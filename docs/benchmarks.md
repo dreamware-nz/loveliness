@@ -44,6 +44,52 @@ Benchmarked on Apple M1 Pro, single node, 4 shards.
 
 **Where we're different:** Sharded from day one (Neo4j Fabric is an afterthought), columnar storage under the hood (analytics queries are better than expected for a graph DB), horizontal scalability by adding nodes.
 
+## Automated Comparison: Loveliness vs Neo4j CE
+
+The `bench/` directory contains an automated benchmark comparison suite that runs identical workloads against Loveliness (single-node and 3-node cluster) and Neo4j Community Edition.
+
+### What It Measures
+
+| Metric | How |
+|---|---|
+| Peak RSS (MiB) | `docker stats` polled every 1s during benchmark, peak recorded |
+| Avg CPU % | `docker stats` CPU column averaged over benchmark duration |
+| P50/P95/P99 latency | Per-query percentile from the benchmark runner |
+| QPS (throughput) | Total queries / wall time, 8 concurrent workers |
+| Bulk load time | Time to seed identical 50K-node dataset |
+
+### Configurations
+
+| Config | Description | Memory Limit |
+|---|---|---|
+| `loveliness-single` | Single Loveliness node, 4 shards | 2 GB |
+| `loveliness-cluster` | 3-node Raft cluster, 4 shards | 2 GB per node |
+| `neo4j` | Neo4j 5.x Community Edition | 2 GB (512MB heap + 512MB page cache) |
+
+### Running
+
+```bash
+# Full comparison (all three configs)
+./bench/run.sh
+
+# Quick single-node check
+./bench/run.sh --quick
+
+# Custom dataset
+./bench/run.sh --nodes=500000 --edges=500000
+```
+
+Output: `bench/results/<timestamp>/` with JSON results, SVG charts, and `comparison.md`.
+
+### Methodology Notes
+
+- Each container gets a 2GB Docker memory limit for fair comparison.
+- The 3-node cluster gets 2GB per node (6GB total). The cost story compares per-node RSS.
+- Warm-up: each query runs 1x before the measured pass to populate caches and trigger JIT (Neo4j).
+- Seeding: Loveliness uses bulk CSV endpoints, Neo4j uses batched `UNWIND` Cypher (1000 items per batch).
+- 15 of 16 benchmark queries use identical Cypher. Only `shortest_path` requires syntax translation (Loveliness `* SHORTEST 1..6` vs Neo4j `shortestPath()`).
+- CI runs the full comparison on each release and opens a PR with updated results.
+
 ## Inter-Node Transport: TCP+MessagePack vs HTTP+JSON
 
 Internal cluster communication uses a binary TCP transport with MessagePack serialization instead of HTTP+JSON. Micro-benchmarks on 1000-row result sets:

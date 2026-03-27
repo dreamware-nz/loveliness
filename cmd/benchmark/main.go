@@ -20,12 +20,14 @@ import (
 )
 
 var (
-	endpoint = flag.String("endpoint", "http://localhost:8080", "Loveliness HTTP endpoint")
+	endpoint = flag.String("endpoint", "http://localhost:8080", "Target HTTP endpoint")
 	nodes    = flag.Int("nodes", 50_000, "Number of nodes to seed")
 	edges    = flag.Int("edges", 50_000, "Number of edges to seed")
 	iters    = flag.Int("iters", 200, "Iterations per benchmark")
 	workers  = flag.Int("workers", 8, "Concurrent workers for throughput tests")
 	skipSeed = flag.Bool("skip-seed", false, "Skip data seeding (already loaded)")
+	target   = flag.String("target", "loveliness", "Target database: loveliness or neo4j")
+	jsonOut  = flag.String("json-out", "", "Write JSON results to this file (empty = stdout only)")
 )
 
 var cities = []string{
@@ -64,7 +66,8 @@ type queryResult struct {
 	} `json:"stats"`
 }
 
-func cypher(query string) (*queryResult, time.Duration, error) {
+// cypherLoveliness sends a Cypher query to the Loveliness /cypher endpoint.
+func cypherLoveliness(query string) (*queryResult, time.Duration, error) {
 	start := time.Now()
 	resp, err := client.Post(*endpoint+"/cypher", "text/plain", strings.NewReader(query))
 	elapsed := time.Since(start)
@@ -81,6 +84,98 @@ func cypher(query string) (*queryResult, time.Duration, error) {
 		return nil, elapsed, fmt.Errorf("unmarshal: %w", err)
 	}
 	return &result, elapsed, nil
+}
+
+// neo4jTxRequest is the JSON body for Neo4j's transactional endpoint.
+type neo4jTxRequest struct {
+	Statements []neo4jStatement `json:"statements"`
+}
+
+type neo4jStatement struct {
+	Statement string `json:"statement"`
+}
+
+type neo4jTxResponse struct {
+	Results []struct {
+		Columns []string                 `json:"columns"`
+		Data    []map[string]interface{} `json:"data"`
+	} `json:"results"`
+	Errors []struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"errors"`
+}
+
+// cypherNeo4j sends a Cypher query to Neo4j's HTTP transactional endpoint.
+func cypherNeo4j(query string) (*queryResult, time.Duration, error) {
+	// Translate Loveliness-specific syntax to Neo4j syntax.
+	query = translateToNeo4j(query)
+
+	reqBody := neo4jTxRequest{
+		Statements: []neo4jStatement{{Statement: query}},
+	}
+	bodyBytes, _ := json.Marshal(reqBody)
+
+	start := time.Now()
+	resp, err := client.Post(*endpoint+"/db/neo4j/tx/commit", "application/json", bytes.NewReader(bodyBytes))
+	elapsed := time.Since(start)
+	if err != nil {
+		return nil, elapsed, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, elapsed, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	}
+
+	var txResp neo4jTxResponse
+	if err := json.Unmarshal(body, &txResp); err != nil {
+		return nil, elapsed, fmt.Errorf("unmarshal: %w", err)
+	}
+	if len(txResp.Errors) > 0 {
+		return nil, elapsed, fmt.Errorf("neo4j: %s: %s", txResp.Errors[0].Code, txResp.Errors[0].Message)
+	}
+
+	result := &queryResult{}
+	if len(txResp.Results) > 0 {
+		result.Columns = txResp.Results[0].Columns
+		result.Rows = make([]map[string]any, len(txResp.Results[0].Data))
+		for i, d := range txResp.Results[0].Data {
+			row := make(map[string]any)
+			if rowData, ok := d["row"].([]interface{}); ok {
+				for j, col := range result.Columns {
+					if j < len(rowData) {
+						row[col] = rowData[j]
+					}
+				}
+			}
+			result.Rows[i] = row
+		}
+	}
+	return result, elapsed, nil
+}
+
+// translateToNeo4j converts Loveliness-specific Cypher to Neo4j dialect.
+func translateToNeo4j(query string) string {
+	// Shortest path: Loveliness uses "* SHORTEST 1..6", Neo4j uses shortestPath().
+	// MATCH (a)-[r:KNOWS* SHORTEST 1..6]->(b) → MATCH p=shortestPath((a)-[:KNOWS*1..6]->(b))
+	if strings.Contains(query, "SHORTEST") {
+		// This is a simplified translation for the benchmark's shortest path query pattern.
+		query = strings.Replace(query, "-[r:KNOWS* SHORTEST 1..6]->", "-[:KNOWS*1..6]->", 1)
+		query = strings.Replace(query, "RETURN length(r)", "RETURN length(p)", 1)
+		// Wrap the MATCH pattern in shortestPath().
+		query = strings.Replace(query, "MATCH (a:Person", "MATCH p=shortestPath((a:Person", 1)
+		query = strings.Replace(query, "->(b:Person", "->(b:Person)", 1)
+	}
+	return query
+}
+
+// cypher dispatches to the correct backend based on --target.
+func cypher(query string) (*queryResult, time.Duration, error) {
+	if *target == "neo4j" {
+		return cypherNeo4j(query)
+	}
+	return cypherLoveliness(query)
 }
 
 func mustCypher(query string) {
@@ -197,7 +292,15 @@ func runBenchConcurrent(name string, n, concurrency int, fn func() (int, error))
 // --- Seeding ---
 
 func seed() {
-	fmt.Println("Seeding data...")
+	if *target == "neo4j" {
+		seedNeo4j()
+		return
+	}
+	seedLoveliness()
+}
+
+func seedLoveliness() {
+	fmt.Println("Seeding data (Loveliness)...")
 
 	fmt.Print("  schema... ")
 	mustCypher("CREATE NODE TABLE Person(name STRING, age INT64, city STRING, PRIMARY KEY(name))")
@@ -237,6 +340,63 @@ func seed() {
 	}
 	w.Flush()
 	bulkPost("/bulk/edges", "", "KNOWS", "Person", &buf)
+	fmt.Printf("done (%s)\n", time.Since(t0).Round(time.Millisecond))
+
+	fmt.Println()
+}
+
+func seedNeo4j() {
+	fmt.Println("Seeding data (Neo4j)...")
+
+	// Create indexes for fair comparison.
+	fmt.Print("  indexes... ")
+	mustCypher("CREATE INDEX IF NOT EXISTS FOR (p:Person) ON (p.name)")
+	fmt.Println("done")
+
+	// Batch insert nodes using UNWIND (1000 per batch).
+	fmt.Printf("  %d nodes... ", *nodes)
+	t0 := time.Now()
+	batchSize := 1000
+	for i := 0; i < *nodes; i += batchSize {
+		end := i + batchSize
+		if end > *nodes {
+			end = *nodes
+		}
+		var params []string
+		for j := i; j < end; j++ {
+			params = append(params, fmt.Sprintf("{name: '%s', age: %d, city: '%s'}",
+				nodeName(j), 18+rand.Intn(62), cities[rand.Intn(len(cities))]))
+		}
+		q := fmt.Sprintf("UNWIND [%s] AS row CREATE (p:Person {name: row.name, age: row.age, city: row.city})", strings.Join(params, ","))
+		if _, _, err := cypher(q); err != nil {
+			fmt.Fprintf(os.Stderr, "  neo4j seed nodes batch %d: %v\n", i/batchSize, err)
+		}
+	}
+	fmt.Printf("done (%s)\n", time.Since(t0).Round(time.Millisecond))
+
+	// Batch insert edges.
+	fmt.Printf("  %d edges... ", *edges)
+	t0 = time.Now()
+	for i := 0; i < *edges; i += batchSize {
+		end := i + batchSize
+		if end > *edges {
+			end = *edges
+		}
+		var params []string
+		for j := i; j < end; j++ {
+			a := rand.Intn(*nodes)
+			b := rand.Intn(*nodes)
+			for b == a {
+				b = rand.Intn(*nodes)
+			}
+			params = append(params, fmt.Sprintf("{a: '%s', b: '%s', since: %d}",
+				nodeName(a), nodeName(b), 2015+rand.Intn(11)))
+		}
+		q := fmt.Sprintf("UNWIND [%s] AS row MATCH (a:Person {name: row.a}), (b:Person {name: row.b}) CREATE (a)-[:KNOWS {since: row.since}]->(b)", strings.Join(params, ","))
+		if _, _, err := cypher(q); err != nil {
+			fmt.Fprintf(os.Stderr, "  neo4j seed edges batch %d: %v\n", i/batchSize, err)
+		}
+	}
 	fmt.Printf("done (%s)\n", time.Since(t0).Round(time.Millisecond))
 
 	fmt.Println()
@@ -511,11 +671,72 @@ func fmtDur(d time.Duration) string {
 	return fmt.Sprintf("%.2fs", d.Seconds())
 }
 
+// jsonBenchResult is the JSON-serializable form of benchResult.
+type jsonBenchResult struct {
+	Name    string  `json:"name"`
+	Iters   int     `json:"iters"`
+	Errors  int     `json:"errors"`
+	MeanUs  float64 `json:"mean_us"`
+	P50Us   float64 `json:"p50_us"`
+	P95Us   float64 `json:"p95_us"`
+	P99Us   float64 `json:"p99_us"`
+	QPS     float64 `json:"qps"`
+	AvgRows float64 `json:"avg_rows"`
+}
+
+type jsonReport struct {
+	Target   string            `json:"target"`
+	Endpoint string            `json:"endpoint"`
+	Nodes    int               `json:"nodes"`
+	Edges    int               `json:"edges"`
+	Iters    int               `json:"iters"`
+	Workers  int               `json:"workers"`
+	Date     string            `json:"date"`
+	Results  []jsonBenchResult `json:"results"`
+}
+
+func writeJSONReport(results []benchResult) {
+	if *jsonOut == "" {
+		return
+	}
+	report := jsonReport{
+		Target:   *target,
+		Endpoint: *endpoint,
+		Nodes:    *nodes,
+		Edges:    *edges,
+		Iters:    *iters,
+		Workers:  *workers,
+		Date:     time.Now().UTC().Format(time.RFC3339),
+	}
+	for _, r := range results {
+		report.Results = append(report.Results, jsonBenchResult{
+			Name:    r.Name,
+			Iters:   r.Iters,
+			Errors:  r.Errors,
+			MeanUs:  float64(r.Mean().Microseconds()),
+			P50Us:   float64(r.P(50).Microseconds()),
+			P95Us:   float64(r.P(95).Microseconds()),
+			P99Us:   float64(r.P(99).Microseconds()),
+			QPS:     r.QPS(),
+			AvgRows: r.AvgRows(),
+		})
+	}
+	data, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "json marshal: %v\n", err)
+		return
+	}
+	if err := os.WriteFile(*jsonOut, data, 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "write json: %v\n", err)
+	}
+}
+
 func main() {
 	flag.Parse()
 
 	fmt.Println("╔══════════════════════════════════════════╗")
 	fmt.Println("║    Loveliness Benchmark Suite            ║")
+	fmt.Printf("║    target:   %-28s║\n", *target)
 	fmt.Printf("║    endpoint: %-28s║\n", *endpoint)
 	fmt.Printf("║    nodes: %-7d  edges: %-7d         ║\n", *nodes, *edges)
 	fmt.Printf("║    iters: %-7d  workers: %-5d         ║\n", *iters, *workers)
@@ -629,4 +850,5 @@ func main() {
 
 	// --- Summary ---
 	printResults(results)
+	writeJSONReport(results)
 }

@@ -39,6 +39,24 @@ graph TB
 | 2-hop traversal | **162ms** | 5 |
 | Bulk load | **70–190K nodes/sec** | — |
 
+<!-- BENCHMARK_START -->
+<!-- BENCHMARK_END -->
+
+### Reproduce Benchmarks
+
+```bash
+# Full comparison: Loveliness (1-node, 3-node) vs Neo4j CE
+./bench/run.sh
+
+# Quick check: single-node Loveliness only
+./bench/run.sh --quick
+
+# Custom dataset size
+./bench/run.sh --nodes=500000 --edges=500000
+```
+
+Results land in `bench/results/<timestamp>/` with JSON data, SVG charts, and a markdown comparison report. CI runs the full comparison on each release and opens a PR with updated results.
+
 Full benchmarks and comparisons with Neo4j, Memgraph, TigerGraph, Neptune, and JanusGraph: [docs/benchmarks.md](docs/benchmarks.md)
 
 ## Neo4j Driver Compatibility

@@ -12,9 +12,14 @@ deploy/
     statefulset.yml                 3-replica StatefulSet with PVCs and health probes
     service.yml                     Headless service + LoadBalancer
     bootstrap-job.yml               Raft bootstrap helper job
+bench/
+  docker-compose.yml                Benchmark comparison: Loveliness (1, 3-node) vs Neo4j CE
+  run.sh                            Benchmark orchestrator: starts configs, runs suite, collects stats
+  results/                          Generated benchmark results (JSON, SVG, markdown)
 cmd/
   loveliness/main.go              Entry point, config, shard init, Raft, HTTP, Bolt, TCP, ingest, shutdown
-  benchmark/main.go               Benchmark suite (point lookups, traversals, writes, aggregations)
+  benchmark/main.go               Benchmark suite with --target (loveliness/neo4j), --json-out support
+  benchmark-charts/main.go        SVG chart generator: reads JSON results, generates comparison charts
   generate/main.go                Bulk data generator with two-pass edge loading
 pkg/
   config/config.go                Configuration from environment variables
