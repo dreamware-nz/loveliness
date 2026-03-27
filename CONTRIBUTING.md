@@ -36,7 +36,7 @@ See [docs/project-structure.md](docs/project-structure.md) for the full package 
 ## Code Style
 
 - Standard Go formatting (`gofmt`)
-- No external linter config beyond defaults
+- Linter config in `.golangci.yml` (golangci-lint v2, errcheck exclusions for fire-and-forget patterns)
 - Tests go in `*_test.go` alongside the code they test
 - Use `MemoryStore` (not real LadybugDB) in unit tests
 
