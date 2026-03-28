@@ -21,8 +21,9 @@ bench/
   results/                          Generated benchmark results (JSON, SVG, markdown)
 cmd/
   loveliness/
-    main.go                       Entry point, subcommand dispatch, shard init, Raft, HTTP, Bolt, DNS discovery
+    main.go                       Entry point, subcommand dispatch (serve/up/query/help/version), shard init, Raft, HTTP, Bolt, DNS discovery
     up.go                         `loveliness up N` — spawns N-node local cluster for development
+    query.go                      `loveliness query` — CLI Cypher client, sends queries to a running server via /cypher
   benchmark/main.go               Benchmark suite with --target (loveliness/neo4j), --json-out support
   benchmark-charts/main.go        SVG chart generator: reads JSON results, generates comparison charts
   generate/main.go                Bulk data generator with two-pass edge loading

@@ -111,6 +111,19 @@ DNS auto-discovery handles peer finding. No manual peer configuration needed. Se
 
 ## Usage
 
+**CLI:**
+
+```bash
+loveliness help                                           # show all commands
+loveliness up 3                                           # 3-node local cluster
+loveliness query "MATCH (p:Person {name: 'Alice'}) RETURN p"  # query a running server
+loveliness version                                        # show version
+```
+
+Set `LOVELINESS_URL` to query a remote server (default: `http://localhost:8080`).
+
+**HTTP API:**
+
 ```bash
 # Schema (broadcast to all shards)
 curl -s localhost:8080/cypher -d "CREATE NODE TABLE Person(name STRING, age INT64, PRIMARY KEY(name))"
