@@ -32,15 +32,27 @@ import (
 )
 
 func main() {
-	// Subcommand dispatch: bare `loveliness` or `loveliness serve` runs the server.
-	// `loveliness up N` runs N local nodes for development.
+	// Subcommand dispatch.
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "up":
 			runUp(os.Args[2:])
 			return
+		case "query":
+			runQuery(os.Args[2:])
+			return
+		case "help", "--help", "-h":
+			printUsage()
+			return
+		case "version", "--version", "-v":
+			fmt.Println("loveliness dev")
+			return
 		case "serve":
 			// Fall through to normal server startup.
+		default:
+			fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", os.Args[1])
+			printUsage()
+			os.Exit(1)
 		}
 	}
 
