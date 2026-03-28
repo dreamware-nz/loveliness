@@ -341,8 +341,19 @@ func main() {
 				}
 				if should {
 					slog.Info("discovery: auto-bootstrapping as lowest-IP node")
-					// Re-bootstrap the Raft cluster with this single node.
-					// Other nodes will join via the discovery loop.
+					if err := c.Bootstrap(); err != nil {
+						slog.Warn("discovery: bootstrap failed (may already be bootstrapped)", "err", err)
+					} else {
+						slog.Info("discovery: raft bootstrap complete, registering self")
+						_ = c.RegisterNode(cluster.NodeInfo{
+							ID:       cfg.NodeID,
+							RaftAddr: cfg.RaftAddr,
+							GRPCAddr: cfg.GRPCAddr,
+							HTTPAddr: cfg.BindAddr,
+							BoltAddr: cfg.BoltAddr,
+							Alive:    true,
+						})
+					}
 				}
 				disc.Start()
 			}()

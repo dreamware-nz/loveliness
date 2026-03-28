@@ -142,6 +142,22 @@ func (c *Cluster) NodeID() string {
 	return c.nodeID
 }
 
+// Bootstrap bootstraps this node as a single-node cluster.
+// Used by DNS auto-discovery when this node is elected as the bootstrap node.
+// Safe to call after New() was called with bootstrap=false.
+func (c *Cluster) Bootstrap() error {
+	cfg := raft.Configuration{
+		Servers: []raft.Server{
+			{
+				ID:      raft.ServerID(c.nodeID),
+				Address: raft.ServerAddress(c.raftAddr),
+			},
+		},
+	}
+	f := c.raft.BootstrapCluster(cfg)
+	return f.Error()
+}
+
 // BootstrapShards assigns shardCount shards round-robin across the given nodes.
 // Primary and replica are placed on different nodes.
 // Called once by the leader after cluster bootstrap.
