@@ -28,6 +28,10 @@ All configuration is via environment variables.
 | `LOVELINESS_TLS_CA` | *(empty)* | Path to CA certificate (enables mTLS for inter-node traffic) |
 | `LOVELINESS_TLS_MODE` | `off` | `required` (all TLS), `optional` (TLS available, plaintext accepted), `off` |
 | `LOVELINESS_TLS_CLIENT_AUTH` | `require` | mTLS client auth: `require`, `request`, `none` |
+| `LOVELINESS_DISCOVER` | *(empty)* | Discovery mode: `dns` to enable DNS-based peer discovery |
+| `LOVELINESS_DISCOVER_ADDR` | *(empty)* | DNS name to resolve for peer discovery (e.g., `loveliness.internal`) |
+| `LOVELINESS_DISCOVER_INTERVAL` | `5` | Seconds between DNS discovery attempts |
+| `LOVELINESS_EXPECTED_NODES` | `0` | Expected node count for quorum-gated auto-bootstrap (0 = no expectation) |
 
 ## Authentication
 

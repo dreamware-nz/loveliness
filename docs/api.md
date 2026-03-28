@@ -129,6 +129,10 @@ S3 scheduled backups are configured via environment variables (see [Configuratio
 # Health check (always public, no auth required)
 curl -s localhost:8080/health | jq
 
+# Discovery info (always public, no auth required — used by DNS peer discovery)
+curl -s localhost:8080/discovery | jq
+# → {"node_id":"node-1","raft_addr":":9000","grpc_addr":":9001","http_addr":":8080","bolt_addr":":7687"}
+
 # Cluster status
 curl -s localhost:8080/cluster | jq
 

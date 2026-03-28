@@ -248,7 +248,8 @@ Without these vars, all listeners run plaintext (dev default). Details: [docs/co
 | [Benchmarks](docs/benchmarks.md) | Performance numbers, comparisons, transport benchmarks |
 | [Bolt Protocol](docs/bolt.md) | Neo4j driver compatibility, examples, test results |
 | [API Reference](docs/api.md) | HTTP endpoints, bulk loading, ingest queue, DR, consistency |
-| [Configuration](docs/configuration.md) | Environment variables, TLS, shard count guidance |
+| [Configuration](docs/configuration.md) | Environment variables, TLS, DNS discovery, shard count guidance |
+| [Fly.io Deploy](deploy/fly/) | One-command cloud deployment with DNS auto-discovery |
 | [Kubernetes](docs/kubernetes.md) | StatefulSet deployment, scaling, backup to S3 |
 | [Project Structure](docs/project-structure.md) | Package layout and file descriptions |
 | [Contributing](CONTRIBUTING.md) | Development setup, PR guidelines |
