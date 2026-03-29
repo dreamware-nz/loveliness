@@ -1,0 +1,33 @@
+# Git
+.git
+.gitignore
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Build artifacts
+loveliness
+*.exe
+
+# Documentation for local development
+README.md
+CONTRIBUTING.md
+TODOS.md
+docs/
+deploy/fly/results.md
+
+# CI/CD
+.github/
+fly.toml
+
+# Tests
+bench/
+*_test.go
+
+# Misc
+.dockerignore
+.goreleaser.yml
+.golangci.yml
+Makefile

@@ -1,0 +1,41 @@
+# fly.toml app configuration file for Loveliness
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+
+app = 'loveliness'
+primary_region = 'syd'
+
+[build]
+  image = "dreamwarenz/loveliness:latest"
+
+[env]
+  LOVELINESS_DISCOVER = "dns"
+  LOVELINESS_DISCOVER_ADDR = "loveliness.internal"
+  LOVELINESS_SHARD_COUNT = "3"
+  LOVELINESS_BIND_ADDR = "0.0.0.0:8080"
+  LOVELINESS_BOLT_ADDR = "0.0.0.0:7687"
+
+[mounts]
+  source = "loveliness_data"
+  destination = "/data"
+
+[[services]]
+  internal_port = 8080
+  protocol = "tcp"
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+  [[services.http_checks]]
+    path = "/health"
+    interval = 5000
+    timeout = 2000
+
+[[services]]
+  internal_port = 7687
+  protocol = "tcp"
+  [[services.ports]]
+    port = 7687
+
+[[vm]]
+  memory = '4gb'
+  cpu_kind = 'shared'
+  cpus = 2
