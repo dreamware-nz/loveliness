@@ -2,10 +2,7 @@ app = "loveliness"
 primary_region = "sjc"
 
 [build]
-  dockerfile = "../../Dockerfile"
-
-[processes]
-  app = "/usr/local/bin/start.sh"
+  dockerfile = "deploy/fly/Dockerfile"
 
 [env]
   LOVELINESS_DISCOVER = "dns"
@@ -24,7 +21,6 @@ primary_region = "sjc"
 [[services]]
   internal_port = 8080
   protocol = "tcp"
-  processes = ["app"]
   [[services.ports]]
     port = 443
     handlers = ["tls", "http"]
@@ -36,7 +32,6 @@ primary_region = "sjc"
 [[services]]
   internal_port = 7687
   protocol = "tcp"
-  processes = ["app"]
   [[services.ports]]
     port = 7687
 

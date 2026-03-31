@@ -24,9 +24,10 @@ RUN ldconfig
 
 COPY --from=builder /loveliness /usr/local/bin/loveliness
 COPY --from=builder /loveliness-benchmark /usr/local/bin/loveliness-benchmark
+COPY deploy/fly/start.sh /usr/local/bin/start.sh
 
-RUN useradd -r -s /bin/false loveliness && mkdir -p /data && chown loveliness:loveliness /data
+RUN useradd -r -s /bin/false loveliness && mkdir -p /data && chown loveliness:loveliness /data && chmod +x /usr/local/bin/start.sh
 USER loveliness
 
 EXPOSE 8080 7687 9000 9001
-ENTRYPOINT ["loveliness"]
+ENTRYPOINT ["/usr/local/bin/start.sh"]
