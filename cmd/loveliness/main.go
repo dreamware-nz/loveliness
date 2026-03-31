@@ -33,6 +33,30 @@ import (
 )
 
 func main() {
+	// Subcommand dispatch.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "up":
+			runUp(os.Args[2:])
+			return
+		case "query":
+			runQuery(os.Args[2:])
+			return
+		case "help", "--help", "-h":
+			printUsage()
+			return
+		case "version", "--version", "-v":
+			fmt.Println("loveliness dev")
+			return
+		case "serve":
+			// Fall through to normal server startup.
+		default:
+			fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", os.Args[1])
+			printUsage()
+			os.Exit(1)
+		}
+	}
+
 	cfg := config.FromEnv()
 	if err := cfg.Validate(); err != nil {
 		fmt.Fprintf(os.Stderr, "invalid config: %v\n", err)
@@ -54,6 +78,28 @@ func main() {
 		threadsPerShard = 1
 	}
 
+	// Calculate per-shard buffer pool size.
+	// LadybugDB defaults to 80% of system memory PER shard — with N shards
+	// that's N*80% which guarantees OOM. Auto-calculate a safe limit.
+	var bufferPoolBytes uint64
+	if cfg.ShardBufferMB > 0 {
+		bufferPoolBytes = uint64(cfg.ShardBufferMB) * 1024 * 1024
+	} else {
+		// Auto: 70% of total memory / shard count, minimum 256MB.
+		var m runtime.MemStats
+		runtime.ReadMemStats(&m)
+		totalMem := m.Sys
+		if totalMem < 512*1024*1024 {
+			// Sys can underreport early; fall back to a conservative estimate.
+			totalMem = 2 * 1024 * 1024 * 1024 // 2GB minimum assumption
+		}
+		bufferPoolBytes = (totalMem * 7 / 10) / uint64(cfg.ShardCount)
+		if bufferPoolBytes < 256*1024*1024 {
+			bufferPoolBytes = 256 * 1024 * 1024
+		}
+	}
+	slog.Info("buffer pool configured", "per_shard_mb", bufferPoolBytes/(1024*1024), "shards", cfg.ShardCount)
+
 	// Open local shards.
 	// Note: LadybugDB must create its own database directory. We only create
 	// the parent directory here — not the shard directories themselves.
@@ -64,13 +110,13 @@ func main() {
 	shards := make([]*shard.Shard, cfg.ShardCount)
 	for i := 0; i < cfg.ShardCount; i++ {
 		shardDir := filepath.Join(cfg.DataDir, fmt.Sprintf("shard-%d", i))
-		store, err := shard.NewLbugStore(shardDir, threadsPerShard)
+		store, err := shard.NewLbugStore(shardDir, threadsPerShard, bufferPoolBytes)
 		if err != nil {
 			slog.Error("open shard failed", "shard", i, "err", err)
 			os.Exit(1)
 		}
 		shards[i] = shard.NewShard(i, store, cfg.MaxConcurrentQueries)
-		slog.Info("shard opened", "shard", i, "path", shardDir, "threads", threadsPerShard)
+		slog.Info("shard opened", "shard", i, "path", shardDir, "threads", threadsPerShard, "buffer_mb", bufferPoolBytes/(1024*1024))
 	}
 
 	// Start Raft cluster.
@@ -85,7 +131,27 @@ func main() {
 	// and cross-shard resolution.
 	queryTimeout := time.Duration(cfg.QueryTimeoutMs) * time.Millisecond
 	reg := schema.NewRegistry()
+
+	// Wire Raft FSM schema callback to keep the registry in sync across all nodes.
+	c.SetSchemaCallback(func(tables map[string]string) {
+		for name, shardKey := range tables {
+			reg.Register(name, shardKey)
+		}
+	})
+
+	// Populate registry from Raft state first (survives restarts).
+	for name, shardKey := range c.GetSchema() {
+		reg.Register(name, shardKey)
+	}
+
+	// Fallback: introspect shard 0 for tables not yet in Raft state
+	// (e.g. tables created before this feature was deployed).
+	discoverSchema(shards[0], reg)
+
 	r := router.NewRouterWithSchema(shards, queryTimeout, reg)
+
+	// Replicate DDL changes (CREATE/DROP NODE TABLE) via Raft.
+	r.SetDDLHook(c)
 
 	// Phase B: Initialize per-shard Bloom filters (5M expected keys per shard, 1% FPR).
 	// At 5M keys and 1% FPR each filter uses ~6 MB, so 4 shards = ~24 MB total.
@@ -96,6 +162,26 @@ func main() {
 	// Multi-database support: catalog tracks databases, DatabaseRouter multiplexes queries.
 	cat := catalog.NewCatalog()
 	dbRouter := router.NewDatabaseRouter(cat, queryTimeout)
+
+	// Configure distributed query routing (cross-node shard access).
+	transportClient := transport.NewClient(queryTimeout)
+	r.SetRemoteTransport(cfg.NodeID, transport.NewRouterAdapter(transportClient), cluster.NewPlacementAdapter(c))
+
+	// Sync transport client peers from cluster node list.
+	syncPeers := func(sm cluster.ShardMap) {
+		for _, info := range sm.Nodes {
+			if !info.Alive || info.ID == cfg.NodeID {
+				continue
+			}
+			if info.HTTPAddr != "" {
+				transportClient.SetPeer(info.ID, info.HTTPAddr)
+			}
+			if info.GRPCAddr != "" {
+				transportClient.SetPeerTCP(info.ID, info.GRPCAddr)
+			}
+		}
+	}
+	syncPeers(c.GetShardMap())
 
 	// Initialize WAL for disaster recovery.
 	walDir := filepath.Join(cfg.DataDir, "wal")
@@ -255,6 +341,16 @@ func main() {
 		}
 	}
 
+	// Set discovery info on the API server for the public /discovery endpoint.
+	selfInfo := cluster.JoinInfo{
+		NodeID:   cfg.NodeID,
+		RaftAddr: cfg.RaftAddr,
+		GRPCAddr: cfg.GRPCAddr,
+		HTTPAddr: cfg.BindAddr,
+		BoltAddr: cfg.BoltAddr,
+	}
+	srv.SetDiscoveryInfo(selfInfo)
+
 	// Register this node in the cluster so ROUTE responses include it.
 	if cfg.Bootstrap {
 		_ = c.RegisterNode(cluster.NodeInfo{
@@ -267,7 +363,90 @@ func main() {
 		})
 	}
 
-	// Auto-join cluster if peers are configured.
+	// DNS-based peer discovery.
+	var disc *cluster.Discovery
+	if cfg.DiscoverMode == "dns" && cfg.DiscoverAddr != "" {
+		interval := 5 * time.Second
+		if cfg.DiscoverInterval > 0 {
+			interval = time.Duration(cfg.DiscoverInterval) * time.Second
+		}
+
+		_, httpPort, _ := net.SplitHostPort(cfg.BindAddr)
+		if httpPort == "" {
+			httpPort = "8080"
+		}
+
+		discCfg := cluster.DiscoveryConfig{
+			Addr:              cfg.DiscoverAddr,
+			Interval:          interval,
+			ExpectedNodes:     cfg.ExpectedNodes,
+			HTTPPort:          httpPort,
+			Self:              selfInfo,
+			BootstrapExplicit: cfg.Bootstrap,
+			Resolver:          nil,
+		}
+
+		joinFn := func(info cluster.JoinInfo) error {
+			body, _ := json.Marshal(map[string]string{
+				"node_id":   info.NodeID,
+				"raft_addr": info.RaftAddr,
+				"grpc_addr": info.GRPCAddr,
+				"http_addr": info.HTTPAddr,
+				"bolt_addr": info.BoltAddr,
+			})
+			client := &http.Client{Timeout: 5 * time.Second}
+			resp, err := client.Post(
+				fmt.Sprintf("http://localhost:%s/join", httpPort),
+				"application/json",
+				bytes.NewReader(body),
+			)
+			if err != nil {
+				return err
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				return fmt.Errorf("join returned %d", resp.StatusCode)
+			}
+			return nil
+		}
+
+		disc = cluster.NewDiscovery(discCfg, joinFn)
+
+		// Auto-bootstrap if not explicitly set.
+		if !cfg.Bootstrap {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				defer cancel()
+				should, err := disc.ShouldBootstrap(ctx)
+				if err != nil {
+					slog.Warn("discovery: auto-bootstrap check failed", "err", err)
+					return
+				}
+				if should {
+					slog.Info("discovery: auto-bootstrapping as lowest-IP node")
+					if err := c.Bootstrap(); err != nil {
+						slog.Warn("discovery: bootstrap failed (may already be bootstrapped)", "err", err)
+					} else {
+						slog.Info("discovery: raft bootstrap complete, registering self")
+						_ = c.RegisterNode(cluster.NodeInfo{
+							ID:       cfg.NodeID,
+							RaftAddr: cfg.RaftAddr,
+							GRPCAddr: cfg.GRPCAddr,
+							HTTPAddr: cfg.BindAddr,
+							BoltAddr: cfg.BoltAddr,
+							Alive:    true,
+						})
+					}
+				}
+				disc.Start()
+			}()
+		} else {
+			disc.Start()
+		}
+		slog.Info("dns discovery enabled", "addr", cfg.DiscoverAddr, "interval", interval)
+	}
+
+	// Auto-join cluster if peers are configured (legacy mode).
 	if len(cfg.Peers) > 0 && !cfg.Bootstrap {
 		go autoJoin(cfg)
 	}
@@ -279,10 +458,14 @@ func main() {
 	slog.Info("shutting down", "signal", sig.String())
 
 	// Graceful shutdown: stop workers, drain HTTP, close WAL, raft, shards.
+	if disc != nil {
+		disc.Stop()
+	}
 	if boltSrv != nil {
 		boltSrv.Stop()
 	}
 	tcpSrv.Stop()
+	transportClient.Close()
 	ingestWorker.Stop()
 	if dr.Scheduler != nil {
 		dr.Scheduler.Stop()
@@ -368,4 +551,53 @@ func autoJoin(cfg config.Config) {
 		time.Sleep(time.Duration(attempt+1) * 2 * time.Second)
 	}
 	slog.Warn("auto-join exhausted retries, node running standalone")
+}
+
+// discoverSchema introspects a shard to discover existing node tables and
+// register them in the schema registry. This ensures the registry survives
+// restarts without requiring schema state in the Raft FSM.
+func discoverSchema(s *shard.Shard, reg *schema.Registry) {
+	resp, err := s.Query("CALL show_tables() RETURN *")
+	if err != nil {
+		slog.Warn("schema discovery: show_tables failed", "err", err)
+		return
+	}
+	for _, row := range resp.Rows {
+		ttype, _ := row["type"].(string)
+		if ttype != "NODE" {
+			continue
+		}
+		name, _ := row["name"].(string)
+		if name == "" {
+			continue
+		}
+		pk := discoverPrimaryKey(s, name)
+		if pk != "" {
+			reg.Register(name, pk)
+			slog.Info("schema discovery: registered table", "table", name, "shard_key", pk)
+		}
+	}
+}
+
+func discoverPrimaryKey(s *shard.Shard, tableName string) string {
+	resp, err := s.Query(fmt.Sprintf("CALL table_info('%s') RETURN *", tableName))
+	if err != nil {
+		slog.Warn("schema discovery: table_info failed", "table", tableName, "err", err)
+		return ""
+	}
+	for _, row := range resp.Rows {
+		isPK := false
+		switch v := row["primary key"].(type) {
+		case bool:
+			isPK = v
+		case float64:
+			isPK = v != 0
+		}
+		if isPK {
+			if name, ok := row["name"].(string); ok {
+				return name
+			}
+		}
+	}
+	return ""
 }

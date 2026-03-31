@@ -48,6 +48,9 @@ type Server struct {
 
 	// joinTokens manages single-use, time-limited cluster join tokens.
 	joinTokens *cluster.TokenStore
+
+	// discoveryInfo holds this node's join info for the public /discovery endpoint.
+	discoveryInfo *cluster.JoinInfo
 }
 
 // NewServer creates a new API server.
@@ -100,9 +103,10 @@ func (s *Server) Handler() http.Handler {
 	// Admin endpoint (not db-scoped) for CREATE/STOP/START/DROP DATABASE, SHOW DATABASES.
 	protected.HandleFunc("POST /admin/cypher", s.handleAdminCypher)
 
-	// Top-level mux: health is public, everything else goes through auth.
+	// Top-level mux: health and discovery are public, everything else goes through auth.
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
+	mux.HandleFunc("GET /discovery", s.handleDiscovery)
 	if s.auth != nil && s.auth.Enabled() {
 		mux.Handle("/", s.auth.Middleware(protected))
 	} else {
@@ -279,6 +283,19 @@ type joinRequest struct {
 	HTTPAddr  string `json:"http_addr"`
 	BoltAddr  string `json:"bolt_addr"`
 	JoinToken string `json:"join_token"`
+}
+
+// SetDiscoveryInfo sets the node's join info for the public /discovery endpoint.
+func (s *Server) SetDiscoveryInfo(info cluster.JoinInfo) {
+	s.discoveryInfo = &info
+}
+
+func (s *Server) handleDiscovery(w http.ResponseWriter, r *http.Request) {
+	if s.discoveryInfo == nil {
+		writeError(w, http.StatusServiceUnavailable, "NO_DISCOVERY", "discovery info not configured", 0)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.discoveryInfo)
 }
 
 func (s *Server) handleJoinToken(w http.ResponseWriter, r *http.Request) {

@@ -28,7 +28,9 @@ graph TB
     S0 --- WAL[WAL + Backup + Ingest Queue]
 ```
 
-## Performance (15.7M nodes, 10M edges, 4 shards)
+## Performance
+
+### Local (15.7M nodes, 10M edges, 4 shards — Apple M1 Pro)
 
 | Query Type | P50 | QPS |
 |---|---|---|
@@ -38,6 +40,33 @@ graph TB
 | Aggregation | **57ms** | 16 |
 | 2-hop traversal | **162ms** | 5 |
 | Bulk load | **70–190K nodes/sec** | — |
+
+### Cluster (23M nodes, 23M edges, 6 shards — 3-node Fly.io)
+
+Tested on 3× performance-16x machines (48GB RAM each), sjc region. 200 iterations, 8 concurrent workers. Benchmark binary runs inside the cluster on localhost for true in-network latencies.
+
+| Query Type | P50 | P95 | QPS |
+|---|---|---|---|
+| Point lookup | **1.2ms** | 2.4ms | 710 |
+| Point lookup (8 workers) | **1.1ms** | 1.7ms | **6,831** |
+| Range filter | **2.7ms** | 3.6ms | 366 |
+| 1-hop traversal | **4.7ms** | 187ms | 31 |
+| 2-hop traversal | **121ms** | 152ms | 8 |
+| Shortest path (1..6) | **31ms** | 53ms | 28 |
+| Group-by aggregation | **246ms** | 258ms | 4 |
+| Single write | **1.8ms** | 2.9ms | 537 |
+| Bulk node load | **9,600/sec** | — | — |
+| Bulk edge load | **136,000/sec** | — | — |
+
+### Scale progression
+
+| Dataset | Shards | Point lookup P50 | Concurrent QPS | Group-by P50 |
+|---|---|---|---|---|
+| 10M / 10M | 3 | 1.4ms | 1,792 | — |
+| 20M / 20M | 3 | 863us | 1,991 | 838ms |
+| 23M / 23M | 6 | 1.2ms | **6,831** | 246ms |
+
+Point lookups stay sub-2ms through 23M. Doubling shards from 3→6 tripled concurrent QPS and cut full-scan aggregations by 3x.
 
 <!-- BENCHMARK_START -->
 <!-- BENCHMARK_END -->
@@ -80,16 +109,49 @@ with driver.session() as session:
 
 ## Quick Start
 
+**Fastest way** — one command, real 3-node Raft cluster on your laptop:
+
+```bash
+loveliness up 3
+```
+
+That's it. Three nodes, auto-configured ports, auto-bootstrap. Connect at `bolt://localhost:7687` or `http://localhost:8080`.
+
+**From source:**
+
 ```bash
 git clone https://github.com/dreamware-nz/loveliness.git && cd loveliness
 
 make build      # requires LadybugDB: curl -fsSL https://install.ladybugdb.com | sh
 make run        # single node → :8080 (HTTP), :7687 (Bolt)
 make docker     # 3-node cluster via Docker Compose
-make test       # 258 tests across 12 packages
+make test       # 260 tests across 12 packages
 ```
 
+**Deploy to Fly.io** — zero-config cloud cluster in under 5 minutes:
+
+```bash
+cd deploy/fly
+fly launch
+fly scale count 3
+```
+
+DNS auto-discovery handles peer finding. No manual peer configuration needed. See [Fly.io deployment docs](deploy/fly/) for details.
+
 ## Usage
+
+**CLI:**
+
+```bash
+loveliness help                                           # show all commands
+loveliness up 3                                           # 3-node local cluster
+loveliness query "MATCH (p:Person {name: 'Alice'}) RETURN p"  # query a running server
+loveliness version                                        # show version
+```
+
+Set `LOVELINESS_URL` to query a remote server (default: `http://localhost:8080`).
+
+**HTTP API:**
 
 ```bash
 # Schema (broadcast to all shards)
@@ -228,7 +290,8 @@ Without these vars, all listeners run plaintext (dev default). Details: [docs/co
 | [Benchmarks](docs/benchmarks.md) | Performance numbers, comparisons, transport benchmarks |
 | [Bolt Protocol](docs/bolt.md) | Neo4j driver compatibility, examples, test results |
 | [API Reference](docs/api.md) | HTTP endpoints, bulk loading, ingest queue, DR, consistency |
-| [Configuration](docs/configuration.md) | Environment variables, TLS, shard count guidance |
+| [Configuration](docs/configuration.md) | Environment variables, TLS, DNS discovery, shard count guidance |
+| [Fly.io Deploy](deploy/fly/) | One-command cloud deployment with DNS auto-discovery |
 | [Kubernetes](docs/kubernetes.md) | StatefulSet deployment, scaling, backup to S3 |
 | [Project Structure](docs/project-structure.md) | Package layout and file descriptions |
 | [Contributing](CONTRIBUTING.md) | Development setup, PR guidelines |

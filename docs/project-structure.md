@@ -12,12 +12,18 @@ deploy/
     statefulset.yml                 3-replica StatefulSet with PVCs and health probes
     service.yml                     Headless service + LoadBalancer
     bootstrap-job.yml               Raft bootstrap helper job
+  fly/
+    fly.toml                        Fly.io deployment config with DNS auto-discovery
+    start.sh                        Fly.io entrypoint — sets dynamic config from FLY_PRIVATE_IP
 bench/
   docker-compose.yml                Benchmark comparison: Loveliness (1, 3-node) vs Neo4j CE
   run.sh                            Benchmark orchestrator: starts configs, runs suite, collects stats
   results/                          Generated benchmark results (JSON, SVG, markdown)
 cmd/
-  loveliness/main.go              Entry point, config, shard init, Raft, HTTP, Bolt, TCP, ingest, shutdown
+  loveliness/
+    main.go                       Entry point, subcommand dispatch (serve/up/query/help/version), shard init, Raft, HTTP, Bolt, DNS discovery
+    up.go                         `loveliness up N` — spawns N-node local cluster for development
+    query.go                      `loveliness query` — CLI Cypher client, sends queries to a running server via /cypher
   benchmark/main.go               Benchmark suite with --target (loveliness/neo4j), --json-out support
   benchmark-charts/main.go        SVG chart generator: reads JSON results, generates comparison charts
   generate/main.go                Bulk data generator with two-pass edge loading
@@ -45,6 +51,7 @@ pkg/
     tcp.go                        TCP server: persistent connections, buffered I/O
     pool.go                       TCP connection pool: lazy dial, auto-eviction
     client.go                     Unified client: TCP+msgpack preferred, HTTP+JSON fallback
+    adapter.go                    RouterAdapter — bridges transport.Client to router.RemoteQuerier
     handler.go                    HTTP /internal/query endpoint (legacy fallback)
     shard_set.go                  Lightweight shard slice adapter
   bolt/
@@ -80,8 +87,10 @@ pkg/
     partitioner.go                Cross-shard traversal stats + locality suggestions
     transfer.go                   Shard data transfer (export/import as Cypher)
     join_token.go                 Single-use, time-limited join tokens for secure cluster join
+    discovery.go                  DNS-based peer discovery with auto-bootstrap (quorum-gated)
+    placement.go                  PlacementAdapter — shard→node lookups from live Raft FSM state
   api/
-    api.go                        HTTP API — /cypher, /health, /cluster, /join
+    api.go                        HTTP API — /cypher, /health, /cluster, /join, /discovery
     bulk.go                       Bulk loading endpoints with streaming CSV parse
     bulk_stream.go                Streaming bulk load variant
     ingest.go                     Async ingest queue endpoints

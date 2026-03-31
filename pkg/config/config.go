@@ -58,6 +58,17 @@ type Config struct {
 	TLSCA         string // path to CA certificate (for mTLS)
 	TLSMode       string // "required", "optional", "off"
 	TLSClientAuth string // "require", "request", "none"
+
+	// ShardBufferMB is the buffer pool size in MB per shard.
+	// 0 = auto-calculate: (total system memory * 0.7) / shard_count.
+	// LadybugDB defaults to 80% of system memory PER shard, which OOMs with multiple shards.
+	ShardBufferMB int
+
+	// DNS discovery configuration.
+	DiscoverMode     string // "dns" to enable DNS-based peer discovery, empty to disable
+	DiscoverAddr     string // DNS name to resolve for peer discovery (e.g., "loveliness.internal")
+	DiscoverInterval int    // interval in seconds between discovery attempts (default: 5)
+	ExpectedNodes    int    // expected number of nodes for quorum-gated auto-bootstrap (0 = no expectation)
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -163,6 +174,27 @@ func FromEnv() Config {
 	}
 	if v := os.Getenv("LOVELINESS_TLS_CLIENT_AUTH"); v != "" {
 		c.TLSClientAuth = v
+	}
+	if v := os.Getenv("LOVELINESS_DISCOVER"); v != "" {
+		c.DiscoverMode = v
+	}
+	if v := os.Getenv("LOVELINESS_DISCOVER_ADDR"); v != "" {
+		c.DiscoverAddr = v
+	}
+	if v := os.Getenv("LOVELINESS_DISCOVER_INTERVAL"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.DiscoverInterval = n
+		}
+	}
+	if v := os.Getenv("LOVELINESS_EXPECTED_NODES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.ExpectedNodes = n
+		}
+	}
+	if v := os.Getenv("LOVELINESS_SHARD_BUFFER_MB"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.ShardBufferMB = n
+		}
 	}
 	return c
 }

@@ -192,6 +192,8 @@ The FSM manages cluster-wide state via four command types:
 | `CmdJoinNode` | Register a node with its addresses |
 | `CmdRemoveNode` | Mark a node as dead |
 | `CmdPromoteReplica` | Promote replica to primary, clear replica slot |
+| `CmdRegisterSchema` | Persist table→shard key mapping (survives restarts) |
+| `CmdRemoveSchema` | Remove a table's schema entry on DROP TABLE |
 
 State is snapshotted as JSON and can be restored on any node.
 

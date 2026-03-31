@@ -170,9 +170,47 @@ func (c *Cluster) PromoteReplica(shardID int, newPrimary string) error {
 	return c.Apply(Command{Type: CmdPromoteReplica, Payload: payload})
 }
 
+// RegisterTable replicates a schema registration (table name → shard key) via Raft.
+func (c *Cluster) RegisterTable(name, shardKey string) error {
+	payload, _ := json.Marshal(RegisterTablePayload{Name: name, ShardKey: shardKey})
+	return c.Apply(Command{Type: CmdRegisterTable, Payload: payload})
+}
+
+// RemoveTable replicates a schema removal via Raft.
+func (c *Cluster) RemoveTable(name string) error {
+	payload, _ := json.Marshal(RemoveTablePayload{Name: name})
+	return c.Apply(Command{Type: CmdRemoveTable, Payload: payload})
+}
+
+// GetSchema returns the current schema keys from the FSM.
+func (c *Cluster) GetSchema() map[string]string {
+	return c.fsm.GetShardMap().SchemaKeys
+}
+
+// SetSchemaCallback sets a callback that fires whenever schema state changes in the FSM.
+func (c *Cluster) SetSchemaCallback(cb SchemaCallback) {
+	c.fsm.SetSchemaCallback(cb)
+}
+
 // NodeID returns this node's ID.
 func (c *Cluster) NodeID() string {
 	return c.nodeID
+}
+
+// Bootstrap bootstraps this node as a single-node cluster.
+// Used by DNS auto-discovery when this node is elected as the bootstrap node.
+// Safe to call after New() was called with bootstrap=false.
+func (c *Cluster) Bootstrap() error {
+	cfg := raft.Configuration{
+		Servers: []raft.Server{
+			{
+				ID:      raft.ServerID(c.nodeID),
+				Address: raft.ServerAddress(c.raftAddr),
+			},
+		},
+	}
+	f := c.raft.BootstrapCluster(cfg)
+	return f.Error()
 }
 
 // BootstrapShards assigns shardCount shards round-robin across the given nodes.
