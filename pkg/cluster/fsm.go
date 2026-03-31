@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/hashicorp/raft"
+	"github.com/johnjansen/loveliness/pkg/catalog"
 )
 
 // ShardAssignment tracks which node owns the primary for a shard
@@ -41,6 +42,10 @@ const (
 	CmdJoinNode
 	CmdRemoveNode
 	CmdPromoteReplica
+	CmdCreateDatabase
+	CmdStopDatabase
+	CmdStartDatabase
+	CmdDeleteDatabase
 )
 
 // Command is a Raft log entry.
@@ -72,20 +77,39 @@ type PromoteReplicaPayload struct {
 	NewPrimary string `json:"new_primary"`
 }
 
-// FSM implements the raft.FSM interface for managing the cluster shard map.
+// CreateDatabasePayload is the data for CmdCreateDatabase.
+type CreateDatabasePayload struct {
+	Name       string `json:"name"`
+	ShardCount int    `json:"shard_count"`
+}
+
+// DatabaseNamePayload is the data for CmdStopDatabase, CmdStartDatabase, CmdDeleteDatabase.
+type DatabaseNamePayload struct {
+	Name string `json:"name"`
+}
+
+// FSM implements the raft.FSM interface for managing the cluster shard map
+// and database catalog.
 type FSM struct {
 	mu       sync.RWMutex
 	shardMap ShardMap
+	catalog  *catalog.Catalog
 }
 
-// NewFSM creates a new FSM with an empty shard map.
+// NewFSM creates a new FSM with an empty shard map and catalog.
 func NewFSM() *FSM {
 	return &FSM{
 		shardMap: ShardMap{
 			Assignments: make(map[int]ShardAssignment),
 			Nodes:       make(map[string]NodeInfo),
 		},
+		catalog: catalog.NewCatalog(),
 	}
+}
+
+// GetCatalog returns the catalog for reading database metadata.
+func (f *FSM) GetCatalog() *catalog.Catalog {
+	return f.catalog
 }
 
 // GetShardMap returns a copy of the current shard map.
@@ -157,16 +181,58 @@ func (f *FSM) Apply(log *raft.Log) interface{} {
 		}
 		return nil
 
+	case CmdCreateDatabase:
+		var p CreateDatabasePayload
+		if err := json.Unmarshal(cmd.Payload, &p); err != nil {
+			return fmt.Errorf("unmarshal create database: %w", err)
+		}
+		db, err := f.catalog.CreateDatabase(p.Name, p.ShardCount)
+		if err != nil {
+			return err
+		}
+		return db
+
+	case CmdStopDatabase:
+		var p DatabaseNamePayload
+		if err := json.Unmarshal(cmd.Payload, &p); err != nil {
+			return fmt.Errorf("unmarshal stop database: %w", err)
+		}
+		return f.catalog.StopDatabase(p.Name)
+
+	case CmdStartDatabase:
+		var p DatabaseNamePayload
+		if err := json.Unmarshal(cmd.Payload, &p); err != nil {
+			return fmt.Errorf("unmarshal start database: %w", err)
+		}
+		return f.catalog.StartDatabase(p.Name)
+
+	case CmdDeleteDatabase:
+		var p DatabaseNamePayload
+		if err := json.Unmarshal(cmd.Payload, &p); err != nil {
+			return fmt.Errorf("unmarshal delete database: %w", err)
+		}
+		return f.catalog.DeleteDatabase(p.Name)
+
 	default:
 		return fmt.Errorf("unknown command type: %d", cmd.Type)
 	}
+}
+
+// fsmState is the combined state serialized in Raft snapshots.
+type fsmState struct {
+	ShardMap ShardMap                `json:"shard_map"`
+	Catalog  catalog.CatalogSnapshot `json:"catalog"`
 }
 
 // Snapshot returns a snapshot of the FSM state for Raft snapshotting.
 func (f *FSM) Snapshot() (raft.FSMSnapshot, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-	data, err := json.Marshal(f.shardMap)
+	state := fsmState{
+		ShardMap: f.shardMap,
+		Catalog:  f.catalog.Snapshot(),
+	}
+	data, err := json.Marshal(state)
 	if err != nil {
 		return nil, err
 	}
@@ -176,13 +242,38 @@ func (f *FSM) Snapshot() (raft.FSMSnapshot, error) {
 // Restore replaces the FSM state from a snapshot.
 func (f *FSM) Restore(rc io.ReadCloser) error {
 	defer rc.Close()
-	var sm ShardMap
-	if err := json.NewDecoder(rc).Decode(&sm); err != nil {
+
+	// Try new format first (with catalog).
+	raw, err := io.ReadAll(rc)
+	if err != nil {
 		return err
 	}
+
+	var state fsmState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		return err
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.shardMap = sm
+
+	// If the snapshot has the new format (shard_map key), use it.
+	// Otherwise it's a legacy snapshot with just the ShardMap at the top level.
+	if state.ShardMap.Assignments != nil {
+		f.shardMap = state.ShardMap
+	} else {
+		// Legacy format: the entire JSON is a ShardMap.
+		var sm ShardMap
+		if err := json.Unmarshal(raw, &sm); err != nil {
+			return err
+		}
+		f.shardMap = sm
+	}
+
+	if state.Catalog.Databases != nil {
+		f.catalog.Restore(state.Catalog)
+	}
+
 	return nil
 }
 
