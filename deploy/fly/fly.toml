@@ -2,7 +2,7 @@ app = "loveliness"
 primary_region = "sjc"
 
 [build]
-  dockerfile = "deploy/fly/Dockerfile"
+  dockerfile = "../../Dockerfile.fly"
 
 [env]
   LOVELINESS_DISCOVER = "dns"

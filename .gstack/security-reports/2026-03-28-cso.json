@@ -1,0 +1,80 @@
+{
+  "version": "2.0.0",
+  "date": "2026-03-28T00:00:00Z",
+  "mode": "daily",
+  "scope": "full",
+  "diff_mode": false,
+  "phases_run": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+  "attack_surface": {
+    "code": {
+      "public_endpoints": 1,
+      "authenticated": 15,
+      "admin": 2,
+      "api": 15,
+      "uploads": 4,
+      "integrations": 0,
+      "background_jobs": 1,
+      "websockets": 0
+    },
+    "infrastructure": {
+      "ci_workflows": 2,
+      "webhook_receivers": 0,
+      "container_configs": 1,
+      "iac_configs": 3,
+      "deploy_targets": 2,
+      "secret_management": "env vars"
+    }
+  },
+  "findings": [
+    {
+      "id": 1,
+      "severity": "MEDIUM",
+      "confidence": 8,
+      "status": "VERIFIED",
+      "phase": 5,
+      "phase_name": "Infrastructure Shadow Surface",
+      "category": "Infrastructure",
+      "fingerprint": "sha256-infra-Dockerfile-container-runs-as-root",
+      "title": "Production container runs as root",
+      "file": "Dockerfile",
+      "line": 17,
+      "commit": null,
+      "description": "The runtime stage (debian:bookworm-slim) has no USER directive. The loveliness binary runs as root (UID 0) inside the container.",
+      "exploit_scenario": "1. Attacker exploits a vulnerability in LadybugDB's CGo layer (e.g., the known segfault in ALL SHORTEST paths) or a future RCE in the Cypher engine. 2. Code execution lands as root inside the container. 3. Root access enables container escape techniques (kernel exploits, mount namespace abuse), reading /proc/1/environ for secrets, and pivoting to other containers on the same host.",
+      "impact": "Container compromise gives full root privileges. Increases blast radius of any RCE from 'unprivileged process' to 'root in container'.",
+      "recommendation": "Add a non-root user to the Dockerfile runtime stage:\n\n```dockerfile\nRUN useradd -r -s /bin/false loveliness\nUSER loveliness\n```\n\nEnsure the data directory is writable by this user. Place this after the COPY and ldconfig steps but before ENTRYPOINT.",
+      "playbook": null,
+      "verification": "self-verified — confirmed no USER directive in Dockerfile runtime stage (line 17 onwards)"
+    }
+  ],
+  "supply_chain_summary": {
+    "direct_deps": 7,
+    "transitive_deps": 18,
+    "critical_cves": 0,
+    "high_cves": 0,
+    "install_scripts": 0,
+    "lockfile_present": true,
+    "lockfile_tracked": true,
+    "tools_skipped": ["govulncheck — not installed"]
+  },
+  "filter_stats": {
+    "candidates_scanned": 8,
+    "hard_exclusion_filtered": 1,
+    "confidence_gate_filtered": 6,
+    "verification_filtered": 0,
+    "reported": 1
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 1,
+    "tentative": 0
+  },
+  "trend": {
+    "prior_report_date": null,
+    "resolved": 0,
+    "persistent": 0,
+    "new": 1,
+    "direction": "first_run"
+  }
+}
