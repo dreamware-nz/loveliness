@@ -77,6 +77,28 @@ func main() {
 		threadsPerShard = 1
 	}
 
+	// Calculate per-shard buffer pool size.
+	// LadybugDB defaults to 80% of system memory PER shard — with N shards
+	// that's N*80% which guarantees OOM. Auto-calculate a safe limit.
+	var bufferPoolBytes uint64
+	if cfg.ShardBufferMB > 0 {
+		bufferPoolBytes = uint64(cfg.ShardBufferMB) * 1024 * 1024
+	} else {
+		// Auto: 70% of total memory / shard count, minimum 256MB.
+		var m runtime.MemStats
+		runtime.ReadMemStats(&m)
+		totalMem := m.Sys
+		if totalMem < 512*1024*1024 {
+			// Sys can underreport early; fall back to a conservative estimate.
+			totalMem = 2 * 1024 * 1024 * 1024 // 2GB minimum assumption
+		}
+		bufferPoolBytes = (totalMem * 7 / 10) / uint64(cfg.ShardCount)
+		if bufferPoolBytes < 256*1024*1024 {
+			bufferPoolBytes = 256 * 1024 * 1024
+		}
+	}
+	slog.Info("buffer pool configured", "per_shard_mb", bufferPoolBytes/(1024*1024), "shards", cfg.ShardCount)
+
 	// Open local shards.
 	// Note: LadybugDB must create its own database directory. We only create
 	// the parent directory here — not the shard directories themselves.
@@ -87,13 +109,13 @@ func main() {
 	shards := make([]*shard.Shard, cfg.ShardCount)
 	for i := 0; i < cfg.ShardCount; i++ {
 		shardDir := filepath.Join(cfg.DataDir, fmt.Sprintf("shard-%d", i))
-		store, err := shard.NewLbugStore(shardDir, threadsPerShard)
+		store, err := shard.NewLbugStore(shardDir, threadsPerShard, bufferPoolBytes)
 		if err != nil {
 			slog.Error("open shard failed", "shard", i, "err", err)
 			os.Exit(1)
 		}
 		shards[i] = shard.NewShard(i, store, cfg.MaxConcurrentQueries)
-		slog.Info("shard opened", "shard", i, "path", shardDir, "threads", threadsPerShard)
+		slog.Info("shard opened", "shard", i, "path", shardDir, "threads", threadsPerShard, "buffer_mb", bufferPoolBytes/(1024*1024))
 	}
 
 	// Start Raft cluster.
@@ -108,13 +130,53 @@ func main() {
 	// and cross-shard resolution.
 	queryTimeout := time.Duration(cfg.QueryTimeoutMs) * time.Millisecond
 	reg := schema.NewRegistry()
+
+	// Wire Raft FSM schema callback to keep the registry in sync across all nodes.
+	c.SetSchemaCallback(func(tables map[string]string) {
+		for name, shardKey := range tables {
+			reg.Register(name, shardKey)
+		}
+	})
+
+	// Populate registry from Raft state first (survives restarts).
+	for name, shardKey := range c.GetSchema() {
+		reg.Register(name, shardKey)
+	}
+
+	// Fallback: introspect shard 0 for tables not yet in Raft state
+	// (e.g. tables created before this feature was deployed).
+	discoverSchema(shards[0], reg)
+
 	r := router.NewRouterWithSchema(shards, queryTimeout, reg)
+
+	// Replicate DDL changes (CREATE/DROP NODE TABLE) via Raft.
+	r.SetDDLHook(c)
 
 	// Phase B: Initialize per-shard Bloom filters (5M expected keys per shard, 1% FPR).
 	// At 5M keys and 1% FPR each filter uses ~6 MB, so 4 shards = ~24 MB total.
 	for i := 0; i < cfg.ShardCount; i++ {
 		r.BloomIndex().InitShard(i, 5_000_000, 0.01)
 	}
+
+	// Configure distributed query routing (cross-node shard access).
+	transportClient := transport.NewClient(queryTimeout)
+	r.SetRemoteTransport(cfg.NodeID, transport.NewRouterAdapter(transportClient), cluster.NewPlacementAdapter(c))
+
+	// Sync transport client peers from cluster node list.
+	syncPeers := func(sm cluster.ShardMap) {
+		for _, info := range sm.Nodes {
+			if !info.Alive || info.ID == cfg.NodeID {
+				continue
+			}
+			if info.HTTPAddr != "" {
+				transportClient.SetPeer(info.ID, info.HTTPAddr)
+			}
+			if info.GRPCAddr != "" {
+				transportClient.SetPeerTCP(info.ID, info.GRPCAddr)
+			}
+		}
+	}
+	syncPeers(c.GetShardMap())
 
 	// Initialize WAL for disaster recovery.
 	walDir := filepath.Join(cfg.DataDir, "wal")
@@ -394,6 +456,7 @@ func main() {
 		boltSrv.Stop()
 	}
 	tcpSrv.Stop()
+	transportClient.Close()
 	ingestWorker.Stop()
 	if dr.Scheduler != nil {
 		dr.Scheduler.Stop()
@@ -479,4 +542,53 @@ func autoJoin(cfg config.Config) {
 		time.Sleep(time.Duration(attempt+1) * 2 * time.Second)
 	}
 	slog.Warn("auto-join exhausted retries, node running standalone")
+}
+
+// discoverSchema introspects a shard to discover existing node tables and
+// register them in the schema registry. This ensures the registry survives
+// restarts without requiring schema state in the Raft FSM.
+func discoverSchema(s *shard.Shard, reg *schema.Registry) {
+	resp, err := s.Query("CALL show_tables() RETURN *")
+	if err != nil {
+		slog.Warn("schema discovery: show_tables failed", "err", err)
+		return
+	}
+	for _, row := range resp.Rows {
+		ttype, _ := row["type"].(string)
+		if ttype != "NODE" {
+			continue
+		}
+		name, _ := row["name"].(string)
+		if name == "" {
+			continue
+		}
+		pk := discoverPrimaryKey(s, name)
+		if pk != "" {
+			reg.Register(name, pk)
+			slog.Info("schema discovery: registered table", "table", name, "shard_key", pk)
+		}
+	}
+}
+
+func discoverPrimaryKey(s *shard.Shard, tableName string) string {
+	resp, err := s.Query(fmt.Sprintf("CALL table_info('%s') RETURN *", tableName))
+	if err != nil {
+		slog.Warn("schema discovery: table_info failed", "table", tableName, "err", err)
+		return ""
+	}
+	for _, row := range resp.Rows {
+		isPK := false
+		switch v := row["primary key"].(type) {
+		case bool:
+			isPK = v
+		case float64:
+			isPK = v != 0
+		}
+		if isPK {
+			if name, ok := row["name"].(string); ok {
+				return name
+			}
+		}
+	}
+	return ""
 }

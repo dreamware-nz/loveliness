@@ -20,6 +20,30 @@ Benchmarked on Apple M1 Pro, single node, 4 shards.
 | Single write | **365us** | 2,526 |
 | Merge/upsert | **5.0ms** | 190 |
 
+## At 23M nodes / 23M edges (6 shards, 3-node Fly.io cluster)
+
+In-cluster benchmarks on performance-16x machines (48GB RAM), sjc region. 200 iterations, 8 concurrent workers.
+
+| Query Type | P50 Latency | QPS (8 workers) |
+|---|---|---|
+| Point lookup (PK) | **1.2ms** | **6,831** (concurrent) |
+| Range filter (LIMIT 20) | **2.7ms** | 366 |
+| Count all nodes | **3.9ms** | 247 |
+| Count filtered (by city) | **95ms** | 10 |
+| Aggregation (avg/min/max) | **99ms** | 10 |
+| Group-by (10 cities) | **246ms** | 4 |
+| 1-hop traversal | **4.7ms** | 31 |
+| 2-hop traversal | **121ms** | 8 |
+| Variable-length path (1..3) | **2.7ms** | 343 |
+| Friend-of-friend count | **236ms** | 4 |
+| Mutual friends (triangle) | **3.2ms** | 276 |
+| Shortest path (1..6) | **31ms** | 28 |
+| Single write | **1.8ms** | 537 |
+| Merge/upsert | **2.3ms** | 421 |
+| Read-after-write | **2.9ms** | 332 |
+
+Node loading: 9,600/sec (batched COPY FROM). Edge loading: 136,000/sec (batched, X-Skip-Refs).
+
 ## Bulk Loading Throughput
 
 | Operation | Throughput | Notes |
