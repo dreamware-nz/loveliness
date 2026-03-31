@@ -13,6 +13,7 @@ RUN LBUG_MOD=$(go env GOMODCACHE)/github.com/\!ladybug\!d\!b/go-ladybug@v0.13.1 
 
 COPY . .
 RUN CGO_ENABLED=1 go build -o /loveliness ./cmd/loveliness
+RUN CGO_ENABLED=1 go build -o /loveliness-benchmark ./cmd/benchmark
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
@@ -22,6 +23,7 @@ COPY --from=builder /go/pkg/mod/github.com/!ladybug!d!b/go-ladybug@v0.13.1/lib/d
 RUN ldconfig
 
 COPY --from=builder /loveliness /usr/local/bin/loveliness
+COPY --from=builder /loveliness-benchmark /usr/local/bin/loveliness-benchmark
 
 RUN useradd -r -s /bin/false loveliness && mkdir -p /data && chown loveliness:loveliness /data
 USER loveliness
