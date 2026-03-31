@@ -19,6 +19,7 @@ import (
 	"github.com/johnjansen/loveliness/pkg/auth"
 	"github.com/johnjansen/loveliness/pkg/backup"
 	boltpkg "github.com/johnjansen/loveliness/pkg/bolt"
+	"github.com/johnjansen/loveliness/pkg/catalog"
 	"github.com/johnjansen/loveliness/pkg/cluster"
 	"github.com/johnjansen/loveliness/pkg/config"
 	"github.com/johnjansen/loveliness/pkg/ingest"
@@ -158,6 +159,10 @@ func main() {
 		r.BloomIndex().InitShard(i, 5_000_000, 0.01)
 	}
 
+	// Multi-database support: catalog tracks databases, DatabaseRouter multiplexes queries.
+	cat := catalog.NewCatalog()
+	dbRouter := router.NewDatabaseRouter(cat, queryTimeout)
+
 	// Configure distributed query routing (cross-node shard access).
 	transportClient := transport.NewClient(queryTimeout)
 	r.SetRemoteTransport(cfg.NodeID, transport.NewRouterAdapter(transportClient), cluster.NewPlacementAdapter(c))
@@ -280,6 +285,7 @@ func main() {
 	srv.SetDR(dr)
 	srv.SetAuth(tokenAuth)
 	srv.SetIngestQueue(ingestQueue)
+	srv.SetDatabaseRouter(dbRouter)
 	httpServer := &http.Server{
 		Addr:         cfg.BindAddr,
 		Handler:      srv.Handler(),
@@ -315,6 +321,9 @@ func main() {
 		boltAdapter := boltpkg.NewRouterAdapter(r)
 		boltSrv = boltpkg.NewServer(cfg.BoltAddr, boltAdapter)
 		boltSrv.SetCluster(&clusterTopologyAdapter{cluster: c})
+		// Wire multi-database support via DatabaseRouterAdapter.
+		dbAdapter := boltpkg.NewDatabaseRouterAdapter(dbRouter, c)
+		boltSrv.SetDatabaseExecutor(dbAdapter)
 		if tlsCfg.Enabled() {
 			boltTLS, err := tlsutil.ServerTLSConfig(tlsCfg)
 			if err != nil {

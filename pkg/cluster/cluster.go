@@ -10,6 +10,7 @@ import (
 
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
+	"github.com/johnjansen/loveliness/pkg/catalog"
 )
 
 // Cluster manages Raft consensus and the shard map for a Loveliness node.
@@ -126,6 +127,38 @@ func (c *Cluster) AssignShard(shardID int, primary, replica string) error {
 func (c *Cluster) RegisterNode(info NodeInfo) error {
 	payload, _ := json.Marshal(JoinNodePayload{NodeInfo: info})
 	return c.Apply(Command{Type: CmdJoinNode, Payload: payload})
+}
+
+// GetCatalog returns the database catalog from the FSM.
+func (c *Cluster) GetCatalog() *catalog.Catalog {
+	return c.fsm.GetCatalog()
+}
+
+// CreateDatabase proposes a new database to the Raft cluster.
+func (c *Cluster) CreateDatabase(name string, shardCount int) error {
+	payload, _ := json.Marshal(CreateDatabasePayload{
+		Name:       name,
+		ShardCount: shardCount,
+	})
+	return c.Apply(Command{Type: CmdCreateDatabase, Payload: payload})
+}
+
+// StopDatabase proposes stopping a database.
+func (c *Cluster) StopDatabase(name string) error {
+	payload, _ := json.Marshal(DatabaseNamePayload{Name: name})
+	return c.Apply(Command{Type: CmdStopDatabase, Payload: payload})
+}
+
+// StartDatabase proposes starting a stopped database.
+func (c *Cluster) StartDatabase(name string) error {
+	payload, _ := json.Marshal(DatabaseNamePayload{Name: name})
+	return c.Apply(Command{Type: CmdStartDatabase, Payload: payload})
+}
+
+// DeleteDatabase proposes deleting a database.
+func (c *Cluster) DeleteDatabase(name string) error {
+	payload, _ := json.Marshal(DatabaseNamePayload{Name: name})
+	return c.Apply(Command{Type: CmdDeleteDatabase, Payload: payload})
 }
 
 // PromoteReplica promotes a replica to primary for the given shard.
