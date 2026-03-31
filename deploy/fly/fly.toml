@@ -7,7 +7,7 @@ primary_region = "sjc"
 [env]
   LOVELINESS_DISCOVER = "dns"
   LOVELINESS_DISCOVER_ADDR = "loveliness.internal"
-  LOVELINESS_SHARD_COUNT = "3"
+  LOVELINESS_SHARD_COUNT = "6"
   LOVELINESS_BIND_ADDR = "0.0.0.0:8080"
   LOVELINESS_BOLT_ADDR = "0.0.0.0:7687"
 

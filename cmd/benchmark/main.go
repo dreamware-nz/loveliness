@@ -25,8 +25,11 @@ var (
 	edges    = flag.Int("edges", 50_000, "Number of edges to seed")
 	iters    = flag.Int("iters", 200, "Iterations per benchmark")
 	workers  = flag.Int("workers", 8, "Concurrent workers for throughput tests")
-	skipSeed = flag.Bool("skip-seed", false, "Skip data seeding (already loaded)")
-	target   = flag.String("target", "loveliness", "Target database: loveliness or neo4j")
+	skipSeed      = flag.Bool("skip-seed", false, "Skip data seeding (already loaded)")
+	seedEdgesOnly = flag.Bool("seed-edges-only", false, "Seed only edges (schema and nodes already loaded)")
+	seedNodesOnly = flag.Bool("seed-nodes-only", false, "Seed only nodes (schema already exists)")
+	nodeOffset    = flag.Int("node-offset", 0, "Starting offset for node names (for additive loading)")
+	target        = flag.String("target", "loveliness", "Target database: loveliness or neo4j")
 	jsonOut  = flag.String("json-out", "", "Write JSON results to this file (empty = stdout only)")
 )
 
@@ -402,6 +405,118 @@ func seedNeo4j() {
 	fmt.Println()
 }
 
+func seedNodesLoveliness() {
+	fmt.Printf("Seeding nodes only (Loveliness), offset=%d...\n", *nodeOffset)
+	batchSize := 50_000
+	loaded := 0
+	t0 := time.Now()
+	for loaded < *nodes {
+		chunk := batchSize
+		if loaded+chunk > *nodes {
+			chunk = *nodes - loaded
+		}
+		fmt.Printf("  nodes %d-%d of %d... ", loaded, loaded+chunk, *nodes)
+		ct := time.Now()
+		var buf bytes.Buffer
+		w := csv.NewWriter(&buf)
+		_ = w.Write([]string{"name", "age", "city"})
+		for i := 0; i < chunk; i++ {
+			idx := *nodeOffset + loaded + i
+			_ = w.Write([]string{
+				nodeName(idx),
+				strconv.Itoa(18 + rand.Intn(62)),
+				cities[rand.Intn(len(cities))],
+			})
+		}
+		w.Flush()
+		if err := bulkPostErr("/bulk/nodes", "Person", "", "", &buf); err != nil {
+			fmt.Printf("WARN: %v (retrying in 2s)\n", err)
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		loaded += chunk
+		fmt.Printf("done (%s)\n", time.Since(ct).Round(time.Millisecond))
+	}
+	fmt.Printf("  total: %d nodes in %s\n\n", *nodes, time.Since(t0).Round(time.Second))
+}
+
+func seedEdgesLoveliness() {
+	fmt.Println("Seeding edges only (Loveliness)...")
+	batchSize := 50_000
+	loaded := 0
+	t0 := time.Now()
+	for loaded < *edges {
+		chunk := batchSize
+		if loaded+chunk > *edges {
+			chunk = *edges - loaded
+		}
+		fmt.Printf("  edges %d-%d of %d... ", loaded, loaded+chunk, *edges)
+		ct := time.Now()
+		var buf bytes.Buffer
+		w := csv.NewWriter(&buf)
+		_ = w.Write([]string{"from", "to", "since"})
+		for i := 0; i < chunk; i++ {
+			a := rand.Intn(*nodes)
+			b := rand.Intn(*nodes)
+			for b == a {
+				b = rand.Intn(*nodes)
+			}
+			_ = w.Write([]string{nodeName(a), nodeName(b), strconv.Itoa(2015 + rand.Intn(11))})
+		}
+		w.Flush()
+		if err := bulkPostEdges(&buf); err != nil {
+			fmt.Printf("WARN: %v (retrying in 2s)\n", err)
+			time.Sleep(2 * time.Second)
+			continue // retry same batch
+		}
+		loaded += chunk
+		fmt.Printf("done (%s)\n", time.Since(ct).Round(time.Millisecond))
+	}
+	fmt.Printf("  total: %d edges in %s\n\n", *edges, time.Since(t0).Round(time.Second))
+}
+
+func bulkPostEdges(body *bytes.Buffer) error {
+	req, _ := http.NewRequest("POST", *endpoint+"/bulk/edges", body)
+	req.Header.Set("Content-Type", "text/csv")
+	req.Header.Set("X-Rel-Table", "KNOWS")
+	req.Header.Set("X-From-Table", "Person")
+	req.Header.Set("X-To-Table", "Person")
+	req.Header.Set("X-Skip-Refs", "true")
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("bulk load: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusMultiStatus {
+		return fmt.Errorf("bulk load HTTP %d: %s", resp.StatusCode, string(b))
+	}
+	return nil
+}
+
+func bulkPostErr(path, tableName, relTable, nodeTable string, body *bytes.Buffer) error {
+	req, _ := http.NewRequest("POST", *endpoint+path, body)
+	req.Header.Set("Content-Type", "text/csv")
+	if tableName != "" {
+		req.Header.Set("X-Table", tableName)
+	}
+	if relTable != "" {
+		req.Header.Set("X-Rel-Table", relTable)
+		req.Header.Set("X-From-Table", nodeTable)
+		req.Header.Set("X-To-Table", nodeTable)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("bulk load: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusMultiStatus {
+		return fmt.Errorf("bulk load HTTP %d: %s", resp.StatusCode, string(b))
+	}
+	return nil
+}
+
 func bulkPost(path, tableName, relTable, nodeTable string, body *bytes.Buffer) {
 	req, _ := http.NewRequest("POST", *endpoint+path, body)
 	req.Header.Set("Content-Type", "text/csv")
@@ -743,7 +858,11 @@ func main() {
 	fmt.Println("╚══════════════════════════════════════════╝")
 	fmt.Println()
 
-	if !*skipSeed {
+	if *seedNodesOnly {
+		seedNodesLoveliness()
+	} else if *seedEdgesOnly {
+		seedEdgesLoveliness()
+	} else if !*skipSeed {
 		seed()
 	}
 
