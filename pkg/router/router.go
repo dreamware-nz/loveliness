@@ -62,6 +62,30 @@ type Router struct {
 
 	// WAL appender for recording writes (disaster recovery).
 	walAppender WALAppender
+
+	// DDL hook for replicating schema changes via Raft.
+	ddlHook DDLHook
+
+	// Distributed query routing: remote shard access.
+	nodeID    string
+	remote    RemoteQuerier
+	placement PlacementResolver
+}
+
+// DDLHook is called when a DDL statement registers or removes a table.
+type DDLHook interface {
+	RegisterTable(name, shardKey string) error
+	RemoveTable(name string) error
+}
+
+// RemoteQuerier queries a shard hosted on a remote node.
+type RemoteQuerier interface {
+	QueryRemoteShard(nodeID string, shardID int, cypher string) (*shard.QueryResponse, error)
+}
+
+// PlacementResolver maps shard IDs to the node that owns them.
+type PlacementResolver interface {
+	PrimaryForShard(shardID int) string
 }
 
 // WALAppender is called by the router to record write operations in the
@@ -111,6 +135,52 @@ func (r *Router) SetWAL(w WALAppender) {
 	r.walAppender = w
 }
 
+// SetDDLHook sets a hook that replicates schema DDL changes (e.g. via Raft).
+func (r *Router) SetDDLHook(h DDLHook) {
+	r.ddlHook = h
+}
+
+// SetRemoteTransport configures distributed query routing to remote shards.
+func (r *Router) SetRemoteTransport(nodeID string, remote RemoteQuerier, placement PlacementResolver) {
+	r.nodeID = nodeID
+	r.remote = remote
+	r.placement = placement
+}
+
+// queryShardRaw queries a shard and returns the raw QueryResponse.
+// Used by scatterGather which needs raw responses for merging.
+func (r *Router) queryShardRaw(shardID int, cypher string) (*shard.QueryResponse, error) {
+	// Fast path: local shard.
+	if shardID >= 0 && shardID < len(r.shards) && r.shards[shardID] != nil {
+		return r.shards[shardID].Query(cypher)
+	}
+	// Remote path.
+	if r.remote == nil || r.placement == nil {
+		return nil, fmt.Errorf("shard %d not local and no remote transport configured", shardID)
+	}
+	nodeID := r.placement.PrimaryForShard(shardID)
+	if nodeID == "" {
+		return nil, fmt.Errorf("shard %d has no assigned primary", shardID)
+	}
+	return r.remote.QueryRemoteShard(nodeID, shardID, cypher)
+}
+
+// replicateDDL sends schema changes to the DDL hook for Raft replication.
+func (r *Router) replicateDDL(cypher string) {
+	upper := strings.ToUpper(strings.TrimSpace(cypher))
+	if strings.HasPrefix(upper, "CREATE NODE TABLE") {
+		name, key, err := schema.ParseCreateNodeTable(cypher)
+		if err == nil {
+			_ = r.ddlHook.RegisterTable(name, key)
+		}
+	} else if strings.HasPrefix(upper, "DROP TABLE") {
+		name, err := schema.ParseDropTable(cypher)
+		if err == nil {
+			_ = r.ddlHook.RemoveTable(name)
+		}
+	}
+}
+
 // Partitioner returns the partition analyzer.
 func (r *Router) Partitioner() *PartitionAnalyzer {
 	return r.partitioner
@@ -130,7 +200,11 @@ func (r *Router) Execute(ctx context.Context, cypher string) (*Result, error) {
 
 	// Schema DDL (CREATE NODE TABLE, DROP, ALTER) must run on ALL shards.
 	if parsed.Type == QuerySchema {
-		return r.broadcast(ctx, parsed)
+		res, err := r.broadcast(ctx, parsed)
+		if err == nil && r.ddlHook != nil {
+			r.replicateDDL(parsed.Raw)
+		}
+		return res, err
 	}
 
 	// Writes without a shard key are unsafe — we can't scatter-gather mutations.
@@ -176,20 +250,20 @@ func (r *Router) Execute(ctx context.Context, cypher string) (*Result, error) {
 func (r *Router) broadcast(ctx context.Context, parsed *ParsedQuery) (*Result, error) {
 	type shardResult struct {
 		shardID int
-		resp    *shard.QueryResponse
+		resp    *Result
 		err     error
 	}
 
 	var wg sync.WaitGroup
 	results := make(chan shardResult, r.shardCount)
 
-	for _, s := range r.shards {
+	for i := 0; i < r.shardCount; i++ {
 		wg.Add(1)
-		go func(s *shard.Shard) {
+		go func(shardID int) {
 			defer wg.Done()
-			resp, err := s.Query(parsed.Raw)
-			results <- shardResult{shardID: s.ID, resp: resp, err: err}
-		}(s)
+			resp, err := r.queryShard(ctx, shardID, parsed.Raw)
+			results <- shardResult{shardID: shardID, resp: resp, err: err}
+		}(i)
 	}
 
 	go func() {
@@ -251,20 +325,25 @@ func isWriteQuery(cypher string) bool {
 	return false
 }
 
-// queryShard sends a query to a single shard.
+// queryShard sends a query to a single shard. If the shard is local, it queries
+// directly. If the shard is remote, it forwards via the remote transport.
 func (r *Router) queryShard(ctx context.Context, shardID int, cypher string) (*Result, error) {
-	if shardID < 0 || shardID >= len(r.shards) {
-		return nil, &QueryError{Code: "INVALID_SHARD", Message: fmt.Sprintf("shard %d out of range", shardID)}
-	}
-	s := r.shards[shardID]
-	if !s.IsHealthy() {
-		return nil, &QueryError{Code: "SHARD_UNAVAILABLE", Message: fmt.Sprintf("shard %d is unhealthy", shardID), ShardID: shardID}
+	// Check if this shard is local.
+	isLocal := shardID >= 0 && shardID < len(r.shards) && r.shards[shardID] != nil
+	if !isLocal && (r.remote == nil || r.placement == nil) {
+		return nil, &QueryError{Code: "INVALID_SHARD", Message: fmt.Sprintf("shard %d not local and no remote transport configured", shardID)}
 	}
 
-	// Record writes in the WAL before execution for replica catch-up.
-	if r.walAppender != nil && isWriteQuery(cypher) {
-		if _, err := r.walAppender.Append(shardID, cypher); err != nil {
-			return nil, &QueryError{Code: "WAL_ERROR", Message: fmt.Sprintf("WAL append failed: %v", err), ShardID: shardID}
+	// For local shards, check health and record writes in WAL.
+	if isLocal {
+		s := r.shards[shardID]
+		if !s.IsHealthy() {
+			return nil, &QueryError{Code: "SHARD_UNAVAILABLE", Message: fmt.Sprintf("shard %d is unhealthy", shardID), ShardID: shardID}
+		}
+		if r.walAppender != nil && isWriteQuery(cypher) {
+			if _, err := r.walAppender.Append(shardID, cypher); err != nil {
+				return nil, &QueryError{Code: "WAL_ERROR", Message: fmt.Sprintf("WAL append failed: %v", err), ShardID: shardID}
+			}
 		}
 	}
 
@@ -274,7 +353,18 @@ func (r *Router) queryShard(ctx context.Context, shardID int, cypher string) (*R
 	}
 	ch := make(chan queryResult, 1)
 	go func() {
-		resp, err := s.Query(cypher)
+		var resp *shard.QueryResponse
+		var err error
+		if isLocal {
+			resp, err = r.shards[shardID].Query(cypher)
+		} else {
+			nodeID := r.placement.PrimaryForShard(shardID)
+			if nodeID == "" {
+				err = fmt.Errorf("shard %d has no assigned primary", shardID)
+			} else {
+				resp, err = r.remote.QueryRemoteShard(nodeID, shardID, cypher)
+			}
+		}
 		ch <- queryResult{resp, err}
 	}()
 
@@ -315,17 +405,13 @@ func (r *Router) scatterGather(ctx context.Context, parsed *ParsedQuery) (*Resul
 	var wg sync.WaitGroup
 	results := make(chan shardResult, r.shardCount)
 
-	for _, s := range r.shards {
-		if !s.IsHealthy() {
-			results <- shardResult{shardID: s.ID, err: fmt.Errorf("shard %d is unhealthy", s.ID)}
-			continue
-		}
+	for i := 0; i < r.shardCount; i++ {
 		wg.Add(1)
-		go func(s *shard.Shard) {
+		go func(shardID int) {
 			defer wg.Done()
-			resp, err := s.Query(shardQuery)
-			results <- shardResult{shardID: s.ID, resp: resp, err: err}
-		}(s)
+			resp, err := r.queryShardRaw(shardID, shardQuery)
+			results <- shardResult{shardID: shardID, resp: resp, err: err}
+		}(i)
 	}
 
 	// Close results channel after all goroutines complete.

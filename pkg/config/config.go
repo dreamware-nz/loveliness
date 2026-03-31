@@ -59,6 +59,11 @@ type Config struct {
 	TLSMode       string // "required", "optional", "off"
 	TLSClientAuth string // "require", "request", "none"
 
+	// ShardBufferMB is the buffer pool size in MB per shard.
+	// 0 = auto-calculate: (total system memory * 0.7) / shard_count.
+	// LadybugDB defaults to 80% of system memory PER shard, which OOMs with multiple shards.
+	ShardBufferMB int
+
 	// DNS discovery configuration.
 	DiscoverMode     string // "dns" to enable DNS-based peer discovery, empty to disable
 	DiscoverAddr     string // DNS name to resolve for peer discovery (e.g., "loveliness.internal")
@@ -184,6 +189,11 @@ func FromEnv() Config {
 	if v := os.Getenv("LOVELINESS_EXPECTED_NODES"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			c.ExpectedNodes = n
+		}
+	}
+	if v := os.Getenv("LOVELINESS_SHARD_BUFFER_MB"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.ShardBufferMB = n
 		}
 	}
 	return c

@@ -17,11 +17,6 @@ type Assignment struct {
 // StoreFactory creates a Store for a given shard path.
 type StoreFactory func(path string, maxThreads uint64) (Store, error)
 
-// DefaultStoreFactory creates LbugStore instances.
-func DefaultStoreFactory(path string, maxThreads uint64) (Store, error) {
-	return NewLbugStore(path, maxThreads)
-}
-
 // Manager manages the lifecycle of local shards based on the cluster's shard map.
 // It opens shards assigned to this node and closes shards that are reassigned away.
 type Manager struct {
@@ -35,29 +30,22 @@ type Manager struct {
 }
 
 // NewManager creates a shard manager for the given node.
-func NewManager(nodeID, dataDir string, maxThreads uint64, maxConcurrent int) *Manager {
+func NewManager(nodeID, dataDir string, maxThreads uint64, maxConcurrent int, storeFactory StoreFactory) *Manager {
 	return &Manager{
 		shards:        make(map[int]*Shard),
 		nodeID:        nodeID,
 		dataDir:       dataDir,
 		maxThreads:    maxThreads,
 		maxConcurrent: maxConcurrent,
-		storeFactory:  DefaultStoreFactory,
+		storeFactory:  storeFactory,
 	}
 }
 
 // NewTestManager creates a manager that uses MemoryStore for testing.
 func NewTestManager(nodeID string) *Manager {
-	return &Manager{
-		shards:        make(map[int]*Shard),
-		nodeID:        nodeID,
-		dataDir:       "",
-		maxThreads:    1,
-		maxConcurrent: 4,
-		storeFactory: func(path string, maxThreads uint64) (Store, error) {
-			return NewMemoryStore(), nil
-		},
-	}
+	return NewManager(nodeID, "", 1, 4, func(path string, maxThreads uint64) (Store, error) {
+		return NewMemoryStore(), nil
+	})
 }
 
 // UpdateAssignments reconciles local shards with the cluster shard map.
