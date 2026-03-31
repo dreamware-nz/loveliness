@@ -24,6 +24,7 @@ primary_region = "sjc"
 [[services]]
   internal_port = 8080
   protocol = "tcp"
+  processes = ["app"]
   [[services.ports]]
     port = 443
     handlers = ["tls", "http"]
@@ -35,6 +36,7 @@ primary_region = "sjc"
 [[services]]
   internal_port = 7687
   protocol = "tcp"
+  processes = ["app"]
   [[services.ports]]
     port = 7687
 
