@@ -31,6 +31,11 @@ var (
 	nodeOffset    = flag.Int("node-offset", 0, "Starting offset for node names (for additive loading)")
 	target        = flag.String("target", "loveliness", "Target database: loveliness or neo4j")
 	jsonOut  = flag.String("json-out", "", "Write JSON results to this file (empty = stdout only)")
+
+	// Multi-endpoint parallel seeding flags.
+	endpointsStr   = flag.String("endpoints", "", "Comma-separated endpoints for parallel seeding (empty = use -endpoint)")
+	batchSize      = flag.Int("batch-size", 50_000, "Batch size for bulk loading")
+	seedWorkerCount = flag.Int("seed-workers", 1, "Parallel workers for seeding (distributes across endpoints)")
 )
 
 var cities = []string{
@@ -187,6 +192,11 @@ func mustCypher(query string) {
 		fmt.Fprintf(os.Stderr, "FATAL: %v\n  query: %s\n", err, query)
 		os.Exit(1)
 	}
+}
+
+// tryCypher runs a query, ignoring errors (useful for idempotent schema creation).
+func tryCypher(query string) {
+	_, _, _ = cypher(query)
 }
 
 // --- Benchmark infrastructure ---
@@ -473,6 +483,262 @@ func seedEdgesLoveliness() {
 		fmt.Printf("done (%s)\n", time.Since(ct).Round(time.Millisecond))
 	}
 	fmt.Printf("  total: %d edges in %s\n\n", *edges, time.Since(t0).Round(time.Second))
+}
+
+// seedEndpoints returns the list of endpoints for seeding.
+// Falls back to the single -endpoint flag if -endpoints is empty.
+func seedEndpoints() []string {
+	if *endpointsStr != "" {
+		return strings.Split(*endpointsStr, ",")
+	}
+	return []string{*endpoint}
+}
+
+// seedNodesParallel loads nodes using multiple workers across multiple endpoints.
+func seedNodesParallel() {
+	eps := seedEndpoints()
+	wkrs := *seedWorkerCount
+	if wkrs < 1 {
+		wkrs = 1
+	}
+	batch := *batchSize
+	total := *nodes
+	offset := *nodeOffset
+
+	fmt.Printf("Seeding %d nodes (batch=%d, workers=%d, endpoints=%d)...\n",
+		total, batch, wkrs, len(eps))
+
+	var loaded atomic.Int64
+	t0 := time.Now()
+
+	// Progress reporter.
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				n := loaded.Load()
+				elapsed := time.Since(t0).Seconds()
+				rate := float64(n) / elapsed
+				remaining := float64(int64(total)-n) / rate
+				fmt.Printf("  progress: %d/%d (%.0f/s, ~%.0fs remaining)\n",
+					n, total, rate, remaining)
+			}
+		}
+	}()
+
+	// Batch counter: each worker grabs the next batch atomically.
+	var batchIdx atomic.Int64
+	totalBatches := (total + batch - 1) / batch
+
+	var wg sync.WaitGroup
+	for w := 0; w < wkrs; w++ {
+		wg.Add(1)
+		ep := eps[w%len(eps)]
+		go func(ep string) {
+			defer wg.Done()
+			for {
+				idx := int(batchIdx.Add(1) - 1)
+				if idx >= totalBatches {
+					return
+				}
+				start := offset + idx*batch
+				chunk := batch
+				if start+chunk > offset+total {
+					chunk = offset + total - start
+				}
+
+				var buf bytes.Buffer
+				w := csv.NewWriter(&buf)
+				_ = w.Write([]string{"name", "age", "city"})
+				for i := 0; i < chunk; i++ {
+					_ = w.Write([]string{
+						nodeName(start + i),
+						strconv.Itoa(18 + rand.Intn(62)),
+						cities[rand.Intn(len(cities))],
+					})
+				}
+				w.Flush()
+
+				for retries := 0; retries < 5; retries++ {
+					err := bulkPostTo(ep, "/bulk/nodes", "Person", "", "", &buf)
+					if err == nil {
+						loaded.Add(int64(chunk))
+						break
+					}
+					fmt.Printf("  WARN: node batch %d to %s: %v (retry %d)\n", idx, ep, err, retries+1)
+					time.Sleep(time.Duration(retries+1) * 2 * time.Second)
+					// Rebuild buffer for retry.
+					buf.Reset()
+					wr := csv.NewWriter(&buf)
+					_ = wr.Write([]string{"name", "age", "city"})
+					for i := 0; i < chunk; i++ {
+						_ = wr.Write([]string{
+							nodeName(start + i),
+							strconv.Itoa(18 + rand.Intn(62)),
+							cities[rand.Intn(len(cities))],
+						})
+					}
+					wr.Flush()
+				}
+			}
+		}(ep)
+	}
+	wg.Wait()
+	close(done)
+
+	elapsed := time.Since(t0)
+	n := loaded.Load()
+	fmt.Printf("  done: %d nodes in %s (%.0f nodes/s)\n\n", n, elapsed.Round(time.Second), float64(n)/elapsed.Seconds())
+}
+
+// seedEdgesParallel loads edges using multiple workers across multiple endpoints.
+func seedEdgesParallel() {
+	eps := seedEndpoints()
+	wkrs := *seedWorkerCount
+	if wkrs < 1 {
+		wkrs = 1
+	}
+	batch := *batchSize
+	total := *edges
+
+	fmt.Printf("Seeding %d edges (batch=%d, workers=%d, endpoints=%d)...\n",
+		total, batch, wkrs, len(eps))
+
+	var loaded atomic.Int64
+	t0 := time.Now()
+
+	// Progress reporter.
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				n := loaded.Load()
+				elapsed := time.Since(t0).Seconds()
+				rate := float64(n) / elapsed
+				remaining := float64(int64(total)-n) / rate
+				fmt.Printf("  progress: %d/%d (%.0f/s, ~%.0fs remaining)\n",
+					n, total, rate, remaining)
+			}
+		}
+	}()
+
+	var batchIdx atomic.Int64
+	totalBatches := (total + batch - 1) / batch
+
+	var wg sync.WaitGroup
+	for w := 0; w < wkrs; w++ {
+		wg.Add(1)
+		ep := eps[w%len(eps)]
+		go func(ep string) {
+			defer wg.Done()
+			for {
+				idx := int(batchIdx.Add(1) - 1)
+				if idx >= totalBatches {
+					return
+				}
+				chunk := batch
+				if (idx+1)*batch > total {
+					chunk = total - idx*batch
+				}
+
+				var buf bytes.Buffer
+				w := csv.NewWriter(&buf)
+				_ = w.Write([]string{"from", "to", "since"})
+				for i := 0; i < chunk; i++ {
+					a := rand.Intn(*nodes)
+					b := rand.Intn(*nodes)
+					for b == a {
+						b = rand.Intn(*nodes)
+					}
+					_ = w.Write([]string{nodeName(a), nodeName(b), strconv.Itoa(2015 + rand.Intn(11))})
+				}
+				w.Flush()
+
+				for retries := 0; retries < 5; retries++ {
+					err := bulkPostEdgesTo(ep, &buf)
+					if err == nil {
+						loaded.Add(int64(chunk))
+						break
+					}
+					fmt.Printf("  WARN: edge batch %d to %s: %v (retry %d)\n", idx, ep, err, retries+1)
+					time.Sleep(time.Duration(retries+1) * 2 * time.Second)
+					// Rebuild buffer for retry.
+					buf.Reset()
+					wr := csv.NewWriter(&buf)
+					_ = wr.Write([]string{"from", "to", "since"})
+					for i := 0; i < chunk; i++ {
+						a := rand.Intn(*nodes)
+						b := rand.Intn(*nodes)
+						for b == a {
+							b = rand.Intn(*nodes)
+						}
+						_ = wr.Write([]string{nodeName(a), nodeName(b), strconv.Itoa(2015 + rand.Intn(11))})
+					}
+					wr.Flush()
+				}
+			}
+		}(ep)
+	}
+	wg.Wait()
+	close(done)
+
+	elapsed := time.Since(t0)
+	n := loaded.Load()
+	fmt.Printf("  done: %d edges in %s (%.0f edges/s)\n\n", n, elapsed.Round(time.Second), float64(n)/elapsed.Seconds())
+}
+
+// bulkPostTo sends a bulk POST to a specific endpoint.
+func bulkPostTo(ep, path, tableName, relTable, nodeTable string, body *bytes.Buffer) error {
+	req, _ := http.NewRequest("POST", ep+path, body)
+	req.Header.Set("Content-Type", "text/csv")
+	if tableName != "" {
+		req.Header.Set("X-Table", tableName)
+	}
+	if relTable != "" {
+		req.Header.Set("X-Rel-Table", relTable)
+		req.Header.Set("X-From-Table", nodeTable)
+		req.Header.Set("X-To-Table", nodeTable)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("bulk load: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusMultiStatus {
+		return fmt.Errorf("bulk load HTTP %d: %s", resp.StatusCode, string(b))
+	}
+	return nil
+}
+
+// bulkPostEdgesTo sends an edge bulk POST to a specific endpoint.
+func bulkPostEdgesTo(ep string, body *bytes.Buffer) error {
+	req, _ := http.NewRequest("POST", ep+"/bulk/edges", body)
+	req.Header.Set("Content-Type", "text/csv")
+	req.Header.Set("X-Rel-Table", "KNOWS")
+	req.Header.Set("X-From-Table", "Person")
+	req.Header.Set("X-To-Table", "Person")
+	req.Header.Set("X-Skip-Refs", "true")
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("bulk load: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusMultiStatus {
+		return fmt.Errorf("bulk load HTTP %d: %s", resp.StatusCode, string(b))
+	}
+	return nil
 }
 
 func bulkPostEdges(body *bytes.Buffer) error {
@@ -849,21 +1115,53 @@ func writeJSONReport(results []benchResult) {
 func main() {
 	flag.Parse()
 
-	fmt.Println("╔══════════════════════════════════════════╗")
-	fmt.Println("║    Loveliness Benchmark Suite            ║")
-	fmt.Printf("║    target:   %-28s║\n", *target)
-	fmt.Printf("║    endpoint: %-28s║\n", *endpoint)
-	fmt.Printf("║    nodes: %-7d  edges: %-7d         ║\n", *nodes, *edges)
-	fmt.Printf("║    iters: %-7d  workers: %-5d         ║\n", *iters, *workers)
-	fmt.Println("╚══════════════════════════════════════════╝")
+	fmt.Println("╔══════════════════════════════════════════════════╗")
+	fmt.Println("║    Loveliness Benchmark Suite                    ║")
+	fmt.Printf("║    target:   %-36s║\n", *target)
+	fmt.Printf("║    endpoint: %-36s║\n", *endpoint)
+	fmt.Printf("║    nodes: %-11d  edges: %-11d    ║\n", *nodes, *edges)
+	fmt.Printf("║    iters: %-11d  workers: %-9d    ║\n", *iters, *workers)
+	if *endpointsStr != "" {
+		eps := strings.Split(*endpointsStr, ",")
+		fmt.Printf("║    seed-endpoints: %-30d║\n", len(eps))
+		fmt.Printf("║    batch-size: %-34d║\n", *batchSize)
+		fmt.Printf("║    seed-workers: %-32d║\n", *seedWorkerCount)
+	}
+	fmt.Println("╚══════════════════════════════════════════════════╝")
 	fmt.Println()
 
+	useParallel := *endpointsStr != "" || *seedWorkerCount > 1
+
 	if *seedNodesOnly {
-		seedNodesLoveliness()
+		if useParallel {
+			seedNodesParallel()
+		} else {
+			seedNodesLoveliness()
+		}
 	} else if *seedEdgesOnly {
-		seedEdgesLoveliness()
+		if useParallel {
+			seedEdgesParallel()
+		} else {
+			seedEdgesLoveliness()
+		}
 	} else if !*skipSeed {
-		seed()
+		if useParallel {
+			// Schema first via primary endpoint (idempotent — ignores "already exists").
+			fmt.Println("Seeding data (parallel)...")
+			fmt.Print("  schema... ")
+			tryCypher("CREATE NODE TABLE Person(name STRING, age INT64, city STRING, PRIMARY KEY(name))")
+			tryCypher("CREATE REL TABLE KNOWS(FROM Person TO Person, since INT64)")
+			fmt.Println("done")
+			seedNodesParallel()
+			seedEdgesParallel()
+		} else {
+			seed()
+		}
+	}
+
+	if *iters == 0 {
+		fmt.Println("No benchmarks requested (iters=0).")
+		return
 	}
 
 	var results []benchResult

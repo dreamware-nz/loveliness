@@ -1,0 +1,45 @@
+{
+  "benchmark": "50M Scale Cluster Benchmark",
+  "date": "2026-04-01",
+  "cluster": {
+    "nodes": 4,
+    "shards": 12,
+    "machine_type": "performance-4x",
+    "cpus_per_machine": 8,
+    "memory_per_machine_mb": 16384,
+    "shard_buffer_mb": 700,
+    "region": "sjc",
+    "platform": "fly.io"
+  },
+  "dataset": {
+    "nodes": 50000000,
+    "edges": 50000000,
+    "node_seed_rate": 196653,
+    "node_seed_time_s": 254,
+    "edge_seed_rate": 372918,
+    "edge_seed_time_s": 134
+  },
+  "benchmark_config": {
+    "iters": 200,
+    "workers": 16,
+    "in_cluster": true
+  },
+  "results": [
+    {"name": "point_lookup", "iters": 200, "errors": 0, "mean_ms": 2.3, "p50_ms": 2.2, "p95_ms": 3.2, "p99_ms": 3.7, "qps": 427, "rows": 1.0},
+    {"name": "point_lookup_concurrent", "iters": 800, "errors": 0, "mean_ms": 6.0, "p50_ms": 5.2, "p95_ms": 12.2, "p99_ms": 17.2, "qps": 2642, "rows": 1.0},
+    {"name": "range_filter", "iters": 200, "errors": 0, "mean_ms": 3.4, "p50_ms": 3.2, "p95_ms": 3.7, "p99_ms": 4.0, "qps": 290, "rows": 20.0},
+    {"name": "count_all_nodes", "iters": 100, "errors": 0, "mean_ms": 8.9, "p50_ms": 8.4, "p95_ms": 11.0, "p99_ms": 11.5, "qps": 112, "rows": 1.0},
+    {"name": "count_filtered", "iters": 200, "errors": 0, "mean_ms": 287.3, "p50_ms": 284.0, "p95_ms": 309.9, "p99_ms": 316.9, "qps": 3, "rows": 1.0},
+    {"name": "aggregate_avg_age", "iters": 200, "errors": 0, "mean_ms": 299.3, "p50_ms": 295.1, "p95_ms": 321.3, "p99_ms": 333.1, "qps": 3, "rows": 1.0},
+    {"name": "group_by_city", "iters": 100, "errors": 0, "mean_ms": 770.0, "p50_ms": 768.5, "p95_ms": 813.8, "p99_ms": 816.7, "qps": 1, "rows": 10.0},
+    {"name": "1_hop_traversal", "iters": 200, "errors": 0, "mean_ms": 58.8, "p50_ms": 2.9, "p95_ms": 379.6, "p99_ms": 387.9, "qps": 17, "rows": 0.0},
+    {"name": "2_hop_traversal", "iters": 200, "errors": 0, "mean_ms": 249.5, "p50_ms": 240.8, "p95_ms": 268.0, "p99_ms": 402.1, "qps": 4, "rows": 0.0},
+    {"name": "var_length_path_1_3", "iters": 100, "errors": 0, "mean_ms": 2.4, "p50_ms": 2.3, "p95_ms": 3.3, "p99_ms": 4.4, "qps": 414, "rows": 0.0},
+    {"name": "friend_of_friend_count", "iters": 100, "errors": 0, "mean_ms": 478.5, "p50_ms": 476.3, "p95_ms": 493.6, "p99_ms": 505.4, "qps": 2, "rows": 0.0},
+    {"name": "mutual_friends", "iters": 100, "errors": 0, "mean_ms": 2.5, "p50_ms": 2.4, "p95_ms": 3.0, "p99_ms": 4.2, "qps": 394, "rows": 0.0},
+    {"name": "shortest_path", "iters": 50, "errors": 0, "mean_ms": 30.4, "p50_ms": 29.1, "p95_ms": 39.7, "p99_ms": 45.7, "qps": 33, "rows": 0.0},
+    {"name": "single_write", "iters": 200, "errors": 0, "mean_ms": 1.8, "p50_ms": 1.8, "p95_ms": 2.2, "p99_ms": 2.4, "qps": 542, "rows": 0.0},
+    {"name": "merge_upsert", "iters": 200, "errors": 0, "mean_ms": 2.4, "p50_ms": 2.4, "p95_ms": 3.0, "p99_ms": 3.2, "qps": 413, "rows": 1.0},
+    {"name": "read_after_write", "iters": 100, "errors": 0, "mean_ms": 3.3, "p50_ms": 3.3, "p95_ms": 4.0, "p99_ms": 4.1, "qps": 305, "rows": 0.1}
+  ]
+}
