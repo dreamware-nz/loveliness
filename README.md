@@ -41,32 +41,41 @@ graph TB
 | 2-hop traversal | **162ms** | 5 |
 | Bulk load | **70–190K nodes/sec** | — |
 
-### Cluster (23M nodes, 23M edges, 6 shards — 3-node Fly.io)
+### Cluster (50M nodes, 50M edges, 12 shards — 4-node Fly.io)
 
-Tested on 3× performance-16x machines (48GB RAM each), sjc region. 200 iterations, 8 concurrent workers. Benchmark binary runs inside the cluster on localhost for true in-network latencies.
+Tested on 4× performance-4x machines (8 vCPU, 16GB RAM each), sjc region. 200 iterations, 16 concurrent workers. Benchmark binary runs inside the cluster on localhost for true in-network latencies.
 
 | Query Type | P50 | P95 | QPS |
 |---|---|---|---|
-| Point lookup | **1.2ms** | 2.4ms | 710 |
-| Point lookup (8 workers) | **1.1ms** | 1.7ms | **6,831** |
-| Range filter | **2.7ms** | 3.6ms | 366 |
-| 1-hop traversal | **4.7ms** | 187ms | 31 |
-| 2-hop traversal | **121ms** | 152ms | 8 |
-| Shortest path (1..6) | **31ms** | 53ms | 28 |
-| Group-by aggregation | **246ms** | 258ms | 4 |
-| Single write | **1.8ms** | 2.9ms | 537 |
-| Bulk node load | **9,600/sec** | — | — |
-| Bulk edge load | **136,000/sec** | — | — |
+| Point lookup | **2.2ms** | 3.2ms | 427 |
+| Point lookup (16 workers) | **5.2ms** | 12.2ms | **2,642** |
+| Range filter | **3.2ms** | 3.7ms | 290 |
+| Count all nodes | **8.4ms** | 11.0ms | 112 |
+| Count filtered | **284ms** | 310ms | 3 |
+| Aggregation (avg) | **295ms** | 321ms | 3 |
+| Group-by aggregation | **769ms** | 814ms | 1 |
+| 1-hop traversal | **2.9ms** | 380ms | 17 |
+| 2-hop traversal | **241ms** | 268ms | 4 |
+| Variable-length path (1..3) | **2.3ms** | 3.3ms | 414 |
+| Friend-of-friend count | **476ms** | 494ms | 2 |
+| Mutual friends | **2.4ms** | 3.0ms | 394 |
+| Shortest path (1..6) | **29ms** | 40ms | 33 |
+| Single write | **1.8ms** | 2.2ms | 542 |
+| Merge upsert | **2.4ms** | 3.0ms | 413 |
+| Read-after-write | **3.3ms** | 4.0ms | 305 |
+| Bulk node load | **197K/sec** | — | — |
+| Bulk edge load | **373K/sec** | — | — |
 
 ### Scale progression
 
-| Dataset | Shards | Point lookup P50 | Concurrent QPS | Group-by P50 |
-|---|---|---|---|---|
-| 10M / 10M | 3 | 1.4ms | 1,792 | — |
-| 20M / 20M | 3 | 863us | 1,991 | 838ms |
-| 23M / 23M | 6 | 1.2ms | **6,831** | 246ms |
+| Dataset | Nodes | Shards | Point lookup P50 | Concurrent QPS | Group-by P50 | Write P50 |
+|---|---|---|---|---|---|---|
+| 10M / 10M | 3 | 3 | 1.4ms | 1,792 | — | — |
+| 20M / 20M | 3 | 3 | 863us | 1,991 | 838ms | — |
+| 23M / 23M | 3 | 6 | 1.2ms | 6,831 | 246ms | 1.8ms |
+| **50M / 50M** | **4** | **12** | **2.2ms** | **2,642** | **769ms** | **1.8ms** |
 
-Point lookups stay sub-2ms through 23M. Doubling shards from 3→6 tripled concurrent QPS and cut full-scan aggregations by 3x.
+Point lookups stay sub-3ms through 50M nodes. Writes hold steady at 1.8ms regardless of dataset size. Bulk loading in-cluster hits 197K nodes/sec and 373K edges/sec.
 
 <!-- BENCHMARK_START -->
 <!-- BENCHMARK_END -->
@@ -82,6 +91,9 @@ Point lookups stay sub-2ms through 23M. Doubling shards from 3→6 tripled concu
 
 # Custom dataset size
 ./bench/run.sh --nodes=500000 --edges=500000
+
+# 50M-scale on Fly.io (4 nodes, 12 shards)
+./bench/run-50m.sh
 ```
 
 Results land in `bench/results/<timestamp>/` with JSON data, SVG charts, and a markdown comparison report. CI runs the full comparison on each release and opens a PR with updated results.
