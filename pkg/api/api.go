@@ -176,14 +176,9 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
-// handleCypherLegacy returns 400 directing callers to use /db/{name}/cypher.
-// If no dbRouter is set (legacy single-db mode), falls through to the old behavior.
+// handleCypherLegacy routes queries to the default shard set for backward compatibility.
+// Clients should prefer /db/{name}/cypher for multi-database usage.
 func (s *Server) handleCypherLegacy(w http.ResponseWriter, r *http.Request) {
-	if s.dbRouter != nil {
-		writeError(w, http.StatusBadRequest, "DATABASE_REQUIRED",
-			"Database name required. Use POST /db/{name}/cypher or POST /admin/cypher for admin commands.", 0)
-		return
-	}
 	s.handleCypher(w, r)
 }
 

@@ -1,0 +1,46 @@
+app = "loveliness-bench-50m"
+primary_region = "sjc"
+
+[build]
+  dockerfile = "../Dockerfile.fly"
+
+[env]
+  LOVELINESS_DISCOVER = "dns"
+  LOVELINESS_DISCOVER_ADDR = "loveliness-bench-50m.internal"
+  LOVELINESS_SHARD_COUNT = "12"
+  LOVELINESS_BIND_ADDR = "0.0.0.0:8080"
+  LOVELINESS_BOLT_ADDR = "0.0.0.0:7687"
+  LOVELINESS_EXPECTED_NODES = "4"
+  LOVELINESS_QUERY_TIMEOUT_MS = "120000"
+  LOVELINESS_SHARD_BUFFER_MB = "700"
+
+[mounts]
+  source = "loveliness_bench_data"
+  destination = "/data"
+  initial_size = "40gb"
+
+[[vm]]
+  size = "performance-4x"
+  memory = "16384"
+  cpus = 8
+
+[[services]]
+  internal_port = 8080
+  protocol = "tcp"
+  auto_stop_machines = false
+  auto_start_machines = false
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+  [[services.http_checks]]
+    path = "/health"
+    interval = 5000
+    timeout = 5000
+
+[[services]]
+  internal_port = 7687
+  protocol = "tcp"
+  auto_stop_machines = false
+  auto_start_machines = false
+  [[services.ports]]
+    port = 7687
