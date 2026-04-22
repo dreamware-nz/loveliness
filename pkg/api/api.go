@@ -196,7 +196,37 @@ func (s *Server) handleCypher(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Replicate schema DDL through Raft so it survives restarts.
+	if s.cluster != nil {
+		s.replicateSchemaDDL(cypher)
+	}
+
 	writeJSON(w, http.StatusOK, result)
+}
+
+// replicateSchemaDDL detects CREATE NODE TABLE / DROP TABLE and replicates
+// the schema change through Raft. Runs asynchronously — local registry was
+// already updated by the router parser, so routing works immediately.
+func (s *Server) replicateSchemaDDL(cypher string) {
+	upper := strings.ToUpper(strings.TrimSpace(cypher))
+	switch {
+	case strings.HasPrefix(upper, "CREATE NODE TABLE"):
+		name, key, err := schema.ParseCreateNodeTable(cypher)
+		if err == nil {
+			if err := s.cluster.RegisterSchema(name, key); err != nil {
+				slog.Warn("schema replication failed", "table", name, "err", err)
+			} else {
+				slog.Debug("schema replicated", "table", name, "shard_key", key)
+			}
+		}
+	case strings.HasPrefix(upper, "DROP TABLE"):
+		name, err := schema.ParseDropTable(cypher)
+		if err == nil {
+			if err := s.cluster.RemoveSchema(name); err != nil {
+				slog.Warn("schema removal replication failed", "table", name, "err", err)
+			}
+		}
+	}
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -241,12 +271,14 @@ func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sm := s.cluster.GetShardMap()
+	schemaTables := s.cluster.GetSchema()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"leader":    s.cluster.LeaderAddr(),
-		"node_id":   s.cluster.NodeID(),
-		"is_leader": s.cluster.IsLeader(),
-		"shard_map": sm.Assignments,
-		"nodes":     sm.Nodes,
+		"leader":      s.cluster.LeaderAddr(),
+		"node_id":     s.cluster.NodeID(),
+		"is_leader":   s.cluster.IsLeader(),
+		"shard_map":   sm.Assignments,
+		"nodes":       sm.Nodes,
+		"schema":      schemaTables,
 	})
 }
 

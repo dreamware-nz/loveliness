@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/hashicorp/raft"
+	"github.com/johnjansen/loveliness/pkg/schema"
 )
 
 func applyCommand(fsm *FSM, cmd Command) interface{} {
@@ -139,5 +140,98 @@ func TestFSM_GetShardMap_IsCopy(t *testing.T) {
 	original := fsm.GetShardMap()
 	if original.Assignments[0].Primary != "node-1" {
 		t.Error("GetShardMap should return a copy, not a reference")
+	}
+}
+
+func TestFSM_RegisterSchema(t *testing.T) {
+	fsm := NewFSM()
+
+	payload, _ := json.Marshal(RegisterSchemaPayload{TableName: "Person", ShardKey: "name"})
+	result := applyCommand(fsm, Command{Type: CmdRegisterSchema, Payload: payload})
+	if result != nil {
+		t.Fatalf("unexpected error: %v", result)
+	}
+
+	tables := fsm.GetSchema()
+	if ts, ok := tables["PERSON"]; !ok {
+		t.Fatal("PERSON not registered")
+	} else if ts.Name != "Person" || ts.ShardKey != "name" {
+		t.Errorf("unexpected schema: %+v", ts)
+	}
+}
+
+func TestFSM_RemoveSchema(t *testing.T) {
+	fsm := NewFSM()
+
+	// Register first.
+	payload, _ := json.Marshal(RegisterSchemaPayload{TableName: "Person", ShardKey: "name"})
+	applyCommand(fsm, Command{Type: CmdRegisterSchema, Payload: payload})
+
+	// Remove it.
+	payload, _ = json.Marshal(RemoveSchemaPayload{TableName: "Person"})
+	result := applyCommand(fsm, Command{Type: CmdRemoveSchema, Payload: payload})
+	if result != nil {
+		t.Fatalf("unexpected error: %v", result)
+	}
+
+	tables := fsm.GetSchema()
+	if _, ok := tables["PERSON"]; ok {
+		t.Error("PERSON should be removed")
+	}
+}
+
+func TestFSM_SnapshotRestore_WithSchema(t *testing.T) {
+	fsm := NewFSM()
+
+	// Add shard map and schema state.
+	payload, _ := json.Marshal(AssignShardPayload{ShardID: 0, Primary: "node-1"})
+	applyCommand(fsm, Command{Type: CmdAssignShard, Payload: payload})
+	payload, _ = json.Marshal(RegisterSchemaPayload{TableName: "Person", ShardKey: "name"})
+	applyCommand(fsm, Command{Type: CmdRegisterSchema, Payload: payload})
+
+	// Snapshot.
+	snap, err := fsm.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Persist to a buffer.
+	sink := &mockSnapshotSink{}
+	if err := snap.Persist(sink); err != nil {
+		t.Fatal(err)
+	}
+
+	// Restore into a new FSM.
+	fsm2 := NewFSM()
+	if err := fsm2.Restore(sink.Reader()); err != nil {
+		t.Fatal(err)
+	}
+
+	sm := fsm2.GetShardMap()
+	if _, ok := sm.Assignments[0]; !ok {
+		t.Error("shard 0 not restored")
+	}
+
+	tables := fsm2.GetSchema()
+	if ts, ok := tables["PERSON"]; !ok {
+		t.Error("PERSON schema not restored")
+	} else if ts.ShardKey != "name" {
+		t.Errorf("expected shard_key=name, got %s", ts.ShardKey)
+	}
+}
+
+func TestFSM_GetSchema_IsCopy(t *testing.T) {
+	fsm := NewFSM()
+
+	payload, _ := json.Marshal(RegisterSchemaPayload{TableName: "Person", ShardKey: "name"})
+	applyCommand(fsm, Command{Type: CmdRegisterSchema, Payload: payload})
+
+	tables := fsm.GetSchema()
+	tables["PERSON"] = schema.TableSchema{Name: "Mutated", ShardKey: "mutated"}
+
+	// Original should be unchanged.
+	original := fsm.GetSchema()
+	if original["PERSON"].ShardKey != "name" {
+		t.Error("GetSchema should return a copy, not a reference")
 	}
 }

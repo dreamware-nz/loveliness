@@ -10,6 +10,7 @@ import (
 
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
+	"github.com/johnjansen/loveliness/pkg/schema"
 )
 
 // Cluster manages Raft consensus and the shard map for a Loveliness node.
@@ -100,6 +101,37 @@ func (c *Cluster) LeaderAddr() string {
 // GetShardMap returns the current shard map from the FSM.
 func (c *Cluster) GetShardMap() ShardMap {
 	return c.fsm.GetShardMap()
+}
+
+// GetSchema returns the current schema tables from the FSM.
+func (c *Cluster) GetSchema() map[string]schema.TableSchema {
+	return c.fsm.GetSchema()
+}
+
+// RegisterSchema replicates a schema registration through Raft.
+func (c *Cluster) RegisterSchema(tableName, shardKey string) error {
+	payload, _ := json.Marshal(RegisterSchemaPayload{
+		TableName: tableName,
+		ShardKey:  shardKey,
+	})
+	return c.Apply(Command{Type: CmdRegisterSchema, Payload: payload})
+}
+
+// RemoveSchema replicates a schema removal through Raft.
+func (c *Cluster) RemoveSchema(tableName string) error {
+	payload, _ := json.Marshal(RemoveSchemaPayload{
+		TableName: tableName,
+	})
+	return c.Apply(Command{Type: CmdRemoveSchema, Payload: payload})
+}
+
+// SyncSchemaToRegistry copies the FSM schema state into the local schema registry.
+// Called on startup to restore the registry from the Raft snapshot.
+func (c *Cluster) SyncSchemaToRegistry(reg *schema.Registry) {
+	tables := c.fsm.GetSchema()
+	if len(tables) > 0 {
+		reg.Restore(tables)
+	}
 }
 
 // Apply submits a command to the Raft log. Must be called on the leader.

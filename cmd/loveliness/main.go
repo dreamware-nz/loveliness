@@ -96,6 +96,11 @@ func main() {
 	// and cross-shard resolution.
 	queryTimeout := time.Duration(cfg.QueryTimeoutMs) * time.Millisecond
 	reg := schema.NewRegistry()
+
+	// Restore schema registry from Raft FSM snapshot.
+	c.SyncSchemaToRegistry(reg)
+	slog.Info("schema registry synced from raft", "tables", len(reg.All()))
+
 	r := router.NewRouterWithSchema(shards, queryTimeout, reg)
 
 	// Phase B: Initialize per-shard Bloom filters (5M expected keys per shard, 1% FPR).
