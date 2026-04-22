@@ -4,11 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"strings"
 	"sync"
 
 	"github.com/hashicorp/raft"
-	"github.com/johnjansen/loveliness/pkg/schema"
+	"github.com/johnjansen/loveliness/pkg/catalog"
 )
 
 // ShardAssignment tracks which node owns the primary for a shard
@@ -23,6 +22,7 @@ type ShardAssignment struct {
 type ShardMap struct {
 	Assignments map[int]ShardAssignment `json:"assignments"`
 	Nodes       map[string]NodeInfo     `json:"nodes"`
+	SchemaKeys  map[string]string       `json:"schema_keys,omitempty"` // table name → shard key
 }
 
 // NodeInfo tracks metadata about a cluster node.
@@ -43,8 +43,12 @@ const (
 	CmdJoinNode
 	CmdRemoveNode
 	CmdPromoteReplica
-	CmdRegisterSchema
-	CmdRemoveSchema
+	CmdRegisterTable
+	CmdRemoveTable
+	CmdCreateDatabase
+	CmdStopDatabase
+	CmdStartDatabase
+	CmdDeleteDatabase
 )
 
 // Command is a Raft log entry.
@@ -76,34 +80,95 @@ type PromoteReplicaPayload struct {
 	NewPrimary string `json:"new_primary"`
 }
 
-// RegisterSchemaPayload is the data for CmdRegisterSchema.
-type RegisterSchemaPayload struct {
-	TableName string `json:"table_name"`
-	ShardKey  string `json:"shard_key"`
+// RegisterTablePayload is the data for CmdRegisterTable.
+type RegisterTablePayload struct {
+	Name     string `json:"name"`
+	ShardKey string `json:"shard_key"`
 }
 
-// RemoveSchemaPayload is the data for CmdRemoveSchema.
-type RemoveSchemaPayload struct {
-	TableName string `json:"table_name"`
+// RemoveTablePayload is the data for CmdRemoveTable.
+type RemoveTablePayload struct {
+	Name string `json:"name"`
 }
+
+// CreateDatabasePayload is the data for CmdCreateDatabase.
+type CreateDatabasePayload struct {
+	Name       string `json:"name"`
+	ShardCount int    `json:"shard_count"`
+}
+
+// DatabaseNamePayload is the data for CmdStopDatabase, CmdStartDatabase, CmdDeleteDatabase.
+type DatabaseNamePayload struct {
+	Name string `json:"name"`
+}
+
+// ShardsForNode returns the shard IDs assigned to a node (as primary or replica).
+func (sm ShardMap) ShardsForNode(nodeID string) []int {
+	var ids []int
+	for id, a := range sm.Assignments {
+		if a.Primary == nodeID || a.Replica == nodeID {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// NodesForShard returns the node IDs that host a shard (primary first, then replica).
+func (sm ShardMap) NodesForShard(shardID int) []string {
+	a, ok := sm.Assignments[shardID]
+	if !ok {
+		return nil
+	}
+	nodes := []string{a.Primary}
+	if a.Replica != "" {
+		nodes = append(nodes, a.Replica)
+	}
+	return nodes
+}
+
+// PrimaryForShard returns the primary node for a shard.
+func (sm ShardMap) PrimaryForShard(shardID int) string {
+	if a, ok := sm.Assignments[shardID]; ok {
+		return a.Primary
+	}
+	return ""
+}
+
+// SchemaCallback is called whenever the schema state changes in the FSM.
+// The callback receives the full schema map (table name → shard key).
+type SchemaCallback func(tables map[string]string)
 
 // FSM implements the raft.FSM interface for managing the cluster shard map
-// and schema registry.
+// and database catalog.
 type FSM struct {
-	mu           sync.RWMutex
-	shardMap     ShardMap
-	schemaTables map[string]schema.TableSchema // table name (uppercase) → schema
+	mu             sync.RWMutex
+	shardMap       ShardMap
+	catalog        *catalog.Catalog
+	schemaCallback SchemaCallback
 }
 
-// NewFSM creates a new FSM with an empty shard map and schema registry.
+// NewFSM creates a new FSM with an empty shard map and catalog.
 func NewFSM() *FSM {
 	return &FSM{
 		shardMap: ShardMap{
 			Assignments: make(map[int]ShardAssignment),
 			Nodes:       make(map[string]NodeInfo),
+			SchemaKeys:  make(map[string]string),
 		},
-		schemaTables: make(map[string]schema.TableSchema),
+		catalog: catalog.NewCatalog(),
 	}
+}
+
+// GetCatalog returns the catalog for reading database metadata.
+func (f *FSM) GetCatalog() *catalog.Catalog {
+	return f.catalog
+}
+
+// SetSchemaCallback sets a callback that fires whenever schema state changes.
+func (f *FSM) SetSchemaCallback(cb SchemaCallback) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.schemaCallback = cb
 }
 
 // GetShardMap returns a copy of the current shard map.
@@ -119,18 +184,24 @@ func (f *FSM) GetShardMap() ShardMap {
 	for k, v := range f.shardMap.Nodes {
 		nodes[k] = v
 	}
-	return ShardMap{Assignments: assignments, Nodes: nodes}
+	schemaKeys := make(map[string]string, len(f.shardMap.SchemaKeys))
+	for k, v := range f.shardMap.SchemaKeys {
+		schemaKeys[k] = v
+	}
+	return ShardMap{Assignments: assignments, Nodes: nodes, SchemaKeys: schemaKeys}
 }
 
-// GetSchema returns a copy of the current schema registry tables.
-func (f *FSM) GetSchema() map[string]schema.TableSchema {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
-	out := make(map[string]schema.TableSchema, len(f.schemaTables))
-	for k, v := range f.schemaTables {
-		out[k] = v
+// notifySchemaChange fires the schema callback with a copy of the current schema.
+// Must be called with f.mu held.
+func (f *FSM) notifySchemaChange() {
+	if f.schemaCallback == nil {
+		return
 	}
-	return out
+	tables := make(map[string]string, len(f.shardMap.SchemaKeys))
+	for k, v := range f.shardMap.SchemaKeys {
+		tables[k] = v
+	}
+	f.schemaCallback(tables)
 }
 
 // Apply applies a Raft log entry to the FSM.
@@ -186,34 +257,65 @@ func (f *FSM) Apply(log *raft.Log) interface{} {
 		}
 		return nil
 
-	case CmdRegisterSchema:
-		var p RegisterSchemaPayload
+	case CmdRegisterTable:
+		var p RegisterTablePayload
 		if err := json.Unmarshal(cmd.Payload, &p); err != nil {
-			return fmt.Errorf("unmarshal register schema: %w", err)
+			return fmt.Errorf("unmarshal register table: %w", err)
 		}
-		f.schemaTables[strings.ToUpper(p.TableName)] = schema.TableSchema{
-			Name:     p.TableName,
-			ShardKey: p.ShardKey,
-		}
+		f.shardMap.SchemaKeys[p.Name] = p.ShardKey
+		f.notifySchemaChange()
 		return nil
 
-	case CmdRemoveSchema:
-		var p RemoveSchemaPayload
+	case CmdRemoveTable:
+		var p RemoveTablePayload
 		if err := json.Unmarshal(cmd.Payload, &p); err != nil {
-			return fmt.Errorf("unmarshal remove schema: %w", err)
+			return fmt.Errorf("unmarshal remove table: %w", err)
 		}
-		delete(f.schemaTables, strings.ToUpper(p.TableName))
+		delete(f.shardMap.SchemaKeys, p.Name)
+		f.notifySchemaChange()
 		return nil
+
+	case CmdCreateDatabase:
+		var p CreateDatabasePayload
+		if err := json.Unmarshal(cmd.Payload, &p); err != nil {
+			return fmt.Errorf("unmarshal create database: %w", err)
+		}
+		db, err := f.catalog.CreateDatabase(p.Name, p.ShardCount)
+		if err != nil {
+			return err
+		}
+		return db
+
+	case CmdStopDatabase:
+		var p DatabaseNamePayload
+		if err := json.Unmarshal(cmd.Payload, &p); err != nil {
+			return fmt.Errorf("unmarshal stop database: %w", err)
+		}
+		return f.catalog.StopDatabase(p.Name)
+
+	case CmdStartDatabase:
+		var p DatabaseNamePayload
+		if err := json.Unmarshal(cmd.Payload, &p); err != nil {
+			return fmt.Errorf("unmarshal start database: %w", err)
+		}
+		return f.catalog.StartDatabase(p.Name)
+
+	case CmdDeleteDatabase:
+		var p DatabaseNamePayload
+		if err := json.Unmarshal(cmd.Payload, &p); err != nil {
+			return fmt.Errorf("unmarshal delete database: %w", err)
+		}
+		return f.catalog.DeleteDatabase(p.Name)
 
 	default:
 		return fmt.Errorf("unknown command type: %d", cmd.Type)
 	}
 }
 
-// fsmState is the full snapshot state including shard map and schema registry.
+// fsmState is the combined state serialized in Raft snapshots.
 type fsmState struct {
-	ShardMap     ShardMap                     `json:"shard_map"`
-	SchemaTables map[string]schema.TableSchema `json:"schema_tables,omitempty"`
+	ShardMap ShardMap                `json:"shard_map"`
+	Catalog  catalog.CatalogSnapshot `json:"catalog"`
 }
 
 // Snapshot returns a snapshot of the FSM state for Raft snapshotting.
@@ -221,8 +323,8 @@ func (f *FSM) Snapshot() (raft.FSMSnapshot, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	state := fsmState{
-		ShardMap:     f.shardMap,
-		SchemaTables: f.schemaTables,
+		ShardMap: f.shardMap,
+		Catalog:  f.catalog.Snapshot(),
 	}
 	data, err := json.Marshal(state)
 	if err != nil {
@@ -234,18 +336,43 @@ func (f *FSM) Snapshot() (raft.FSMSnapshot, error) {
 // Restore replaces the FSM state from a snapshot.
 func (f *FSM) Restore(rc io.ReadCloser) error {
 	defer rc.Close()
-	var state fsmState
-	if err := json.NewDecoder(rc).Decode(&state); err != nil {
+
+	// Try new format first (with catalog).
+	raw, err := io.ReadAll(rc)
+	if err != nil {
 		return err
 	}
+
+	var state fsmState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		return err
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.shardMap = state.ShardMap
-	if state.SchemaTables != nil {
-		f.schemaTables = state.SchemaTables
+
+	// If the snapshot has the new format (shard_map key), use it.
+	// Otherwise it's a legacy snapshot with just the ShardMap at the top level.
+	if state.ShardMap.Assignments != nil {
+		f.shardMap = state.ShardMap
 	} else {
-		f.schemaTables = make(map[string]schema.TableSchema)
+		// Legacy format: the entire JSON is a ShardMap.
+		var sm ShardMap
+		if err := json.Unmarshal(raw, &sm); err != nil {
+			return err
+		}
+		f.shardMap = sm
 	}
+
+	if f.shardMap.SchemaKeys == nil {
+		f.shardMap.SchemaKeys = make(map[string]string)
+	}
+
+	if state.Catalog.Databases != nil {
+		f.catalog.Restore(state.Catalog)
+	}
+
+	f.notifySchemaChange()
 	return nil
 }
 

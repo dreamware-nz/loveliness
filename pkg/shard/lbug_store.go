@@ -14,10 +14,15 @@ type LbugStore struct {
 }
 
 // NewLbugStore opens a LadybugDB database at the given path with a connection pool.
-func NewLbugStore(path string, maxThreads uint64) (*LbugStore, error) {
+// If bufferPoolBytes > 0, it overrides the default buffer pool size (which is 80%
+// of system memory per database — dangerous with multiple shards).
+func NewLbugStore(path string, maxThreads uint64, bufferPoolBytes ...uint64) (*LbugStore, error) {
 	cfg := lbug.DefaultSystemConfig()
 	if maxThreads > 0 {
 		cfg.MaxNumThreads = maxThreads
+	}
+	if len(bufferPoolBytes) > 0 && bufferPoolBytes[0] > 0 {
+		cfg.BufferPoolSize = bufferPoolBytes[0]
 	}
 	db, err := lbug.OpenDatabase(path, cfg)
 	if err != nil {

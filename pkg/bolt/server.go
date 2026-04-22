@@ -30,14 +30,15 @@ type ClusterTopology interface {
 
 // Server is a Bolt protocol server that accepts Neo4j driver connections.
 type Server struct {
-	listener  net.Listener
-	executor  QueryExecutor
-	addr      string
-	tlsConfig *tls.Config
-	authToken string // shared secret; empty = no auth
-	cluster   ClusterTopology
-	running   atomic.Bool
-	wg        sync.WaitGroup
+	listener   net.Listener
+	executor   QueryExecutor
+	dbExecutor DatabaseQueryExecutor
+	addr       string
+	tlsConfig  *tls.Config
+	authToken  string // shared secret; empty = no auth
+	cluster    ClusterTopology
+	running    atomic.Bool
+	wg         sync.WaitGroup
 }
 
 // NewServer creates a new Bolt server.
@@ -56,6 +57,11 @@ func (s *Server) SetTLS(cfg *tls.Config) {
 // SetCluster configures cluster topology for Bolt ROUTE responses.
 func (s *Server) SetCluster(ct ClusterTopology) {
 	s.cluster = ct
+}
+
+// SetDatabaseExecutor configures multi-database query execution.
+func (s *Server) SetDatabaseExecutor(dbExec DatabaseQueryExecutor) {
+	s.dbExecutor = dbExec
 }
 
 // SetAuth configures token authentication for the Bolt server.
@@ -122,11 +128,12 @@ func (s *Server) handleConnection(conn net.Conn) {
 	defer conn.Close()
 
 	c := &connection{
-		conn:      conn,
-		executor:  s.executor,
-		authToken: s.authToken,
-		cluster:   s.cluster,
-		state:     stateNegotiation,
+		conn:       conn,
+		executor:   s.executor,
+		dbExecutor: s.dbExecutor,
+		authToken:  s.authToken,
+		cluster:    s.cluster,
+		state:      stateNegotiation,
 	}
 
 	if err := c.negotiate(); err != nil {
@@ -158,11 +165,13 @@ const (
 )
 
 type connection struct {
-	conn      net.Conn
-	executor  QueryExecutor
-	authToken string
-	cluster   ClusterTopology
-	state     connState
+	conn       net.Conn
+	executor   QueryExecutor
+	dbExecutor DatabaseQueryExecutor
+	authToken  string
+	cluster    ClusterTopology
+	state      connState
+	dbName     string // per-connection default database (set by HELLO or BEGIN)
 
 	// Current result set for streaming via PULL.
 	columns []string
@@ -276,18 +285,24 @@ func (c *connection) processMessage() error {
 
 func (c *connection) handleHello(msg *BoltStruct) error {
 	// HELLO {user_agent, scheme, principal, credentials, ...}
-	if c.authToken != "" {
-		authenticated := false
-		if len(msg.Fields) >= 1 {
-			if extra, ok := msg.Fields[0].(map[string]any); ok {
+	if len(msg.Fields) >= 1 {
+		if extra, ok := msg.Fields[0].(map[string]any); ok {
+			if c.authToken != "" {
+				authenticated := false
 				if creds, ok := extra["credentials"].(string); ok {
 					authenticated = subtle.ConstantTimeCompare([]byte(c.authToken), []byte(creds)) == 1
 				}
+				if !authenticated {
+					return c.sendFailure("Neo.ClientError.Security.Unauthorized", "invalid credentials")
+				}
+			}
+			// Extract default database for the connection.
+			if db, ok := extra["db"].(string); ok && db != "" {
+				c.dbName = db
 			}
 		}
-		if !authenticated {
-			return c.sendFailure("Neo.ClientError.Security.Unauthorized", "invalid credentials")
-		}
+	} else if c.authToken != "" {
+		return c.sendFailure("Neo.ClientError.Security.Unauthorized", "invalid credentials")
 	}
 	c.state = stateReady
 	return c.sendSuccess(map[string]any{
@@ -325,7 +340,7 @@ func (c *connection) handleRun(msg *BoltStruct) error {
 	}
 
 	// Accept extra map (field 2) with db, bookmarks, tx_timeout, tx_metadata, mode.
-	// Single-database: we ignore db selection but accept it for compatibility.
+	var stmtDB string
 	if len(msg.Fields) >= 3 {
 		if extra, ok := msg.Fields[2].(map[string]any); ok {
 			if bm, ok := extra["bookmarks"]; ok {
@@ -335,14 +350,39 @@ func (c *connection) handleRun(msg *BoltStruct) error {
 					}
 				}
 			}
-			_ = extra["db"]
+			if db, ok := extra["db"].(string); ok && db != "" {
+				stmtDB = db
+			}
 		}
+	}
+
+	// Resolve effective database: per-statement overrides connection default.
+	effectiveDB := c.dbName
+	if stmtDB != "" {
+		effectiveDB = stmtDB
 	}
 
 	// Interpolate parameters into Cypher (LadybugDB doesn't support $params natively).
 	resolved := interpolateParams(cypher, params)
 
-	columns, rows, err := c.executor.Query(resolved, nil)
+	var columns []string
+	var rows []map[string]any
+	var err error
+
+	if c.dbExecutor != nil {
+		// Multi-database mode: check for admin commands first.
+		if c.dbExecutor.IsAdminCommand(resolved) {
+			columns, rows, err = c.dbExecutor.ExecuteAdmin(resolved)
+		} else if effectiveDB != "" {
+			columns, rows, err = c.dbExecutor.QueryDatabase(effectiveDB, resolved, nil)
+		} else {
+			err = fmt.Errorf("no database selected — use USE <database> or set db in connection parameters")
+		}
+	} else {
+		// Legacy single-database mode.
+		columns, rows, err = c.executor.Query(resolved, nil)
+	}
+
 	if err != nil {
 		c.state = stateFailed
 		return c.sendFailure("Neo.DatabaseError.Statement.ExecutionFailed", err.Error())
@@ -434,10 +474,8 @@ func (c *connection) handleBegin(msg *BoltStruct) error {
 		return c.sendIgnored()
 	}
 	// Accept extra map with db, bookmarks, tx_timeout, tx_metadata, mode, etc.
-	// We don't enforce any of these but we accept them for compatibility.
 	if len(msg.Fields) >= 1 {
 		if extra, ok := msg.Fields[0].(map[string]any); ok {
-			// Accept bookmarks — track last received for causal consistency.
 			if bm, ok := extra["bookmarks"]; ok {
 				if bmList, ok := bm.([]any); ok && len(bmList) > 0 {
 					if s, ok := bmList[len(bmList)-1].(string); ok {
@@ -445,8 +483,10 @@ func (c *connection) handleBegin(msg *BoltStruct) error {
 					}
 				}
 			}
-			// Accept db param — single-database, so we ignore the value.
-			_ = extra["db"]
+			// Per-transaction db override sets connection default for this tx.
+			if db, ok := extra["db"].(string); ok && db != "" {
+				c.dbName = db
+			}
 		}
 	}
 	return c.sendSuccess(nil)

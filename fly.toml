@@ -1,18 +1,18 @@
-# fly.toml app configuration file for Loveliness
-# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
-
-app = 'loveliness'
-primary_region = 'syd'
+app = "loveliness"
+primary_region = "sjc"
 
 [build]
-  dockerfile = "deploy/fly/Dockerfile"
+  dockerfile = "../../Dockerfile.fly"
 
 [env]
   LOVELINESS_DISCOVER = "dns"
   LOVELINESS_DISCOVER_ADDR = "loveliness.internal"
-  LOVELINESS_SHARD_COUNT = "3"
+  LOVELINESS_SHARD_COUNT = "6"
   LOVELINESS_BIND_ADDR = "0.0.0.0:8080"
   LOVELINESS_BOLT_ADDR = "0.0.0.0:7687"
+
+# Static config goes here (shard count, bind addresses, discovery mode).
+# Dynamic config dependent on FLY_PRIVATE_IP goes in start.sh.
 
 [mounts]
   source = "loveliness_data"
@@ -35,7 +35,5 @@ primary_region = 'syd'
   [[services.ports]]
     port = 7687
 
-[[vm]]
-  memory = '4gb'
-  cpu_kind = 'shared'
-  cpus = 2
+# Raft (:9000) and gRPC (:9001) communicate over Fly's 6PN private network
+# using FLY_PRIVATE_IP. They do NOT need public [[services]] entries.

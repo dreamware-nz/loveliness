@@ -10,7 +10,7 @@ import (
 
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
-	"github.com/johnjansen/loveliness/pkg/schema"
+	"github.com/johnjansen/loveliness/pkg/catalog"
 )
 
 // Cluster manages Raft consensus and the shard map for a Loveliness node.
@@ -103,37 +103,6 @@ func (c *Cluster) GetShardMap() ShardMap {
 	return c.fsm.GetShardMap()
 }
 
-// GetSchema returns the current schema tables from the FSM.
-func (c *Cluster) GetSchema() map[string]schema.TableSchema {
-	return c.fsm.GetSchema()
-}
-
-// RegisterSchema replicates a schema registration through Raft.
-func (c *Cluster) RegisterSchema(tableName, shardKey string) error {
-	payload, _ := json.Marshal(RegisterSchemaPayload{
-		TableName: tableName,
-		ShardKey:  shardKey,
-	})
-	return c.Apply(Command{Type: CmdRegisterSchema, Payload: payload})
-}
-
-// RemoveSchema replicates a schema removal through Raft.
-func (c *Cluster) RemoveSchema(tableName string) error {
-	payload, _ := json.Marshal(RemoveSchemaPayload{
-		TableName: tableName,
-	})
-	return c.Apply(Command{Type: CmdRemoveSchema, Payload: payload})
-}
-
-// SyncSchemaToRegistry copies the FSM schema state into the local schema registry.
-// Called on startup to restore the registry from the Raft snapshot.
-func (c *Cluster) SyncSchemaToRegistry(reg *schema.Registry) {
-	tables := c.fsm.GetSchema()
-	if len(tables) > 0 {
-		reg.Restore(tables)
-	}
-}
-
 // Apply submits a command to the Raft log. Must be called on the leader.
 func (c *Cluster) Apply(cmd Command) error {
 	data, err := json.Marshal(cmd)
@@ -160,6 +129,38 @@ func (c *Cluster) RegisterNode(info NodeInfo) error {
 	return c.Apply(Command{Type: CmdJoinNode, Payload: payload})
 }
 
+// GetCatalog returns the database catalog from the FSM.
+func (c *Cluster) GetCatalog() *catalog.Catalog {
+	return c.fsm.GetCatalog()
+}
+
+// CreateDatabase proposes a new database to the Raft cluster.
+func (c *Cluster) CreateDatabase(name string, shardCount int) error {
+	payload, _ := json.Marshal(CreateDatabasePayload{
+		Name:       name,
+		ShardCount: shardCount,
+	})
+	return c.Apply(Command{Type: CmdCreateDatabase, Payload: payload})
+}
+
+// StopDatabase proposes stopping a database.
+func (c *Cluster) StopDatabase(name string) error {
+	payload, _ := json.Marshal(DatabaseNamePayload{Name: name})
+	return c.Apply(Command{Type: CmdStopDatabase, Payload: payload})
+}
+
+// StartDatabase proposes starting a stopped database.
+func (c *Cluster) StartDatabase(name string) error {
+	payload, _ := json.Marshal(DatabaseNamePayload{Name: name})
+	return c.Apply(Command{Type: CmdStartDatabase, Payload: payload})
+}
+
+// DeleteDatabase proposes deleting a database.
+func (c *Cluster) DeleteDatabase(name string) error {
+	payload, _ := json.Marshal(DatabaseNamePayload{Name: name})
+	return c.Apply(Command{Type: CmdDeleteDatabase, Payload: payload})
+}
+
 // PromoteReplica promotes a replica to primary for the given shard.
 func (c *Cluster) PromoteReplica(shardID int, newPrimary string) error {
 	payload, _ := json.Marshal(PromoteReplicaPayload{
@@ -167,6 +168,28 @@ func (c *Cluster) PromoteReplica(shardID int, newPrimary string) error {
 		NewPrimary: newPrimary,
 	})
 	return c.Apply(Command{Type: CmdPromoteReplica, Payload: payload})
+}
+
+// RegisterTable replicates a schema registration (table name → shard key) via Raft.
+func (c *Cluster) RegisterTable(name, shardKey string) error {
+	payload, _ := json.Marshal(RegisterTablePayload{Name: name, ShardKey: shardKey})
+	return c.Apply(Command{Type: CmdRegisterTable, Payload: payload})
+}
+
+// RemoveTable replicates a schema removal via Raft.
+func (c *Cluster) RemoveTable(name string) error {
+	payload, _ := json.Marshal(RemoveTablePayload{Name: name})
+	return c.Apply(Command{Type: CmdRemoveTable, Payload: payload})
+}
+
+// GetSchema returns the current schema keys from the FSM.
+func (c *Cluster) GetSchema() map[string]string {
+	return c.fsm.GetShardMap().SchemaKeys
+}
+
+// SetSchemaCallback sets a callback that fires whenever schema state changes in the FSM.
+func (c *Cluster) SetSchemaCallback(cb SchemaCallback) {
+	c.fsm.SetSchemaCallback(cb)
 }
 
 // NodeID returns this node's ID.

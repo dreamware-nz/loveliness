@@ -25,6 +25,7 @@ import (
 // Server is the HTTP API server for a Loveliness node.
 type Server struct {
 	router  *router.Router
+	dbRouter *router.DatabaseRouter
 	cluster *cluster.Cluster
 	shards  []*shard.Shard
 	schema  *schema.Registry
@@ -74,11 +75,16 @@ func (s *Server) SetAuth(a *auth.TokenAuth) {
 	s.auth = a
 }
 
+// SetDatabaseRouter sets the multi-database router for scoped endpoints.
+func (s *Server) SetDatabaseRouter(dr *router.DatabaseRouter) {
+	s.dbRouter = dr
+}
+
 // Handler returns the HTTP handler with all routes registered.
 func (s *Server) Handler() http.Handler {
 	// Protected routes — require auth when enabled.
 	protected := http.NewServeMux()
-	protected.HandleFunc("POST /cypher", s.handleCypher)
+	protected.HandleFunc("POST /cypher", s.handleCypherLegacy)
 	protected.HandleFunc("POST /bulk/nodes", s.handleBulkNodes)
 	protected.HandleFunc("POST /bulk/edges", s.handleBulkEdges)
 	protected.HandleFunc("POST /bulk/nodes/stream", s.handleBulkNodesStream)
@@ -88,6 +94,14 @@ func (s *Server) Handler() http.Handler {
 	protected.HandleFunc("POST /join-token", s.handleJoinToken)
 	s.registerDRRoutes(protected)
 	s.registerIngestRoutes(protected)
+
+	// Multi-database scoped routes.
+	protected.HandleFunc("POST /db/{name}/cypher", s.handleCypherScoped)
+	protected.HandleFunc("POST /db/{name}/bulk/nodes", s.handleBulkNodesScoped)
+	protected.HandleFunc("POST /db/{name}/bulk/edges", s.handleBulkEdgesScoped)
+
+	// Admin endpoint (not db-scoped) for CREATE/STOP/START/DROP DATABASE, SHOW DATABASES.
+	protected.HandleFunc("POST /admin/cypher", s.handleAdminCypher)
 
 	// Top-level mux: health and discovery are public, everything else goes through auth.
 	mux := http.NewServeMux()
@@ -162,6 +176,12 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
+// handleCypherLegacy routes queries to the default shard set for backward compatibility.
+// Clients should prefer /db/{name}/cypher for multi-database usage.
+func (s *Server) handleCypherLegacy(w http.ResponseWriter, r *http.Request) {
+	s.handleCypher(w, r)
+}
+
 func (s *Server) handleCypher(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1 MB max
 	if err != nil {
@@ -213,7 +233,7 @@ func (s *Server) replicateSchemaDDL(cypher string) {
 	case strings.HasPrefix(upper, "CREATE NODE TABLE"):
 		name, key, err := schema.ParseCreateNodeTable(cypher)
 		if err == nil {
-			if err := s.cluster.RegisterSchema(name, key); err != nil {
+			if err := s.cluster.RegisterTable(name, key); err != nil {
 				slog.Warn("schema replication failed", "table", name, "err", err)
 			} else {
 				slog.Debug("schema replicated", "table", name, "shard_key", key)
@@ -222,7 +242,7 @@ func (s *Server) replicateSchemaDDL(cypher string) {
 	case strings.HasPrefix(upper, "DROP TABLE"):
 		name, err := schema.ParseDropTable(cypher)
 		if err == nil {
-			if err := s.cluster.RemoveSchema(name); err != nil {
+			if err := s.cluster.RemoveTable(name); err != nil {
 				slog.Warn("schema removal replication failed", "table", name, "err", err)
 			}
 		}
@@ -401,4 +421,190 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 	)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "joined", "node_id": req.NodeID})
+}
+
+// handleCypherScoped routes a Cypher query to a specific database.
+func (s *Server) handleCypherScoped(w http.ResponseWriter, r *http.Request) {
+	dbName := r.PathValue("name")
+	if dbName == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "database name required in path", 0)
+		return
+	}
+	if s.dbRouter == nil {
+		writeError(w, http.StatusServiceUnavailable, "NO_MULTI_DB", "multi-database not enabled", 0)
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "cannot read body: "+err.Error(), 0)
+		return
+	}
+	cypher := strings.TrimSpace(string(body))
+	if cypher == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "empty query body", 0)
+		return
+	}
+
+	// Admin commands should go to /admin/cypher, not /db/{name}/cypher.
+	if router.IsAdminCommand(cypher) {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST",
+			"admin commands must use POST /admin/cypher", 0)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), s.timeout)
+	defer cancel()
+
+	result, err := s.dbRouter.Execute(ctx, dbName, cypher)
+	if err != nil {
+		if qe, ok := err.(*router.QueryError); ok {
+			status := http.StatusInternalServerError
+			switch qe.Code {
+			case "CYPHER_PARSE_ERROR", "MISSING_SHARD_KEY":
+				status = http.StatusBadRequest
+			case "DATABASE_ERROR":
+				status = http.StatusNotFound
+			case "SHARD_UNAVAILABLE":
+				status = http.StatusServiceUnavailable
+			case "QUERY_TIMEOUT":
+				status = http.StatusGatewayTimeout
+			}
+			writeError(w, status, qe.Code, qe.Message, qe.ShardID)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error(), 0)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// handleBulkNodesScoped routes bulk node loading to a specific database.
+func (s *Server) handleBulkNodesScoped(w http.ResponseWriter, r *http.Request) {
+	dbName := r.PathValue("name")
+	if s.dbRouter == nil {
+		writeError(w, http.StatusServiceUnavailable, "NO_MULTI_DB", "multi-database not enabled", 0)
+		return
+	}
+	_, err := s.dbRouter.GetRouter(dbName)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "DATABASE_ERROR", err.Error(), 0)
+		return
+	}
+	// TODO: delegate to per-database bulk handler once shard references are scoped.
+	writeError(w, http.StatusNotImplemented, "NOT_IMPLEMENTED",
+		"scoped bulk node loading not yet implemented", 0)
+}
+
+// handleBulkEdgesScoped routes bulk edge loading to a specific database.
+func (s *Server) handleBulkEdgesScoped(w http.ResponseWriter, r *http.Request) {
+	dbName := r.PathValue("name")
+	if s.dbRouter == nil {
+		writeError(w, http.StatusServiceUnavailable, "NO_MULTI_DB", "multi-database not enabled", 0)
+		return
+	}
+	_, err := s.dbRouter.GetRouter(dbName)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "DATABASE_ERROR", err.Error(), 0)
+		return
+	}
+	writeError(w, http.StatusNotImplemented, "NOT_IMPLEMENTED",
+		"scoped bulk edge loading not yet implemented", 0)
+}
+
+// handleAdminCypher handles database admin commands (CREATE/STOP/START/DROP DATABASE, SHOW DATABASES).
+func (s *Server) handleAdminCypher(w http.ResponseWriter, r *http.Request) {
+	if s.cluster == nil {
+		writeError(w, http.StatusServiceUnavailable, "NO_CLUSTER", "node is not part of a cluster", 0)
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "cannot read body: "+err.Error(), 0)
+		return
+	}
+	cypher := strings.TrimSpace(string(body))
+	if cypher == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "empty query body", 0)
+		return
+	}
+
+	cmd := router.ParseAdminCommand(cypher)
+	if cmd == nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST",
+			"only admin commands (CREATE/STOP/START/DROP DATABASE, SHOW DATABASES) are accepted on this endpoint", 0)
+		return
+	}
+
+	switch cmd.Type {
+	case router.AdminShowDatabases:
+		cat := s.cluster.GetCatalog()
+		dbs := cat.ListDatabases()
+		rows := make([]map[string]any, len(dbs))
+		for i, db := range dbs {
+			rows[i] = map[string]any{
+				"name":        db.Name,
+				"state":       db.State.String(),
+				"shard_count": db.ShardCount,
+				"created_at":  db.CreatedAt,
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"columns": []string{"name", "state", "shard_count", "created_at"},
+			"rows":    rows,
+		})
+
+	case router.AdminCreateDatabase:
+		if !s.cluster.IsLeader() {
+			writeError(w, http.StatusBadRequest, "NOT_LEADER",
+				fmt.Sprintf("not the leader; leader is at %s", s.cluster.LeaderAddr()), 0)
+			return
+		}
+		if err := s.cluster.CreateDatabase(cmd.Name, cmd.ShardCount); err != nil {
+			writeError(w, http.StatusBadRequest, "CREATE_DATABASE_ERROR", err.Error(), 0)
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{
+			"status":      "created",
+			"name":        cmd.Name,
+			"shard_count": cmd.ShardCount,
+		})
+
+	case router.AdminStopDatabase:
+		if !s.cluster.IsLeader() {
+			writeError(w, http.StatusBadRequest, "NOT_LEADER",
+				fmt.Sprintf("not the leader; leader is at %s", s.cluster.LeaderAddr()), 0)
+			return
+		}
+		if err := s.cluster.StopDatabase(cmd.Name); err != nil {
+			writeError(w, http.StatusBadRequest, "STOP_DATABASE_ERROR", err.Error(), 0)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "stopped", "name": cmd.Name})
+
+	case router.AdminStartDatabase:
+		if !s.cluster.IsLeader() {
+			writeError(w, http.StatusBadRequest, "NOT_LEADER",
+				fmt.Sprintf("not the leader; leader is at %s", s.cluster.LeaderAddr()), 0)
+			return
+		}
+		if err := s.cluster.StartDatabase(cmd.Name); err != nil {
+			writeError(w, http.StatusBadRequest, "START_DATABASE_ERROR", err.Error(), 0)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "started", "name": cmd.Name})
+
+	case router.AdminDropDatabase:
+		if !s.cluster.IsLeader() {
+			writeError(w, http.StatusBadRequest, "NOT_LEADER",
+				fmt.Sprintf("not the leader; leader is at %s", s.cluster.LeaderAddr()), 0)
+			return
+		}
+		if err := s.cluster.DeleteDatabase(cmd.Name); err != nil {
+			writeError(w, http.StatusBadRequest, "DROP_DATABASE_ERROR", err.Error(), 0)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted", "name": cmd.Name})
+	}
 }

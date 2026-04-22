@@ -28,7 +28,9 @@ graph TB
     S0 --- WAL[WAL + Backup + Ingest Queue]
 ```
 
-## Performance (15.7M nodes, 10M edges, 4 shards)
+## Performance
+
+### Local (15.7M nodes, 10M edges, 4 shards — Apple M1 Pro)
 
 | Query Type | P50 | QPS |
 |---|---|---|
@@ -38,6 +40,42 @@ graph TB
 | Aggregation | **57ms** | 16 |
 | 2-hop traversal | **162ms** | 5 |
 | Bulk load | **70–190K nodes/sec** | — |
+
+### Cluster (50M nodes, 50M edges, 12 shards — 4-node Fly.io)
+
+Tested on 4× performance-4x machines (8 vCPU, 16GB RAM each), sjc region. 200 iterations, 16 concurrent workers. Benchmark binary runs inside the cluster on localhost for true in-network latencies.
+
+| Query Type | P50 | P95 | QPS |
+|---|---|---|---|
+| Point lookup | **2.2ms** | 3.2ms | 427 |
+| Point lookup (16 workers) | **5.2ms** | 12.2ms | **2,642** |
+| Range filter | **3.2ms** | 3.7ms | 290 |
+| Count all nodes | **8.4ms** | 11.0ms | 112 |
+| Count filtered | **284ms** | 310ms | 3 |
+| Aggregation (avg) | **295ms** | 321ms | 3 |
+| Group-by aggregation | **769ms** | 814ms | 1 |
+| 1-hop traversal | **2.9ms** | 380ms | 17 |
+| 2-hop traversal | **241ms** | 268ms | 4 |
+| Variable-length path (1..3) | **2.3ms** | 3.3ms | 414 |
+| Friend-of-friend count | **476ms** | 494ms | 2 |
+| Mutual friends | **2.4ms** | 3.0ms | 394 |
+| Shortest path (1..6) | **29ms** | 40ms | 33 |
+| Single write | **1.8ms** | 2.2ms | 542 |
+| Merge upsert | **2.4ms** | 3.0ms | 413 |
+| Read-after-write | **3.3ms** | 4.0ms | 305 |
+| Bulk node load | **197K/sec** | — | — |
+| Bulk edge load | **373K/sec** | — | — |
+
+### Scale progression
+
+| Dataset | Nodes | Shards | Point lookup P50 | Concurrent QPS | Group-by P50 | Write P50 |
+|---|---|---|---|---|---|---|
+| 10M / 10M | 3 | 3 | 1.4ms | 1,792 | — | — |
+| 20M / 20M | 3 | 3 | 863us | 1,991 | 838ms | — |
+| 23M / 23M | 3 | 6 | 1.2ms | 6,831 | 246ms | 1.8ms |
+| **50M / 50M** | **4** | **12** | **2.2ms** | **2,642** | **769ms** | **1.8ms** |
+
+Point lookups stay sub-3ms through 50M nodes. Writes hold steady at 1.8ms regardless of dataset size. Bulk loading in-cluster hits 197K nodes/sec and 373K edges/sec.
 
 <!-- BENCHMARK_START -->
 <!-- BENCHMARK_END -->
@@ -53,6 +91,9 @@ graph TB
 
 # Custom dataset size
 ./bench/run.sh --nodes=500000 --edges=500000
+
+# 50M-scale on Fly.io (4 nodes, 12 shards)
+./bench/run-50m.sh
 ```
 
 Results land in `bench/results/<timestamp>/` with JSON data, SVG charts, and a markdown comparison report. CI runs the full comparison on each release and opens a PR with updated results.
@@ -110,6 +151,19 @@ fly scale count 3
 DNS auto-discovery handles peer finding. No manual peer configuration needed. See [Fly.io deployment docs](deploy/fly/) for details.
 
 ## Usage
+
+**CLI:**
+
+```bash
+loveliness help                                           # show all commands
+loveliness up 3                                           # 3-node local cluster
+loveliness query "MATCH (p:Person {name: 'Alice'}) RETURN p"  # query a running server
+loveliness version                                        # show version
+```
+
+Set `LOVELINESS_URL` to query a remote server (default: `http://localhost:8080`).
+
+**HTTP API:**
 
 ```bash
 # Schema (broadcast to all shards)

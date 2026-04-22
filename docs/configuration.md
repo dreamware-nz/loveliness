@@ -32,6 +32,7 @@ All configuration is via environment variables.
 | `LOVELINESS_DISCOVER_ADDR` | *(empty)* | DNS name to resolve for peer discovery (e.g., `loveliness.internal`) |
 | `LOVELINESS_DISCOVER_INTERVAL` | `5` | Seconds between DNS discovery attempts |
 | `LOVELINESS_EXPECTED_NODES` | `0` | Expected node count for quorum-gated auto-bootstrap (0 = no expectation) |
+| `LOVELINESS_SHARD_BUFFER_MB` | *(auto)* | Per-shard LadybugDB buffer pool cap in MB. Default: `(total_memory × 0.7) / shard_count`. Set explicitly to override. |
 
 ## Authentication
 
