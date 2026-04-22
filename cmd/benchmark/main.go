@@ -20,14 +20,17 @@ import (
 )
 
 var (
-	endpoint = flag.String("endpoint", "http://localhost:8080", "Target HTTP endpoint")
-	nodes    = flag.Int("nodes", 50_000, "Number of nodes to seed")
-	edges    = flag.Int("edges", 50_000, "Number of edges to seed")
-	iters    = flag.Int("iters", 200, "Iterations per benchmark")
-	workers  = flag.Int("workers", 8, "Concurrent workers for throughput tests")
-	skipSeed = flag.Bool("skip-seed", false, "Skip data seeding (already loaded)")
-	target   = flag.String("target", "loveliness", "Target database: loveliness or neo4j")
-	jsonOut  = flag.String("json-out", "", "Write JSON results to this file (empty = stdout only)")
+	endpoint    = flag.String("endpoint", "http://localhost:8080", "Target HTTP endpoint")
+	nodes       = flag.Int("nodes", 50_000, "Number of nodes to seed")
+	edges       = flag.Int("edges", 50_000, "Number of edges to seed")
+	iters       = flag.Int("iters", 200, "Iterations per benchmark")
+	workers     = flag.Int("workers", 8, "Concurrent workers for throughput tests")
+	skipSeed    = flag.Bool("skip-seed", false, "Skip data seeding (already loaded)")
+	skipSchema  = flag.Bool("skip-schema", false, "Skip schema creation (already exists)")
+	target      = flag.String("target", "loveliness", "Target database: loveliness or neo4j")
+	jsonOut     = flag.String("json-out", "", "Write JSON results to this file (empty = stdout only)")
+	seedWorkers = flag.Int("seed-workers", 8, "Parallel workers for seeding")
+	chunkSize   = flag.Int("chunk-size", 500_000, "Nodes/edges per HTTP POST chunk")
 )
 
 var cities = []string{
@@ -48,7 +51,7 @@ func nodeName(i int) string {
 // --- HTTP helpers ---
 
 var client = &http.Client{
-	Timeout: 5 * time.Minute,
+	Timeout: 30 * time.Minute,
 	Transport: &http.Transport{
 		MaxIdleConns:        128,
 		MaxIdleConnsPerHost: 128,
@@ -189,12 +192,12 @@ func mustCypher(query string) {
 // --- Benchmark infrastructure ---
 
 type benchResult struct {
-	Name       string
-	Iters      int
-	Errors     int
-	Latencies  []time.Duration
-	TotalTime  time.Duration
-	RowCounts  []int
+	Name      string
+	Iters     int
+	Errors    int
+	Latencies []time.Duration
+	TotalTime time.Duration
+	RowCounts []int
 }
 
 func (b *benchResult) P(pct float64) time.Duration {
@@ -302,47 +305,147 @@ func seed() {
 func seedLoveliness() {
 	fmt.Println("Seeding data (Loveliness)...")
 
-	fmt.Print("  schema... ")
-	mustCypher("CREATE NODE TABLE Person(name STRING, age INT64, city STRING, PRIMARY KEY(name))")
-	mustCypher("CREATE REL TABLE KNOWS(FROM Person TO Person, since INT64)")
-	fmt.Println("done")
-
-	// Bulk load nodes.
-	fmt.Printf("  %d nodes... ", *nodes)
-	t0 := time.Now()
-	var buf bytes.Buffer
-	w := csv.NewWriter(&buf)
-	_ = w.Write([]string{"name", "age", "city"})
-	for i := 0; i < *nodes; i++ {
-		_ = w.Write([]string{
-			nodeName(i),
-			strconv.Itoa(18 + rand.Intn(62)),
-			cities[rand.Intn(len(cities))],
-		})
+	if !*skipSchema {
+		fmt.Print("  schema... ")
+		mustCypherWithRetry("CREATE NODE TABLE Person(name STRING, age INT64, city STRING, PRIMARY KEY(name))")
+		mustCypherWithRetry("CREATE REL TABLE KNOWS(FROM Person TO Person, since INT64)")
+		fmt.Println("done")
+	} else {
+		fmt.Println("  schema... skipped (--skip-schema)")
 	}
-	w.Flush()
-	bulkPost("/bulk/nodes", "Person", "", "", &buf)
-	fmt.Printf("done (%s)\n", time.Since(t0).Round(time.Millisecond))
 
-	// Bulk load edges.
-	fmt.Printf("  %d edges... ", *edges)
-	t0 = time.Now()
-	buf.Reset()
-	w = csv.NewWriter(&buf)
-	_ = w.Write([]string{"from", "to", "since"})
-	for i := 0; i < *edges; i++ {
-		a := rand.Intn(*nodes)
-		b := rand.Intn(*nodes)
-		for b == a {
-			b = rand.Intn(*nodes)
-		}
-		_ = w.Write([]string{nodeName(a), nodeName(b), strconv.Itoa(2015 + rand.Intn(11))})
-	}
-	w.Flush()
-	bulkPost("/bulk/edges", "", "KNOWS", "Person", &buf)
-	fmt.Printf("done (%s)\n", time.Since(t0).Round(time.Millisecond))
-
+	seedNodes()
+	seedEdges()
 	fmt.Println()
+}
+
+func seedNodes() {
+	fmt.Printf("  %d nodes (%d workers, chunk=%d)\n", *nodes, *seedWorkers, *chunkSize)
+	t0 := time.Now()
+
+	type chunkRange struct{ start, end int }
+	ch := make(chan chunkRange, *seedWorkers*2)
+	go func() {
+		for i := 0; i < *nodes; i += *chunkSize {
+			end := i + *chunkSize
+			if end > *nodes {
+				end = *nodes
+			}
+			ch <- chunkRange{i, end}
+		}
+		close(ch)
+	}()
+
+	var loaded atomic.Int64
+	var errCount atomic.Int64
+	stop := make(chan struct{})
+	go progressPrinter("nodes", &loaded, int64(*nodes), t0, stop)
+
+	var wg sync.WaitGroup
+	for w := 0; w < *seedWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for c := range ch {
+				var buf bytes.Buffer
+				cw := csv.NewWriter(&buf)
+				_ = cw.Write([]string{"name", "age", "city"})
+				for i := c.start; i < c.end; i++ {
+					_ = cw.Write([]string{
+						nodeName(i),
+						strconv.Itoa(18 + rand.Intn(62)),
+						cities[rand.Intn(len(cities))],
+					})
+				}
+				cw.Flush()
+				if err := bulkPostRetry("/bulk/nodes", "Person", "", "", buf.Bytes()); err != nil {
+					fmt.Fprintf(os.Stderr, "\n  node chunk [%d,%d) failed: %v\n", c.start, c.end, err)
+					errCount.Add(1)
+				} else {
+					loaded.Add(int64(c.end - c.start))
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(stop)
+
+	elapsed := time.Since(t0)
+	fmt.Printf("\r  %d nodes done in %s (%.0f/sec, %d errors)          \n",
+		loaded.Load(), elapsed.Round(time.Millisecond), float64(loaded.Load())/elapsed.Seconds(), errCount.Load())
+}
+
+func seedEdges() {
+	fmt.Printf("  %d edges (%d workers, chunk=%d)\n", *edges, *seedWorkers, *chunkSize)
+	t0 := time.Now()
+
+	edgesPerWorker := (*edges + *seedWorkers - 1) / *seedWorkers
+
+	var loaded atomic.Int64
+	var errCount atomic.Int64
+	stop := make(chan struct{})
+	go progressPrinter("edges", &loaded, int64(*edges), t0, stop)
+
+	var wg sync.WaitGroup
+	for w := 0; w < *seedWorkers; w++ {
+		wg.Add(1)
+		workerEdges := edgesPerWorker
+		if w == *seedWorkers-1 {
+			workerEdges = *edges - w*edgesPerWorker
+		}
+		go func(wid, total int) {
+			defer wg.Done()
+			rng := rand.New(rand.NewSource(int64(wid)*1e9 + time.Now().UnixNano()))
+			remaining := total
+			for remaining > 0 {
+				batch := *chunkSize
+				if batch > remaining {
+					batch = remaining
+				}
+				var buf bytes.Buffer
+				cw := csv.NewWriter(&buf)
+				_ = cw.Write([]string{"from", "to", "since"})
+				for i := 0; i < batch; i++ {
+					a := rng.Intn(*nodes)
+					b := rng.Intn(*nodes)
+					for b == a {
+						b = rng.Intn(*nodes)
+					}
+					_ = cw.Write([]string{nodeName(a), nodeName(b), strconv.Itoa(2015 + rng.Intn(11))})
+				}
+				cw.Flush()
+				if err := bulkPostRetry("/bulk/edges", "", "KNOWS", "Person", buf.Bytes()); err != nil {
+					fmt.Fprintf(os.Stderr, "\n  edge chunk failed (worker %d): %v\n", wid, err)
+					errCount.Add(1)
+				} else {
+					loaded.Add(int64(batch))
+				}
+				remaining -= batch
+			}
+		}(w, workerEdges)
+	}
+	wg.Wait()
+	close(stop)
+
+	elapsed := time.Since(t0)
+	fmt.Printf("\r  %d edges done in %s (%.0f/sec, %d errors)          \n",
+		loaded.Load(), elapsed.Round(time.Millisecond), float64(loaded.Load())/elapsed.Seconds(), errCount.Load())
+}
+
+func progressPrinter(label string, loaded *atomic.Int64, total int64, start time.Time, stop <-chan struct{}) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			n := loaded.Load()
+			elapsed := time.Since(start).Seconds()
+			pct := 100.0 * float64(n) / float64(total)
+			fmt.Printf("\r  %s: %d / %d (%.1f%%, %.0f/sec)    ", label, n, total, pct, float64(n)/elapsed)
+		case <-stop:
+			return
+		}
+	}
 }
 
 func seedNeo4j() {
@@ -402,28 +505,52 @@ func seedNeo4j() {
 	fmt.Println()
 }
 
-func bulkPost(path, tableName, relTable, nodeTable string, body *bytes.Buffer) {
-	req, _ := http.NewRequest("POST", *endpoint+path, body)
-	req.Header.Set("Content-Type", "text/csv")
-	if tableName != "" {
-		req.Header.Set("X-Table", tableName)
+func bulkPostRetry(path, tableName, relTable, nodeTable string, data []byte) error {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(2 * time.Second)
+		}
+		req, _ := http.NewRequest("POST", *endpoint+path, bytes.NewReader(data))
+		req.Header.Set("Content-Type", "text/csv")
+		if tableName != "" {
+			req.Header.Set("X-Table", tableName)
+		}
+		if relTable != "" {
+			req.Header.Set("X-Rel-Table", relTable)
+			req.Header.Set("X-From-Table", nodeTable)
+			req.Header.Set("X-To-Table", nodeTable)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		b, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusMultiStatus {
+			lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(b))
+			continue
+		}
+		return nil
 	}
-	if relTable != "" {
-		req.Header.Set("X-Rel-Table", relTable)
-		req.Header.Set("X-From-Table", nodeTable)
-		req.Header.Set("X-To-Table", nodeTable)
+	return lastErr
+}
+
+func mustCypherWithRetry(query string) {
+	var lastErr error
+	for i := 0; i < 5; i++ {
+		if i > 0 {
+			time.Sleep(2 * time.Second)
+		}
+		_, _, err := cypher(query)
+		if err == nil {
+			return
+		}
+		lastErr = err
 	}
-	resp, err := client.Do(req)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "bulk load failed: %v\n", err)
-		os.Exit(1)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	b, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusMultiStatus {
-		fmt.Fprintf(os.Stderr, "bulk load HTTP %d: %s\n", resp.StatusCode, string(b))
-		os.Exit(1)
-	}
+	fmt.Fprintf(os.Stderr, "FATAL: %v\n  query: %s\n", lastErr, query)
+	os.Exit(1)
 }
 
 // --- Benchmarks ---

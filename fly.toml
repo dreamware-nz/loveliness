@@ -5,7 +5,7 @@ app = 'loveliness'
 primary_region = 'syd'
 
 [build]
-  image = "dreamwarenz/loveliness:latest"
+  dockerfile = "deploy/fly/Dockerfile"
 
 [env]
   LOVELINESS_DISCOVER = "dns"
