@@ -194,6 +194,20 @@ docker run -p 8080:8080 -p 7687:7687 dreamwarenz/loveliness
 docker compose up
 ```
 
+## MCP (LLM agents)
+
+Loveliness ships a Model Context Protocol server so any MCP-aware LLM
+client (Claude Code, Claude Desktop, Cursor, Zed) can query and write
+through typed, schema-aware tools.
+
+```bash
+# install the MCP server for Claude Code
+claude mcp add loveliness -e LOVELINESS_URL=http://localhost:8080 -- loveliness-mcp
+```
+
+Full install snippets for Claude Desktop / Zed, tool reference, readonly
+and auth patterns: [docs/mcp.md](docs/mcp.md).
+
 ## Kubernetes
 
 ```bash
