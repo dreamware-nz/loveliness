@@ -69,6 +69,59 @@ func TestSchemaCache(t *testing.T) {
 	}
 }
 
+// TestSchemaCacheDoesNotCacheErrors verifies that an error response is
+// not cached — a transient cluster failure should not lock out schema
+// lookups for the full TTL window.
+func TestSchemaCacheDoesNotCacheErrors(t *testing.T) {
+	var calls atomic.Int32
+	var fail atomic.Bool
+	fail.Store(true)
+	srv := fakeBackend(t, map[string]http.HandlerFunc{
+		"/cypher": func(w http.ResponseWriter, r *http.Request) {
+			calls.Add(1)
+			if fail.Load() {
+				http.Error(w, `{"error":{"code":"INTERNAL","message":"boom"}}`, 500)
+				return
+			}
+			buf := make([]byte, 256)
+			n, _ := r.Body.Read(buf)
+			body := string(buf[:n])
+			switch {
+			case containsAll(body, "show_tables"):
+				writeJSON(w, map[string]any{
+					"columns": []string{"name", "type"},
+					"rows":    []map[string]any{{"name": "Person", "type": "NODE"}},
+				})
+			case containsAll(body, "table_info"):
+				writeJSON(w, map[string]any{
+					"columns": []string{"name", "type", "primary key"},
+					"rows":    []map[string]any{{"name": "name", "type": "STRING", "primary key": true}},
+				})
+			}
+		},
+	})
+	t.Cleanup(srv.Close)
+
+	c := NewClient(srv.URL, "", 2*time.Second)
+	cache := newSchemaCache(30 * time.Second)
+
+	if _, err := cache.get(context.Background(), c); err == nil {
+		t.Fatal("expected error from failing backend")
+	}
+	before := calls.Load()
+	fail.Store(false)
+	out, err := cache.get(context.Background(), c)
+	if err != nil {
+		t.Fatalf("expected recovery, got error: %v", err)
+	}
+	if len(out.NodeTables) != 1 {
+		t.Fatalf("expected schema after recovery, got %+v", out)
+	}
+	if calls.Load() <= before {
+		t.Fatalf("expected backend re-fetch after error; calls before=%d after=%d", before, calls.Load())
+	}
+}
+
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	b, _ := json.Marshal(v)

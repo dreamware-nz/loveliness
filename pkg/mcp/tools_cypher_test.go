@@ -46,11 +46,41 @@ func TestIsWrite(t *testing.T) {
 		"MATCH (n) RETURN n",
 		"RETURN 1",
 		"CALL show_tables()",
+		"CALL table_info('Person')",
 		"// note\nMATCH (n) RETURN n",
 	}
 	for _, q := range reads {
 		if isWrite(q) {
 			t.Errorf("isWrite(%q) = true, want false", q)
+		}
+	}
+
+	mutatingCalls := []string{
+		"CALL drop_table('Person')",
+		"CALL DROP_TABLE('Person')",
+		"  call  export_database('/tmp/x')",
+		"/* x */ CALL create_node_table('T', 'id INT64, PRIMARY KEY (id)')",
+		"CALL alter_table_rename('A', 'B')",
+	}
+	for _, q := range mutatingCalls {
+		if !isWrite(q) {
+			t.Errorf("isWrite(%q) = false, want true (mutating CALL)", q)
+		}
+	}
+}
+
+func TestCallTarget(t *testing.T) {
+	tests := map[string]string{
+		"CALL show_tables()":             "show_tables",
+		"  call drop_table('x')":         "drop_table",
+		"/* hi */ CALL  table_info ('a')": "table_info",
+		"MATCH (n)":                       "",
+		"":                                "",
+	}
+	for q, want := range tests {
+		got := callTarget(q)
+		if got != want {
+			t.Errorf("callTarget(%q) = %q, want %q", q, got, want)
 		}
 	}
 }

@@ -39,13 +39,14 @@ type Property struct {
 // schemaCache is an in-process schema cache with a 30s TTL.
 //
 // schema() is called on almost every agent turn, and hammering the
-// cluster for unchanged data is wasteful.
+// cluster for unchanged data is wasteful. Errors are not cached — a
+// transient cluster blip should not lock out schema lookups for the
+// full TTL window.
 type schemaCache struct {
-	mu        sync.Mutex
-	ttl       time.Duration
-	cachedAt  time.Time
-	cached    *SchemaOutput
-	cachedErr error
+	mu       sync.Mutex
+	ttl      time.Duration
+	cachedAt time.Time
+	cached   *SchemaOutput
 }
 
 func newSchemaCache(ttl time.Duration) *schemaCache {
@@ -59,13 +60,15 @@ func (sc *schemaCache) get(ctx context.Context, c *Client) (*SchemaOutput, error
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 	if sc.cached != nil && time.Since(sc.cachedAt) < sc.ttl {
-		return sc.cached, sc.cachedErr
+		return sc.cached, nil
 	}
 	out, err := fetchSchema(ctx, c)
+	if err != nil {
+		return nil, err
+	}
 	sc.cached = out
-	sc.cachedErr = err
 	sc.cachedAt = time.Now()
-	return out, err
+	return out, nil
 }
 
 // fetchSchema runs CALL show_tables() and CALL table_info(<name>) per
