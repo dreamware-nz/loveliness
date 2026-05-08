@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "loveliness": {
+      "command": "loveliness-mcp"
+    }
+  }
+}

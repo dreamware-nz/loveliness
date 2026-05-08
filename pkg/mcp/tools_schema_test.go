@@ -122,6 +122,59 @@ func TestSchemaCacheDoesNotCacheErrors(t *testing.T) {
 	}
 }
 
+// TestSchemaDedupesAcrossShards verifies that show_tables() / table_info()
+// returning duplicate rows (one per shard) collapse to a single entry.
+func TestSchemaDedupesAcrossShards(t *testing.T) {
+	srv := fakeBackend(t, map[string]http.HandlerFunc{
+		"/cypher": func(w http.ResponseWriter, r *http.Request) {
+			buf := make([]byte, 256)
+			n, _ := r.Body.Read(buf)
+			body := string(buf[:n])
+			switch {
+			case containsAll(body, "show_tables"):
+				writeJSON(w, map[string]any{
+					"columns": []string{"name", "type"},
+					// Two shards each return the same row.
+					"rows": []map[string]any{
+						{"name": "Person", "type": "NODE"},
+						{"name": "Person", "type": "NODE"},
+					},
+				})
+			case containsAll(body, "table_info"):
+				writeJSON(w, map[string]any{
+					"columns": []string{"name", "type", "primary key"},
+					// Two shards each return the same property rows.
+					"rows": []map[string]any{
+						{"name": "name", "type": "STRING", "primary key": true},
+						{"name": "age", "type": "INT64", "primary key": false},
+						{"name": "name", "type": "STRING", "primary key": true},
+						{"name": "age", "type": "INT64", "primary key": false},
+					},
+				})
+			default:
+				http.Error(w, "unexpected: "+body, 400)
+			}
+		},
+	})
+	t.Cleanup(srv.Close)
+
+	c := NewClient(srv.URL, "", 2*time.Second)
+	cache := newSchemaCache(30 * time.Second)
+	out, err := cache.get(context.Background(), c)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if len(out.NodeTables) != 1 {
+		t.Fatalf("want 1 node table, got %d: %+v", len(out.NodeTables), out.NodeTables)
+	}
+	if got := len(out.NodeTables[0].Properties); got != 2 {
+		t.Fatalf("want 2 properties, got %d: %+v", got, out.NodeTables[0].Properties)
+	}
+	if out.NodeTables[0].PrimaryKey != "name" {
+		t.Fatalf("primary key not retained after dedupe: %+v", out.NodeTables[0])
+	}
+}
+
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	b, _ := json.Marshal(v)

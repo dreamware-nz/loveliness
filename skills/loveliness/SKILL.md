@@ -14,10 +14,14 @@ Read-only:
 - `schema` — node + edge tables with property names, types, and primary keys. Cached 30s.
 - `cypher_read` — run a Cypher read query. Rejects writes (`CREATE`/`MERGE`/`SET`/`DELETE`/`DROP`/`REMOVE`/`LOAD`/`COPY`/`ALTER`/`DETACH`) and mutating `CALL` procedures.
 - `cluster_status` — leader, peers, per-shard assignment, registered schema.
+- `list_databases` — databases in the cluster catalog with state, shard count, and creation time.
 
 Write (skipped when the server is launched with `--readonly`):
 
 - `cypher_write` — Cypher writes / DDL.
+- `create_node_table`, `create_edge_table`, `drop_table` — typed schema management. Builds the DDL from structured input and runs it; bust the schema cache so the next `schema` call is fresh. Prefer these over hand-built `cypher_write` DDL.
+- `create_database`, `drop_database`, `start_database`, `stop_database` — database lifecycle. Wraps `/admin/cypher`. Must hit the leader (call `cluster_status` if you get `NOT_LEADER`).
+- `admin_cypher` — escape hatch for raw admin commands.
 - `bulk_nodes`, `bulk_edges` — synchronous CSV load. Provide either inline `csv_data` or a host-readable `csv_path`.
 - `ingest_nodes`, `ingest_edges` — async CSV load. Returns a `job_id` to poll with `ingest_status`.
 
@@ -31,7 +35,9 @@ Resources (read-only blobs the client can fetch directly):
 1. **Always run `schema` first.** Tool descriptions don't tell you what tables exist. The schema cache makes this cheap (30s).
 2. **Use `params`, not string interpolation.** The `query` field accepts `$name` placeholders that map to the `params` object. Loveliness inlines parameters as escaped Cypher literals, so user-controlled strings stay safely quoted. Don't build queries with string concatenation.
 3. **Pick the right write tool:**
-   - One-off mutation: `cypher_write`.
+   - Schema (DDL): `create_node_table` / `create_edge_table` / `drop_table` over `cypher_write`. They validate identifiers and bust the schema cache.
+   - Database lifecycle: `list_databases`, `create_database`, `drop_database`. Skip if the cluster is single-DB.
+   - One-off data mutation: `cypher_write`.
    - Synchronous CSV ≤100K rows: `bulk_nodes` / `bulk_edges`.
    - Async / large CSV: `ingest_nodes` / `ingest_edges`, then poll `ingest_status` every few seconds until the job is `done`.
 4. **When something fails:** call `cluster_status` first. A `503` or "shard unavailable" error usually means a peer is down or the shard map is mid-rebalance.
@@ -49,6 +55,22 @@ Write a node:
 
 ```cypher
 CREATE (p:Person {name: $name, age: $age}) RETURN p
+```
+
+Define a node table:
+
+```
+create_node_table(table="Person", properties=[
+  {"name": "name", "type": "STRING", "primary_key": true},
+  {"name": "age",  "type": "INT64"}
+])
+```
+
+Define an edge table:
+
+```
+create_edge_table(table="KNOWS", from="Person", to="Person",
+                  properties=[{"name": "since", "type": "DATE"}])
 ```
 
 Bulk-load nodes (synchronous):

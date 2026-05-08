@@ -1,0 +1,9 @@
+{
+  "name": "loveliness",
+  "description": "MCP server + skill for the Loveliness clustered graph database",
+  "version": "0.1.0",
+  "author": {
+    "name": "Dreamware"
+  },
+  "skills": "./skills/"
+}
