@@ -201,9 +201,18 @@ client (Claude Code, Claude Desktop, Cursor, Zed) can query and write
 through typed, schema-aware tools.
 
 ```bash
-# install the MCP server for Claude Code
+# one-shot: build the binary, register it with Claude, install the skill
+make install-mcp
+
+# or, manually:
 claude mcp add loveliness -e LOVELINESS_URL=http://localhost:8080 -- loveliness-mcp
 ```
+
+`make install-mcp` runs `scripts/install-mcp.sh`, which builds
+`loveliness-mcp`, runs `claude mcp add` (or prints the manual JSON if
+`claude` isn't on PATH), and links the bundled skill at
+`skills/loveliness/SKILL.md` into `~/.claude/skills/loveliness/` so
+agents get prose guidance on how to use the tools.
 
 Full install snippets for Claude Desktop / Zed, tool reference, readonly
 and auth patterns: [docs/mcp.md](docs/mcp.md).

@@ -1,4 +1,4 @@
-.PHONY: build test run clean docker mcp
+.PHONY: build test run clean docker mcp install-mcp
 
 BINARY := loveliness
 MCP_BINARY := loveliness-mcp
@@ -13,6 +13,12 @@ build:
 # when working on pkg/mcp without touching the main server.
 mcp:
 	CGO_ENABLED=0 go build -o $(MCP_BINARY) $(MCP_PKG)
+
+# install-mcp builds loveliness-mcp into $GOBIN, registers it with the
+# `claude` CLI if present, and links the SKILL into ~/.claude/skills/.
+# Pass FLAGS=... to forward args to the installer (e.g. --no-skill).
+install-mcp:
+	./scripts/install-mcp.sh $(FLAGS)
 
 test:
 	go test ./pkg/... -v -count=1

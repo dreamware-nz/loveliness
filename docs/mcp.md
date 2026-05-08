@@ -11,7 +11,27 @@ running cluster via HTTP, and exposes a small opinionated tool surface.
 
 ## Install
 
-Two equivalent ways to run it:
+### One-shot installer
+
+```bash
+make install-mcp
+```
+
+This runs `scripts/install-mcp.sh`, which:
+
+1. Builds `loveliness-mcp` into `$GOBIN` (or `$(go env GOPATH)/bin`).
+2. Registers it with `claude mcp add` if the `claude` CLI is on PATH;
+   otherwise prints the manual `~/.claude.json` snippet.
+3. Symlinks the bundled skill at `skills/loveliness/SKILL.md` into
+   `~/.claude/skills/loveliness/` so Claude Code gets prose guidance
+   on how to use the tools.
+
+Honors `LOVELINESS_URL` and `LOVELINESS_TOKEN` from the environment.
+Pass `FLAGS=--no-skill` or `FLAGS=--no-register` to skip steps.
+
+### Manual install
+
+Two equivalent ways to run the server:
 
 ```bash
 # standalone binary (shipped in releases alongside `loveliness`)
