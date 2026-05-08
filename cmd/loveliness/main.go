@@ -68,6 +68,9 @@ func main() {
 		case "mcp":
 			runMCP(os.Args[2:])
 			return
+		case "restore":
+			runRestore(os.Args[2:])
+			return
 		case "help", "--help", "-h":
 			printUsage()
 			return
