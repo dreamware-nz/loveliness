@@ -198,6 +198,23 @@ func (c *Client) IngestStatus(ctx context.Context, jobID string) (IngestJob, err
 	return out, nil
 }
 
+// AdminCypher executes a database admin command via /admin/cypher.
+//
+// The endpoint accepts Cypher-shaped admin commands (CREATE/STOP/START/DROP
+// DATABASE, SHOW DATABASES) and rejects everything else. The response is a
+// command-specific JSON object decoded into a generic map.
+func (c *Client) AdminCypher(ctx context.Context, query string) (map[string]any, error) {
+	body, err := c.post(ctx, "/admin/cypher", "text/plain", strings.NewReader(query), nil)
+	if err != nil {
+		return nil, err
+	}
+	var out map[string]any
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("admin/cypher: decode response: %w", err)
+	}
+	return out, nil
+}
+
 // HTTPError represents a non-2xx HTTP response from Loveliness.
 type HTTPError struct {
 	Status int

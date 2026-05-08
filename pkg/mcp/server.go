@@ -51,7 +51,9 @@ func New(opts Options) *Server {
 	registerCypherTools(sdk, client, opts.Readonly)
 	registerSchemaTool(sdk, client, cache)
 	registerClusterTool(sdk, client)
+	registerAdminTools(sdk, client, opts.Readonly)
 	if !opts.Readonly {
+		registerDDLTools(sdk, client, cache)
 		registerBulkTools(sdk, client)
 		registerIngestTools(sdk, client)
 	}

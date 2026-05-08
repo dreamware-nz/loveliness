@@ -147,10 +147,63 @@ Same input shape as `cypher_read`, no keyword gate. Registered only
 when `--readonly=false`. Clients that want per-tool gating (Claude
 Code's `/permissions`) can opt-in this tool specifically.
 
+### `create_node_table` / `create_edge_table` / `drop_table`
+
+Typed wrappers over the equivalent `CREATE NODE TABLE` / `CREATE REL
+TABLE` / `DROP TABLE` Cypher DDL. Build the DDL from a structured
+input — table name, property list with types and primary key flags —
+and bust the schema cache on success so a follow-up `schema` call is
+fresh. Registered only when `--readonly=false`.
+
+```jsonc
+// create_node_table
+{
+  "table": "Person",
+  "properties": [
+    {"name": "name", "type": "STRING", "primary_key": true},
+    {"name": "age",  "type": "INT64"}
+  ]
+}
+
+// create_edge_table
+{
+  "table": "KNOWS",
+  "from":  "Person",
+  "to":    "Person",
+  "properties": [{"name": "since", "type": "DATE"}]
+}
+```
+
+Identifiers (table, property names, source/destination) are required
+to match `[A-Za-z_][A-Za-z0-9_]*`. Property types pass through
+permissive char-class validation; the cluster does the real type
+check. Edge tables cannot have primary keys.
+
+### `list_databases` / `create_database` / `drop_database` / `start_database` / `stop_database`
+
+Database catalog management. Wraps `/admin/cypher`. Must hit the
+leader — if you get `NOT_LEADER`, check `cluster_status`.
+`list_databases` is read-only and always registered; the rest are
+gated by `--readonly`.
+
+```jsonc
+// create_database
+{ "name": "scratch", "shard_count": 4 }
+
+// list_databases  → { "databases": [{ "name": "...", "state": "running", ... }] }
+```
+
+### `admin_cypher`
+
+Escape hatch — sends a raw admin command (CREATE/STOP/START/DROP
+DATABASE, SHOW DATABASES) to `/admin/cypher`. Prefer the typed tools.
+
 ### `schema`
 
 Return node and edge tables with property names and types. Cached for
 30 seconds in-process to avoid hammering the cluster on every turn.
+Cache is invalidated automatically when `create_node_table`,
+`create_edge_table`, or `drop_table` succeed.
 
 ```jsonc
 {
@@ -200,9 +253,12 @@ Two read-only resources, same payload as the equivalent tools:
 ## Readonly pattern
 
 Run with `--readonly` (or `LOVELINESS_READONLY=true`) to only register
-`cypher_read`, `schema`, and `cluster_status`. Use this for CI
-analysis agents, or when the agent should be allowed to explore the
-graph but not mutate it.
+the read-only tools (`cypher_read`, `schema`, `cluster_status`,
+`list_databases`) and read-only resources. Mutating tools
+(`cypher_write`, `create_*`, `drop_*`, `start_*`, `stop_*`,
+`bulk_*`, `ingest_*`, `admin_cypher`) are not registered. Use this
+for CI analysis agents, or when the agent should be allowed to
+explore the graph but not mutate it.
 
 ```bash
 loveliness-mcp --readonly --url https://prod-cluster.internal

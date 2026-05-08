@@ -71,6 +71,16 @@ func (sc *schemaCache) get(ctx context.Context, c *Client) (*SchemaOutput, error
 	return out, nil
 }
 
+// invalidate drops the cached schema so the next get() refetches.
+// DDL tools call this after a successful CREATE/DROP TABLE so a
+// follow-up `schema` call reflects the change immediately.
+func (sc *schemaCache) invalidate() {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	sc.cached = nil
+	sc.cachedAt = time.Time{}
+}
+
 // fetchSchema runs CALL show_tables() and CALL table_info(<name>) per
 // table, structuring the result.
 func fetchSchema(ctx context.Context, c *Client) (*SchemaOutput, error) {
