@@ -42,6 +42,9 @@ func main() {
 		case "query":
 			runQuery(os.Args[2:])
 			return
+		case "mcp":
+			runMCP(os.Args[2:])
+			return
 		case "help", "--help", "-h":
 			printUsage()
 			return

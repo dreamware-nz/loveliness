@@ -17,6 +17,22 @@ builds:
     ldflags:
       - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}}
 
+  # MCP server — pure-Go, no CGO; ships for linux + darwin on both archs
+  # so Claude Desktop / Claude Code / Zed can install it locally.
+  - id: loveliness-mcp
+    main: ./cmd/loveliness-mcp
+    binary: loveliness-mcp
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}}
+
 archives:
   - id: default
     format: tar.gz

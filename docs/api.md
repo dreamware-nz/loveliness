@@ -2,6 +2,9 @@
 
 All endpoints are on the HTTP port (default `:8080`).
 
+> For LLM agents, prefer the [MCP server](mcp.md) — it wraps these
+> endpoints in a typed, schema-aware tool surface.
+
 ## Query Endpoint
 
 `POST /cypher` — send raw Cypher as the request body, get JSON results back.

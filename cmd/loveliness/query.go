@@ -16,6 +16,7 @@ Commands:
   serve          Start the server (default if no command given)
   up <N>         Start N local nodes for development
   query <cypher> Run a Cypher query against a running server
+  mcp            Run the MCP server for LLM agents (stdio)
   help           Show this help
   version        Show version
 
