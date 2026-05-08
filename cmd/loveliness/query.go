@@ -17,6 +17,7 @@ Commands:
   up <N>         Start N local nodes for development
   query <cypher> Run a Cypher query against a running server
   mcp            Run the MCP server for LLM agents (stdio)
+  restore        Restore from a backup archive into the data dir (server must be stopped)
   help           Show this help
   version        Show version
 
@@ -28,6 +29,8 @@ Examples:
   loveliness up 3                             # 3-node local cluster
   loveliness query "MATCH (n) RETURN count(n)"
   loveliness query "CREATE (p:Person {name: 'Alice', age: 30})"
+  loveliness restore --file backup.tar.gz --data-dir ./data
+  loveliness restore --key backup-20260509-120000.tar.gz   # uses S3/local store from env
 `)
 }
 

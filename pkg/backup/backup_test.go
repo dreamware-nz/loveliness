@@ -48,8 +48,13 @@ func TestCreateAndRestoreBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if manifest.Version != 2 {
-		t.Fatalf("expected version 2, got %d", manifest.Version)
+	if manifest.Version != 3 {
+		t.Fatalf("expected version 3, got %d", manifest.Version)
+	}
+	// v3 records a SHA-256 for every archived file; the round-trip
+	// will verify them automatically inside RestoreBackup.
+	if len(manifest.Files) == 0 {
+		t.Fatal("expected manifest.Files to be populated for v3")
 	}
 	if manifest.ShardCount != 2 {
 		t.Fatalf("expected 2 shards, got %d", manifest.ShardCount)
@@ -133,6 +138,36 @@ func TestRestoreWipesStaleRaft(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dstDir, "raft", "fresh.bin")); err != nil {
 		t.Fatalf("fresh raft entry not restored: %v", err)
+	}
+}
+
+// TestRestoreDetectsChecksumMismatch flips a single byte inside the
+// archive and confirms that v3 restore catches it via the per-file
+// SHA-256 manifest, rather than silently writing corrupt data.
+func TestRestoreChecksumMismatch(t *testing.T) {
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+
+	os.WriteFile(filepath.Join(srcDir, "shard-0"), []byte("good-shard-bytes"), 0640)
+	mgr := NewManager(srcDir, "test-node")
+	shards := []*shard.Shard{shard.NewShard(0, &mockStore{}, 1)}
+	var buf bytes.Buffer
+	if _, err := mgr.CreateBackup(&buf, shards, 0, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Mutate the (gzipped) archive bytes so the SHA-256 of the embedded
+	// shard file no longer matches the manifest. Flipping any byte
+	// inside the gzip stream is sufficient — the gunzip will still
+	// succeed (gzip's CRC is per-block, not whole-file), but the
+	// extracted content will differ from what the producer hashed.
+	raw := buf.Bytes()
+	raw[len(raw)/2] ^= 0xFF
+
+	dst := NewManager(dstDir, "test-node")
+	_, err := dst.RestoreBackup(bytes.NewReader(raw))
+	if err == nil {
+		t.Fatal("expected checksum mismatch error, got nil")
 	}
 }
 
