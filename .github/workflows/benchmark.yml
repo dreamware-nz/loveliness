@@ -33,11 +33,13 @@ jobs:
           GOFLAGS: -modcacherw
 
       - name: Install LadybugDB shared library
+        # Pin to v0.13.1 to match go-ladybug in go.mod, and preserve
+        # symlinks when copying — `liblbug.so` is a symlink to
+        # `liblbug.so.0` inside the tarball.
         run: |
-          gh release download --repo LadybugDB/ladybug --pattern "liblbug-linux-x86_64.tar.gz" --dir /tmp/lbug --clobber
-          tar xzf /tmp/lbug/liblbug-linux-x86_64.tar.gz -C /tmp/lbug liblbug.so
-          sudo cp /tmp/lbug/liblbug.so /usr/local/lib/
-          sudo ln -sf /usr/local/lib/liblbug.so /usr/local/lib/liblbug.so.0
+          gh release download v0.13.1 --repo LadybugDB/ladybug --pattern "liblbug-linux-x86_64.tar.gz" --dir /tmp/lbug --clobber
+          tar xzf /tmp/lbug/liblbug-linux-x86_64.tar.gz -C /tmp/lbug
+          sudo cp -P /tmp/lbug/liblbug.so* /usr/local/lib/
           sudo ldconfig
           LBUG_DIR=$(go env GOMODCACHE)/github.com/\!ladybug\!d\!b/go-ladybug@v0.13.1/lib/dynamic/linux-amd64
           mkdir -p "$LBUG_DIR"

@@ -1,15 +1,27 @@
 FROM golang:1.25-bookworm AS builder
+ARG TARGETARCH
 
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Download LadybugDB shared library into the go module's expected path.
-RUN LBUG_MOD=$(go env GOMODCACHE)/github.com/\!ladybug\!d\!b/go-ladybug@v0.13.1 && \
-    mkdir -p "$LBUG_MOD/lib/dynamic/linux-amd64" /tmp/lbug && \
-    curl -sL https://github.com/LadybugDB/ladybug/releases/latest/download/liblbug-linux-x86_64.tar.gz | tar xz -C /tmp/lbug && \
-    (cp /tmp/lbug/lib/* "$LBUG_MOD/lib/dynamic/linux-amd64/" 2>/dev/null || cp /tmp/lbug/*.so "$LBUG_MOD/lib/dynamic/linux-amd64/" 2>/dev/null || true) && \
-    ls -la "$LBUG_MOD/lib/dynamic/linux-amd64/"
+# Download the LadybugDB shared library matching the target arch.
+# Pin to v0.13.1 — must match the go-ladybug module version in go.mod
+# or CGo will link against an ABI it doesn't understand at runtime.
+# Use `cp -a` to preserve symlinks (liblbug.so → liblbug.so.0).
+RUN set -eux; \
+    case "$TARGETARCH" in \
+      amd64) LBUG_ARCH="linux-x86_64";   GO_ARCH="linux-amd64" ;; \
+      arm64) LBUG_ARCH="linux-aarch64";  GO_ARCH="linux-arm64" ;; \
+      *) echo "unsupported TARGETARCH=$TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    LBUG_MOD=$(go env GOMODCACHE)/github.com/\!ladybug\!d\!b/go-ladybug@v0.13.1; \
+    mkdir -p "$LBUG_MOD/lib/dynamic/$GO_ARCH" /tmp/lbug; \
+    curl -fsSL "https://github.com/LadybugDB/ladybug/releases/download/v0.13.1/liblbug-${LBUG_ARCH}.tar.gz" | tar xz -C /tmp/lbug; \
+    cp -a /tmp/lbug/liblbug.so* "$LBUG_MOD/lib/dynamic/$GO_ARCH/"; \
+    cp -a /tmp/lbug/liblbug.so* /usr/local/lib/; \
+    ldconfig; \
+    ls -la "$LBUG_MOD/lib/dynamic/$GO_ARCH/"
 
 COPY . .
 RUN CGO_ENABLED=1 go build -o /loveliness ./cmd/loveliness
@@ -18,8 +30,10 @@ RUN CGO_ENABLED=1 go build -o /loveliness-benchmark ./cmd/benchmark
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
 
-# Copy LadybugDB shared library from builder.
-COPY --from=builder /go/pkg/mod/github.com/!ladybug!d!b/go-ladybug@v0.13.1/lib/dynamic/linux-amd64/liblbug* /usr/local/lib/
+# Copy LadybugDB shared library from builder. The builder stage stages
+# the arch-correct .so under /usr/local/lib so this COPY works for any
+# target arch without hardcoding linux-amd64 / linux-arm64.
+COPY --from=builder /usr/local/lib/liblbug.so* /usr/local/lib/
 RUN ldconfig
 
 COPY --from=builder /loveliness /usr/local/bin/loveliness
