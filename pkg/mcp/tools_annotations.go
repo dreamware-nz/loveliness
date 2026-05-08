@@ -181,12 +181,7 @@ func registerAnnotationTools(s *mcp.Server, c *Client, cache *schemaCache, reado
 			Extra:       in.Extra,
 		}
 		for _, ex := range in.Examples {
-			a.Examples = append(a.Examples, AnnotationExample{
-				Title:       ex.Title,
-				Query:       ex.Query,
-				Params:      ex.Params,
-				Explanation: ex.Explanation,
-			})
+			a.Examples = append(a.Examples, AnnotationExample(ex))
 		}
 		if err := c.SetAnnotation(ctx, a); err != nil {
 			return toolError(err), AnnotationOutput{}, nil

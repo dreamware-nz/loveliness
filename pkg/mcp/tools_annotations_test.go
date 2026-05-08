@@ -44,7 +44,7 @@ func TestClientAnnotationsRoundTrip(t *testing.T) {
 				mu.Unlock()
 				writeJSON(w, map[string]any{"status": "ok", "target": a.Target})
 			default:
-				http.Error(w, "bad method", 405)
+				http.Error(w, "bad method", http.StatusMethodNotAllowed)
 			}
 		},
 		"/annotations/": func(w http.ResponseWriter, r *http.Request) {
@@ -65,7 +65,7 @@ func TestClientAnnotationsRoundTrip(t *testing.T) {
 				mu.Unlock()
 				writeJSON(w, map[string]string{"status": "deleted", "target": target})
 			default:
-				http.Error(w, "bad method", 405)
+				http.Error(w, "bad method", http.StatusMethodNotAllowed)
 			}
 		},
 	})

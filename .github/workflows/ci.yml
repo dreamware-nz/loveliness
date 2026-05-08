@@ -25,11 +25,16 @@ jobs:
           GOFLAGS: -modcacherw
 
       - name: Install LadybugDB shared library
+        # Pin to v0.13.1 to match the go-ladybug module in go.mod —
+        # the upstream "latest" release tracks a different ABI.
+        # The tarball bundles `liblbug.so` as a symlink to `liblbug.so.0`,
+        # so we extract the whole archive and use `cp -P` to preserve
+        # symlinks; copying just `liblbug.so` would dereference the
+        # symlink and fail when its target hasn't been extracted.
         run: |
-          gh release download --repo LadybugDB/ladybug --pattern "liblbug-linux-x86_64.tar.gz" --dir /tmp/lbug --clobber
-          tar xzf /tmp/lbug/liblbug-linux-x86_64.tar.gz -C /tmp/lbug liblbug.so
-          sudo cp /tmp/lbug/liblbug.so /usr/local/lib/
-          sudo ln -sf /usr/local/lib/liblbug.so /usr/local/lib/liblbug.so.0
+          gh release download v0.13.1 --repo LadybugDB/ladybug --pattern "liblbug-linux-x86_64.tar.gz" --dir /tmp/lbug --clobber
+          tar xzf /tmp/lbug/liblbug-linux-x86_64.tar.gz -C /tmp/lbug
+          sudo cp -P /tmp/lbug/liblbug.so* /usr/local/lib/
           sudo ldconfig
           LBUG_DIR=$(go env GOMODCACHE)/github.com/\!ladybug\!d\!b/go-ladybug@v0.13.1/lib/dynamic/linux-amd64
           mkdir -p "$LBUG_DIR"
@@ -61,11 +66,16 @@ jobs:
           GOFLAGS: -modcacherw
 
       - name: Install LadybugDB shared library
+        # Pin to v0.13.1 to match the go-ladybug module in go.mod —
+        # the upstream "latest" release tracks a different ABI.
+        # The tarball bundles `liblbug.so` as a symlink to `liblbug.so.0`,
+        # so we extract the whole archive and use `cp -P` to preserve
+        # symlinks; copying just `liblbug.so` would dereference the
+        # symlink and fail when its target hasn't been extracted.
         run: |
-          gh release download --repo LadybugDB/ladybug --pattern "liblbug-linux-x86_64.tar.gz" --dir /tmp/lbug --clobber
-          tar xzf /tmp/lbug/liblbug-linux-x86_64.tar.gz -C /tmp/lbug liblbug.so
-          sudo cp /tmp/lbug/liblbug.so /usr/local/lib/
-          sudo ln -sf /usr/local/lib/liblbug.so /usr/local/lib/liblbug.so.0
+          gh release download v0.13.1 --repo LadybugDB/ladybug --pattern "liblbug-linux-x86_64.tar.gz" --dir /tmp/lbug --clobber
+          tar xzf /tmp/lbug/liblbug-linux-x86_64.tar.gz -C /tmp/lbug
+          sudo cp -P /tmp/lbug/liblbug.so* /usr/local/lib/
           sudo ldconfig
           LBUG_DIR=$(go env GOMODCACHE)/github.com/\!ladybug\!d\!b/go-ladybug@v0.13.1/lib/dynamic/linux-amd64
           mkdir -p "$LBUG_DIR"

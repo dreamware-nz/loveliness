@@ -251,7 +251,7 @@ func (c *Catalog) ShardOwner(shardID int) string {
 	return ""
 }
 
-// Snapshot returns a serializable copy of the catalog state.
+// CatalogSnapshot is a serializable copy of the catalog state.
 type CatalogSnapshot struct {
 	Databases   map[string]*Database `json:"databases"`
 	NextShardID int                  `json:"next_shard_id"`
