@@ -243,6 +243,58 @@ errors).
 Return leader, peer list, per-shard assignment, and registered schema
 from `GET /cluster`. Always registered.
 
+### `list_annotations` / `get_annotation` / `set_annotation` / `delete_annotation` / `describe_schema`
+
+Schema annotations are first-class state in Loveliness, persisted
+through Raft alongside the shard map and database catalog. They hold
+the natural-language descriptions and parameterized query examples
+that bridge LLM intent to Cypher.
+
+Targets follow a path-shaped scheme:
+
+- `cluster`
+- `db:<name>`
+- `db:<name>/table:<name>` and `db:<name>/edge:<name>`
+- `db:<name>/table:<name>/property:<name>` and edge equivalent
+- `db:<name>/saved_query:<id>`
+
+`describe_schema` is the primary read tool — it joins the schema with
+all annotations for a database in one round trip:
+
+```jsonc
+{
+  "cluster":  { "target": "cluster",         "description": "..." },
+  "database": { "target": "db:default",      "description": "..." },
+  "node_tables": [
+    { "node_table": { "name": "Person", ... },
+      "annotation": { "description": "people", "examples": [...] } }
+  ],
+  "edge_tables": [...]
+}
+```
+
+`set_annotation` is gated by the same write protections as `cypher_write`
+(`--readonly` skips it). Latest-wins semantics: a SET replaces the
+entire body. The cluster auto-initializes the registry on first write.
+
+```jsonc
+// set_annotation
+{
+  "target": "db:default/table:Person",
+  "description": "People in the social graph. PII.",
+  "examples": [
+    { "title": "by name",
+      "query":  "MATCH (p:Person {name: $name}) RETURN p",
+      "params": {"name": "Alice"} }
+  ],
+  "tags": ["core", "pii"]
+}
+```
+
+The HTTP shape is `GET/POST/DELETE /annotations[/{target}]` with the
+target encoded directly into the path (slashes preserved by the
+`{target...}` route).
+
 ## Resources
 
 Two read-only resources, same payload as the equivalent tools:
@@ -254,11 +306,13 @@ Two read-only resources, same payload as the equivalent tools:
 
 Run with `--readonly` (or `LOVELINESS_READONLY=true`) to only register
 the read-only tools (`cypher_read`, `schema`, `cluster_status`,
-`list_databases`) and read-only resources. Mutating tools
+`list_databases`, `describe_schema`, `list_annotations`,
+`get_annotation`) and read-only resources. Mutating tools
 (`cypher_write`, `create_*`, `drop_*`, `start_*`, `stop_*`,
-`bulk_*`, `ingest_*`, `admin_cypher`) are not registered. Use this
-for CI analysis agents, or when the agent should be allowed to
-explore the graph but not mutate it.
+`bulk_*`, `ingest_*`, `admin_cypher`, `set_annotation`,
+`delete_annotation`) are not registered. Use this for CI analysis
+agents, or when the agent should be allowed to explore the graph but
+not mutate it.
 
 ```bash
 loveliness-mcp --readonly --url https://prod-cluster.internal

@@ -94,6 +94,7 @@ func (s *Server) Handler() http.Handler {
 	protected.HandleFunc("POST /join-token", s.handleJoinToken)
 	s.registerDRRoutes(protected)
 	s.registerIngestRoutes(protected)
+	s.registerAnnotationRoutes(protected)
 
 	// Multi-database scoped routes.
 	protected.HandleFunc("POST /db/{name}/cypher", s.handleCypherScoped)

@@ -16,6 +16,7 @@ type Scheduler struct {
 	store    BackupStore
 	shards   []*shard.Shard
 	walSeqFn func() uint64 // returns current WAL sequence
+	snap     Snapshotter   // optional — forces a Raft snapshot before each backup
 
 	interval  time.Duration
 	retention int // number of backups to keep
@@ -24,8 +25,10 @@ type Scheduler struct {
 	wg     sync.WaitGroup
 }
 
-// NewScheduler creates a backup scheduler.
-func NewScheduler(mgr *Manager, store BackupStore, shards []*shard.Shard, walSeqFn func() uint64, interval time.Duration, retention int) *Scheduler {
+// NewScheduler creates a backup scheduler. snap may be nil; when set,
+// each backup forces a Raft FSM snapshot before archiving so the
+// archived raft/ directory is current.
+func NewScheduler(mgr *Manager, store BackupStore, shards []*shard.Shard, walSeqFn func() uint64, snap Snapshotter, interval time.Duration, retention int) *Scheduler {
 	if retention < 1 {
 		retention = 3
 	}
@@ -34,6 +37,7 @@ func NewScheduler(mgr *Manager, store BackupStore, shards []*shard.Shard, walSeq
 		store:     store,
 		shards:    shards,
 		walSeqFn:  walSeqFn,
+		snap:      snap,
 		interval:  interval,
 		retention: retention,
 		stopCh:    make(chan struct{}),
@@ -76,7 +80,7 @@ func (s *Scheduler) runBackup() {
 	walSeq := s.walSeqFn()
 
 	var buf bytes.Buffer
-	manifest, err := s.mgr.CreateBackup(&buf, s.shards, walSeq)
+	manifest, err := s.mgr.CreateBackup(&buf, s.shards, walSeq, s.snap)
 	if err != nil {
 		slog.Error("scheduled backup failed", "err", err)
 		return
@@ -126,7 +130,7 @@ func (s *Scheduler) RunNow() (*Manifest, string, error) {
 	walSeq := s.walSeqFn()
 
 	var buf bytes.Buffer
-	manifest, err := s.mgr.CreateBackup(&buf, s.shards, walSeq)
+	manifest, err := s.mgr.CreateBackup(&buf, s.shards, walSeq, s.snap)
 	if err != nil {
 		return nil, "", err
 	}

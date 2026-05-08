@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/hashicorp/raft"
+	"github.com/johnjansen/loveliness/pkg/annotations"
 	"github.com/johnjansen/loveliness/pkg/catalog"
 )
 
@@ -49,6 +50,8 @@ const (
 	CmdStopDatabase
 	CmdStartDatabase
 	CmdDeleteDatabase
+	CmdSetAnnotation
+	CmdDeleteAnnotation
 )
 
 // Command is a Raft log entry.
@@ -102,6 +105,16 @@ type DatabaseNamePayload struct {
 	Name string `json:"name"`
 }
 
+// SetAnnotationPayload is the data for CmdSetAnnotation.
+type SetAnnotationPayload struct {
+	Annotation annotations.Annotation `json:"annotation"`
+}
+
+// DeleteAnnotationPayload is the data for CmdDeleteAnnotation.
+type DeleteAnnotationPayload struct {
+	Target string `json:"target"`
+}
+
 // ShardsForNode returns the shard IDs assigned to a node (as primary or replica).
 func (sm ShardMap) ShardsForNode(nodeID string) []int {
 	var ids []int
@@ -144,6 +157,7 @@ type FSM struct {
 	mu             sync.RWMutex
 	shardMap       ShardMap
 	catalog        *catalog.Catalog
+	annotations    *annotations.Registry
 	schemaCallback SchemaCallback
 }
 
@@ -155,13 +169,20 @@ func NewFSM() *FSM {
 			Nodes:       make(map[string]NodeInfo),
 			SchemaKeys:  make(map[string]string),
 		},
-		catalog: catalog.NewCatalog(),
+		catalog:     catalog.NewCatalog(),
+		annotations: annotations.New(),
 	}
 }
 
 // GetCatalog returns the catalog for reading database metadata.
 func (f *FSM) GetCatalog() *catalog.Catalog {
 	return f.catalog
+}
+
+// GetAnnotations returns the annotation registry for reading.
+// Writes go through the FSM via Apply.
+func (f *FSM) GetAnnotations() *annotations.Registry {
+	return f.annotations
 }
 
 // SetSchemaCallback sets a callback that fires whenever schema state changes.
@@ -307,6 +328,21 @@ func (f *FSM) Apply(log *raft.Log) interface{} {
 		}
 		return f.catalog.DeleteDatabase(p.Name)
 
+	case CmdSetAnnotation:
+		var p SetAnnotationPayload
+		if err := json.Unmarshal(cmd.Payload, &p); err != nil {
+			return fmt.Errorf("unmarshal set annotation: %w", err)
+		}
+		return f.annotations.Set(p.Annotation)
+
+	case CmdDeleteAnnotation:
+		var p DeleteAnnotationPayload
+		if err := json.Unmarshal(cmd.Payload, &p); err != nil {
+			return fmt.Errorf("unmarshal delete annotation: %w", err)
+		}
+		f.annotations.Delete(p.Target)
+		return nil
+
 	default:
 		return fmt.Errorf("unknown command type: %d", cmd.Type)
 	}
@@ -314,8 +350,9 @@ func (f *FSM) Apply(log *raft.Log) interface{} {
 
 // fsmState is the combined state serialized in Raft snapshots.
 type fsmState struct {
-	ShardMap ShardMap                `json:"shard_map"`
-	Catalog  catalog.CatalogSnapshot `json:"catalog"`
+	ShardMap    ShardMap                          `json:"shard_map"`
+	Catalog     catalog.CatalogSnapshot           `json:"catalog"`
+	Annotations map[string]annotations.Annotation `json:"annotations,omitempty"`
 }
 
 // Snapshot returns a snapshot of the FSM state for Raft snapshotting.
@@ -323,8 +360,9 @@ func (f *FSM) Snapshot() (raft.FSMSnapshot, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	state := fsmState{
-		ShardMap: f.shardMap,
-		Catalog:  f.catalog.Snapshot(),
+		ShardMap:    f.shardMap,
+		Catalog:     f.catalog.Snapshot(),
+		Annotations: f.annotations.Snapshot(),
 	}
 	data, err := json.Marshal(state)
 	if err != nil {
@@ -371,6 +409,9 @@ func (f *FSM) Restore(rc io.ReadCloser) error {
 	if state.Catalog.Databases != nil {
 		f.catalog.Restore(state.Catalog)
 	}
+
+	// Annotations are optional in older snapshots — Restore handles nil.
+	f.annotations.Restore(state.Annotations)
 
 	f.notifySchemaChange()
 	return nil

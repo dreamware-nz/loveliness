@@ -202,6 +202,7 @@ func main() {
 		BackupMgr:    backupMgr,
 		WAL:          wal,
 		ReplicaState: replication.NewReplicaState(),
+		Snapshotter:  c, // *cluster.Cluster — forces a Raft snapshot before /backup archives
 	}
 
 	if cfg.S3Bucket != "" {
@@ -231,6 +232,7 @@ func main() {
 		sched := backup.NewScheduler(
 			backupMgr, dr.BackupStore, shards,
 			func() uint64 { return wal.LastSequence() },
+			c, // *cluster.Cluster implements backup.Snapshotter
 			time.Duration(cfg.BackupIntervalMin)*time.Minute,
 			cfg.BackupRetention,
 		)

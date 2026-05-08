@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/hashicorp/raft"
+	"github.com/johnjansen/loveliness/pkg/annotations"
 )
 
 func applyCommand(fsm *FSM, cmd Command) interface{} {
@@ -410,6 +411,68 @@ func TestShardMap_PrimaryForShard(t *testing.T) {
 	}
 	if p := sm.PrimaryForShard(99); p != "" {
 		t.Errorf("expected empty for unknown shard, got %s", p)
+	}
+}
+
+func TestFSM_SetAndDeleteAnnotation(t *testing.T) {
+	fsm := NewFSM()
+
+	a := annotations.Annotation{
+		Target:      "db:default/table:Person",
+		Description: "people",
+		Examples: []annotations.QueryExample{
+			{Title: "by name", Query: "MATCH (p:Person {name: $n}) RETURN p"},
+		},
+	}
+	payload, _ := json.Marshal(SetAnnotationPayload{Annotation: a})
+	if result := applyCommand(fsm, Command{Type: CmdSetAnnotation, Payload: payload}); result != nil {
+		t.Fatalf("set: %v", result)
+	}
+
+	got, ok := fsm.GetAnnotations().Get(a.Target)
+	if !ok || got.Description != "people" {
+		t.Fatalf("annotation not stored: %+v ok=%v", got, ok)
+	}
+
+	payload, _ = json.Marshal(DeleteAnnotationPayload{Target: a.Target})
+	if result := applyCommand(fsm, Command{Type: CmdDeleteAnnotation, Payload: payload}); result != nil {
+		t.Fatalf("delete: %v", result)
+	}
+	if _, ok := fsm.GetAnnotations().Get(a.Target); ok {
+		t.Fatal("annotation still present after delete")
+	}
+}
+
+func TestFSM_AnnotationsSnapshotRestore(t *testing.T) {
+	fsm := NewFSM()
+
+	for _, target := range []string{"cluster", "db:default", "db:default/table:Person"} {
+		payload, _ := json.Marshal(SetAnnotationPayload{
+			Annotation: annotations.Annotation{Target: target, Description: target},
+		})
+		if r := applyCommand(fsm, Command{Type: CmdSetAnnotation, Payload: payload}); r != nil {
+			t.Fatalf("seed %s: %v", target, r)
+		}
+	}
+
+	snap, err := fsm.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := &mockSnapshotSink{}
+	if err := snap.Persist(sink); err != nil {
+		t.Fatal(err)
+	}
+
+	fsm2 := NewFSM()
+	if err := fsm2.Restore(sink.Reader()); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(fsm2.GetAnnotations().List("")); got != 3 {
+		t.Fatalf("expected 3 annotations restored, got %d", got)
+	}
+	if a, ok := fsm2.GetAnnotations().Get("db:default/table:Person"); !ok || a.Description != "db:default/table:Person" {
+		t.Fatalf("annotation body lost: %+v ok=%v", a, ok)
 	}
 }
 

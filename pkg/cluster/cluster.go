@@ -10,6 +10,7 @@ import (
 
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
+	"github.com/johnjansen/loveliness/pkg/annotations"
 	"github.com/johnjansen/loveliness/pkg/catalog"
 )
 
@@ -187,6 +188,32 @@ func (c *Cluster) GetSchema() map[string]string {
 	return c.fsm.GetShardMap().SchemaKeys
 }
 
+// GetAnnotations returns the annotation registry. Reads go directly;
+// writes must go through SetAnnotation/DeleteAnnotation so they
+// replicate via Raft.
+func (c *Cluster) GetAnnotations() *annotations.Registry {
+	return c.fsm.GetAnnotations()
+}
+
+// SetAnnotation replicates an annotation write via Raft. Must be
+// called on the leader.
+func (c *Cluster) SetAnnotation(a annotations.Annotation) error {
+	if _, err := annotations.ValidateTarget(a.Target); err != nil {
+		return err
+	}
+	payload, err := json.Marshal(SetAnnotationPayload{Annotation: a})
+	if err != nil {
+		return fmt.Errorf("marshal annotation: %w", err)
+	}
+	return c.Apply(Command{Type: CmdSetAnnotation, Payload: payload})
+}
+
+// DeleteAnnotation replicates an annotation delete via Raft.
+func (c *Cluster) DeleteAnnotation(target string) error {
+	payload, _ := json.Marshal(DeleteAnnotationPayload{Target: target})
+	return c.Apply(Command{Type: CmdDeleteAnnotation, Payload: payload})
+}
+
 // SetSchemaCallback sets a callback that fires whenever schema state changes in the FSM.
 func (c *Cluster) SetSchemaCallback(cb SchemaCallback) {
 	c.fsm.SetSchemaCallback(cb)
@@ -237,5 +264,16 @@ func (c *Cluster) BootstrapShards(shardCount int, nodeIDs []string) error {
 // Shutdown gracefully stops the Raft node.
 func (c *Cluster) Shutdown() error {
 	f := c.raft.Shutdown()
+	return f.Error()
+}
+
+// TakeSnapshot forces Raft to write a fresh FSM snapshot to disk. The
+// backup pipeline calls this before archiving so that the snapshot
+// store under data/raft/ contains the latest FSM state — otherwise a
+// long-running cluster that hasn't tripped the snapshot threshold
+// would back up only the log, and Raft would have to replay it on
+// restore. Returns nil if the snapshot succeeds, an error otherwise.
+func (c *Cluster) TakeSnapshot() error {
+	f := c.raft.Snapshot()
 	return f.Error()
 }

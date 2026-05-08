@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
+	"time"
 
 	"github.com/johnjansen/loveliness/pkg/backup"
 	"github.com/johnjansen/loveliness/pkg/replication"
@@ -14,8 +16,9 @@ type DRExtension struct {
 	BackupMgr    *backup.Manager
 	WAL          *replication.WAL
 	ReplicaState *replication.ReplicaState
-	BackupStore  backup.BackupStore // S3 or local backup storage
-	Scheduler    *backup.Scheduler  // periodic backup scheduler
+	BackupStore  backup.BackupStore  // S3 or local backup storage
+	Scheduler    *backup.Scheduler   // periodic backup scheduler
+	Snapshotter  backup.Snapshotter  // forces a Raft snapshot before backup; optional
 }
 
 // SetDR attaches DR capabilities to the server.
@@ -53,7 +56,7 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/gzip")
 	w.Header().Set("Content-Disposition", "attachment; filename=loveliness-backup.tar.gz")
 
-	manifest, err := s.dr.BackupMgr.CreateBackup(w, s.shards, walSeq)
+	manifest, err := s.dr.BackupMgr.CreateBackup(w, s.shards, walSeq, s.dr.Snapshotter)
 	if err != nil {
 		slog.Error("backup failed", "err", err)
 		return
@@ -65,10 +68,25 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 
 // handleRestore accepts a compressed tar archive and restores shard data.
 // POST /restore (Content-Type: application/gzip)
+//
+// This is a destructive admin operation. Each shard's Kuzu store is
+// closed before extraction so it cannot checkpoint stale in-memory
+// state on top of the restored files; the process then exits, leaving
+// the operator to restart the server, at which point Kuzu re-opens
+// the restored files cleanly.
 func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	if s.dr == nil || s.dr.BackupMgr == nil {
 		writeError(w, http.StatusServiceUnavailable, "NO_DR", "backup not configured", 0)
 		return
+	}
+
+	// Close every shard's Kuzu store first. Otherwise Kuzu still owns
+	// the shard files and would overwrite the freshly restored bytes
+	// on shutdown — the schema and data we just unpacked would be lost.
+	for _, sh := range s.shards {
+		if err := sh.Close(); err != nil {
+			slog.Warn("restore: shard close failed", "shard", sh.ID, "err", err)
+		}
 	}
 
 	manifest, err := s.dr.BackupMgr.RestoreBackup(r.Body)
@@ -82,8 +100,19 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		"shards":       manifest.ShardCount,
 		"wal_sequence": manifest.WALSequence,
 		"created_at":   manifest.CreatedAt,
-		"note":         "restart the server to load restored data",
+		"note":         "shards closed; server is exiting — restart to load restored data",
 	})
+
+	// Flush response, then exit — re-using the in-memory FSM/Raft state
+	// alongside freshly-restored on-disk state is unsafe.
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		slog.Info("restore complete; exiting for operator restart")
+		os.Exit(0)
+	}()
 }
 
 // handleBackupToStore creates a backup and stores it in the configured backup store (S3 or local).

@@ -153,3 +153,38 @@ curl -s localhost:8080/join -d '{
   "join_token": "a1b2c3..."
 }'
 ```
+
+## Schema Annotations
+
+Schema annotations attach descriptions, parameterized query examples,
+and tags to schema elements. They are first-class state in the
+cluster — replicated through Raft alongside the shard map and the
+database catalog, and survive restart and snapshot.
+
+Targets follow a path-shaped scheme: `cluster`, `db:<name>`,
+`db:<name>/table:<name>`, `db:<name>/table:<name>/property:<name>`,
+`db:<name>/edge:<name>`, `db:<name>/saved_query:<id>`.
+
+```bash
+# List all annotations (optionally filter by prefix).
+curl -s 'localhost:8080/annotations?prefix=db:default/' | jq
+
+# Read a single annotation.
+curl -s 'localhost:8080/annotations/db:default/table:Person' | jq
+
+# Set an annotation. Latest-wins — the body replaces any existing one.
+# Must hit the leader.
+curl -s -X POST localhost:8080/annotations -H 'Content-Type: application/json' -d '{
+  "target": "db:default/table:Person",
+  "description": "People in the social graph. PII.",
+  "examples": [
+    {"title": "by name",
+     "query": "MATCH (p:Person {name: $name}) RETURN p",
+     "params": {"name": "Alice"}}
+  ],
+  "tags": ["core", "pii"]
+}'
+
+# Delete an annotation.
+curl -s -X DELETE 'localhost:8080/annotations/db:default/table:Person'
+```
