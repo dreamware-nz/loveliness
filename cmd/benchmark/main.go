@@ -1240,7 +1240,11 @@ func main() {
 	fmt.Printf("%s (p50=%s)\n", fmtDur(r.Mean()), fmtDur(r.P(50)))
 	results = append(results, r)
 
-	// ALL SHORTEST can crash LadybugDB on certain graph shapes — skipped.
+	// ALL SHORTEST is rejected at the router (UNSAFE_QUERY) because the
+	// LadybugDB native layer segfaults under load — see issue #1. Until
+	// worker-process isolation lands, this benchmark stays disabled
+	// even with LOVELINESS_ALLOW_ALL_SHORTEST_UNSAFE=true: a host
+	// crash makes timing data meaningless.
 	// fmt.Print("  all_shortest_paths... ")
 	// r = benchAllShortestPaths()
 	// fmt.Printf("%s (p50=%s)\n", fmtDur(r.Mean()), fmtDur(r.P(50)))

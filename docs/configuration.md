@@ -45,6 +45,24 @@ Precedence for `max-memory-per-shard`: **flag > env > auto** (`host_ram × 0.7 /
 | `LOVELINESS_DISCOVER_INTERVAL` | `5` | Seconds between DNS discovery attempts |
 | `LOVELINESS_EXPECTED_NODES` | `0` | Expected node count for quorum-gated auto-bootstrap (0 = no expectation) |
 | `LOVELINESS_SHARD_BUFFER_MB` | *(auto)* | Per-shard LadybugDB buffer pool cap in MB. Default: `(host_ram × 0.7) / shard_count`. Set explicitly to override. The CLI flag `--max-memory-per-shard` overrides this. |
+| `LOVELINESS_ALLOW_ALL_SHORTEST_UNSAFE` | `false` | Opt in to forwarding `ALL SHORTEST` path queries despite the known LadybugDB segfault (see [Unsafe queries](#unsafe-queries)). |
+
+## Unsafe queries
+
+The router rejects `ALL SHORTEST` variable-length path queries by default with an `UNSAFE_QUERY` error:
+
+```
+ALL SHORTEST variable-length path queries are disabled — they segfault the LadybugDB native layer (see github.com/johnjansen/loveliness#1). Use SHORTEST (single shortest path) instead.
+```
+
+This is a defensive gate: the segfault originates in LadybugDB's CGo/C++ shortest-path implementation and bypasses Go's `recover()`, so a single query can kill the entire node. Until worker-process isolation lands, the only safe response is to refuse the query.
+
+Workarounds:
+
+- **Use `SHORTEST` instead** — single shortest path works reliably on the same data.
+- **Set `LOVELINESS_ALLOW_ALL_SHORTEST_UNSAFE=true`** to accept the risk on a per-node basis. The node logs a warning at startup and forwards the query as-is. Do this only when you have an external supervisor that can restart the process.
+
+The detector strips Cypher comments and string literals before matching, so a query like `MATCH (n {note: 'use ALL SHORTEST instead'}) RETURN n` is not rejected.
 
 ## Memory sizing
 

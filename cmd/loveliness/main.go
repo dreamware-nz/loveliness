@@ -93,6 +93,11 @@ func main() {
 
 	logging.Setup(cfg.NodeID)
 
+	router.SetAllowAllShortestUnsafe(cfg.AllowAllShortestUnsafe)
+	if cfg.AllowAllShortestUnsafe {
+		slog.Warn("ALL SHORTEST path queries enabled — LadybugDB may segfault under load (see GitHub issue #1)")
+	}
+
 	slog.Info("starting",
 		"bind", cfg.BindAddr,
 		"raft", cfg.RaftAddr,

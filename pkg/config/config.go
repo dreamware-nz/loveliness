@@ -64,6 +64,14 @@ type Config struct {
 	// LadybugDB defaults to 80% of system memory PER shard, which OOMs with multiple shards.
 	ShardBufferMB int
 
+	// AllowAllShortestUnsafe opts the node into accepting `ALL SHORTEST`
+	// path queries. The default (false) makes the router reject them
+	// with an UNSAFE_QUERY error because the LadybugDB native layer
+	// segfaults on this construct under load (see GitHub issue #1).
+	// Operators who have isolated workers or simply accept the risk
+	// can flip this to true.
+	AllowAllShortestUnsafe bool
+
 	// DNS discovery configuration.
 	DiscoverMode     string // "dns" to enable DNS-based peer discovery, empty to disable
 	DiscoverAddr     string // DNS name to resolve for peer discovery (e.g., "loveliness.internal")
@@ -195,6 +203,9 @@ func FromEnv() Config {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			c.ShardBufferMB = n
 		}
+	}
+	if v := os.Getenv("LOVELINESS_ALLOW_ALL_SHORTEST_UNSAFE"); v == "true" || v == "1" {
+		c.AllowAllShortestUnsafe = true
 	}
 	return c
 }
