@@ -1,4 +1,4 @@
-FROM golang:1.25-bookworm AS builder
+FROM golang:1.25 AS builder
 ARG TARGETARCH
 
 WORKDIR /app
@@ -27,7 +27,7 @@ COPY . .
 RUN CGO_ENABLED=1 go build -o /loveliness ./cmd/loveliness
 RUN CGO_ENABLED=1 go build -o /loveliness-benchmark ./cmd/benchmark
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
 
 # Copy LadybugDB shared library from builder. The builder stage stages
