@@ -266,3 +266,14 @@ func (c *Cluster) Shutdown() error {
 	f := c.raft.Shutdown()
 	return f.Error()
 }
+
+// TakeSnapshot forces Raft to write a fresh FSM snapshot to disk. The
+// backup pipeline calls this before archiving so that the snapshot
+// store under data/raft/ contains the latest FSM state — otherwise a
+// long-running cluster that hasn't tripped the snapshot threshold
+// would back up only the log, and Raft would have to replay it on
+// restore. Returns nil if the snapshot succeeds, an error otherwise.
+func (c *Cluster) TakeSnapshot() error {
+	f := c.raft.Snapshot()
+	return f.Error()
+}

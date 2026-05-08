@@ -61,6 +61,9 @@ var targetSegment = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]*$`)
 //
 // Returns the canonical target string (currently identical to the
 // input) on success, or an error describing the malformed segment.
+// Errors are position-aware: the allowed kinds at each position depend
+// on the preceding segment (e.g. "property" can only follow "table" or
+// "edge"), and the message lists exactly what's allowed there.
 func ValidateTarget(target string) (string, error) {
 	if target == "" {
 		return "", fmt.Errorf("target is empty")
@@ -69,31 +72,66 @@ func ValidateTarget(target string) (string, error) {
 		return target, nil
 	}
 	parts := strings.Split(target, "/")
-	for i, p := range parts {
-		kv := strings.SplitN(p, ":", 2)
-		if len(kv) != 2 {
-			return "", fmt.Errorf("segment %d %q: expected kind:name", i, p)
+
+	// Segment 0: must be db:<name>. ("cluster" alone is handled above.)
+	kind, name, err := splitSegment(parts[0])
+	if err != nil {
+		return "", fmt.Errorf("segment 0: %w", err)
+	}
+	if kind != "db" {
+		return "", fmt.Errorf(`segment 0: first segment must be "cluster" or "db:<name>", got kind %q`, kind)
+	}
+	if !targetSegment.MatchString(name) {
+		return "", fmt.Errorf("segment 0: invalid name %q", name)
+	}
+
+	// Subsequent segments — allowed kinds depend on the previous segment.
+	prev := "db"
+	for i := 1; i < len(parts); i++ {
+		kind, name, err := splitSegment(parts[i])
+		if err != nil {
+			return "", fmt.Errorf("segment %d: %w", i, err)
 		}
-		kind, name := kv[0], kv[1]
-		switch kind {
-		case "db", "table", "edge", "property", "saved_query":
-		default:
-			return "", fmt.Errorf("segment %d: unknown kind %q (allowed: db, table, edge, property, saved_query)", i, kind)
+		allowed, ok := allowedAfter[prev]
+		if !ok {
+			return "", fmt.Errorf("segment %d: nothing can follow kind %q", i, prev)
+		}
+		if !contains(allowed, kind) {
+			return "", fmt.Errorf("segment %d: kind %q not allowed after %q (allowed: %s)",
+				i, kind, prev, strings.Join(allowed, ", "))
 		}
 		if !targetSegment.MatchString(name) {
 			return "", fmt.Errorf("segment %d: invalid name %q", i, name)
 		}
-	}
-	// Light structural rule: first segment must be db:* if not "cluster",
-	// property/edge/table/saved_query must come after a db.
-	if parts[0] == "cluster" {
-		// not reachable — already returned above
-	}
-	first := strings.SplitN(parts[0], ":", 2)[0]
-	if first != "db" {
-		return "", fmt.Errorf("first segment must be cluster or db:<name>, got %q", first)
+		prev = kind
 	}
 	return target, nil
+}
+
+// allowedAfter encodes which kinds can follow each preceding kind.
+// Terminal kinds (saved_query, property) are absent here so any
+// extension produces a clear "nothing can follow kind …" error.
+var allowedAfter = map[string][]string{
+	"db":    {"table", "edge", "saved_query"},
+	"table": {"property"},
+	"edge":  {"property"},
+}
+
+func splitSegment(p string) (kind, name string, err error) {
+	kv := strings.SplitN(p, ":", 2)
+	if len(kv) != 2 {
+		return "", "", fmt.Errorf("expected kind:name, got %q", p)
+	}
+	return kv[0], kv[1], nil
+}
+
+func contains(xs []string, s string) bool {
+	for _, x := range xs {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }
 
 // Registry is the in-memory store of annotations, replicated through

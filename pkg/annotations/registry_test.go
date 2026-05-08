@@ -23,16 +23,38 @@ func TestValidateTarget(t *testing.T) {
 
 	bad := []string{
 		"",
-		"table:Person",                // first segment must be db: or cluster
-		"db:default/Person",           // missing kind:
-		"db:default/widget:Foo",       // unknown kind
-		"db:default/table:Person; --", // injection-shaped name
-		"db:/table:Person",            // empty db name
-		"db:default/table:",           // empty table name
+		"table:Person",                              // first segment must be db: or cluster
+		"db:default/Person",                         // missing kind:
+		"db:default/widget:Foo",                     // unknown kind after db
+		"db:default/table:Person; --",               // injection-shaped name
+		"db:/table:Person",                          // empty db name
+		"db:default/table:",                         // empty table name
+		"db:default/property:age",                   // property must follow table or edge
+		"db:default/saved_query:foo/property:bar",   // nothing follows saved_query
+		"db:default/table:Person/saved_query:foo",   // saved_query only follows db
+		"db:default/table:Person/property:age/x:y",  // nothing follows property
 	}
 	for _, target := range bad {
 		if _, err := ValidateTarget(target); err == nil {
 			t.Errorf("ValidateTarget(%q) accepted, expected error", target)
+		}
+	}
+
+	// Spot-check that the error message points at the right position
+	// and lists what's actually allowed there, instead of the global set.
+	cases := map[string]string{
+		"wrongprefix:foo":            `segment 0: first segment must be "cluster" or "db:<name>", got kind "wrongprefix"`,
+		"db:default/widget:Foo":      `segment 1: kind "widget" not allowed after "db" (allowed: table, edge, saved_query)`,
+		"db:default/property:age":    `segment 1: kind "property" not allowed after "db" (allowed: table, edge, saved_query)`,
+	}
+	for target, want := range cases {
+		_, err := ValidateTarget(target)
+		if err == nil {
+			t.Errorf("ValidateTarget(%q) accepted, expected error", target)
+			continue
+		}
+		if err.Error() != want {
+			t.Errorf("ValidateTarget(%q) error = %q, want %q", target, err.Error(), want)
 		}
 	}
 }

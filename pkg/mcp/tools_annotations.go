@@ -42,7 +42,12 @@ type ListAnnotationsInput struct {
 }
 
 // AnnotationOutput is the response for get_annotation / set_annotation.
+// Found is true when the annotation exists. After set_annotation it is
+// always true; after get_annotation it is false when no annotation has
+// been set for the target — the Annotation field still holds the
+// requested target so the caller can echo it without bookkeeping.
 type AnnotationOutput struct {
+	Found      bool       `json:"found"`
 	Annotation Annotation `json:"annotation"`
 }
 
@@ -96,7 +101,7 @@ func registerAnnotationTools(s *mcp.Server, c *Client, cache *schemaCache, reado
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "get_annotation",
 		Title:       "Read a schema annotation",
-		Description: "Return the annotation attached to a specific schema target (description, query examples, tags). Returns an empty annotation if none is set.",
+		Description: "Return the annotation attached to a specific schema target (description, query examples, tags). The `found` field tells you whether one is set — when false, the `annotation` body only carries back the target you asked for.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in GetAnnotationInput) (*mcp.CallToolResult, AnnotationOutput, error) {
 		if strings.TrimSpace(in.Target) == "" {
 			return toolError(fmt.Errorf("target is required")), AnnotationOutput{}, nil
@@ -106,9 +111,9 @@ func registerAnnotationTools(s *mcp.Server, c *Client, cache *schemaCache, reado
 			return toolError(err), AnnotationOutput{}, nil
 		}
 		if got == nil {
-			return nil, AnnotationOutput{Annotation: Annotation{Target: in.Target}}, nil
+			return nil, AnnotationOutput{Found: false, Annotation: Annotation{Target: in.Target}}, nil
 		}
-		return nil, AnnotationOutput{Annotation: *got}, nil
+		return nil, AnnotationOutput{Found: true, Annotation: *got}, nil
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -189,9 +194,9 @@ func registerAnnotationTools(s *mcp.Server, c *Client, cache *schemaCache, reado
 		// Re-fetch to get the server-stamped UpdatedAt.
 		got, err := c.GetAnnotation(ctx, in.Target)
 		if err != nil || got == nil {
-			return nil, AnnotationOutput{Annotation: a}, nil
+			return nil, AnnotationOutput{Found: true, Annotation: a}, nil
 		}
-		return nil, AnnotationOutput{Annotation: *got}, nil
+		return nil, AnnotationOutput{Found: true, Annotation: *got}, nil
 	})
 
 	mcp.AddTool(s, &mcp.Tool{

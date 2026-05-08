@@ -30,7 +30,7 @@ func TestSchedulerRunNow(t *testing.T) {
 	mgr := NewManager(dataDir, "test-node")
 	shards := setupTestShards(t, dataDir, 1)
 
-	sched := NewScheduler(mgr, store, shards, func() uint64 { return 42 }, time.Hour, 3)
+	sched := NewScheduler(mgr, store, shards, func() uint64 { return 42 }, nil, time.Hour, 3)
 
 	manifest, key, err := sched.RunNow()
 	if err != nil {
@@ -67,7 +67,7 @@ func TestSchedulerRetention(t *testing.T) {
 	mgr := NewManager(dataDir, "test-node")
 	shards := setupTestShards(t, dataDir, 1)
 
-	sched := NewScheduler(mgr, store, shards, func() uint64 { return 1 }, time.Hour, 3)
+	sched := NewScheduler(mgr, store, shards, func() uint64 { return 1 }, nil, time.Hour, 3)
 	_, _, err := sched.RunNow()
 	if err != nil {
 		t.Fatal("RunNow:", err)
