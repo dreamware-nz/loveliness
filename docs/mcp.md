@@ -20,14 +20,16 @@ make install-mcp
 This runs `scripts/install-mcp.sh`, which:
 
 1. Builds `loveliness-mcp` into `$GOBIN` (or `$(go env GOPATH)/bin`).
-2. Registers it with `claude mcp add` if the `claude` CLI is on PATH;
-   otherwise prints the manual `~/.claude.json` snippet.
+2. Registers it with `claude mcp add --scope user` so the server is
+   visible from every Claude Code project; falls back to printing the
+   manual `~/.claude.json` snippet if the `claude` CLI is missing.
 3. Symlinks the bundled skill at `skills/loveliness/SKILL.md` into
    `~/.claude/skills/loveliness/` so Claude Code gets prose guidance
    on how to use the tools.
 
 Honors `LOVELINESS_URL` and `LOVELINESS_TOKEN` from the environment.
-Pass `FLAGS=--no-skill` or `FLAGS=--no-register` to skip steps.
+Pass `FLAGS=--local` to register at project scope instead, or
+`FLAGS=--no-skill` / `FLAGS=--no-register` to skip steps.
 
 ### Manual install
 
@@ -44,9 +46,9 @@ loveliness mcp --url http://localhost:8080
 ### Claude Code
 
 ```bash
-claude mcp add loveliness -- loveliness-mcp
+claude mcp add --scope user loveliness -- loveliness-mcp
 # or with config:
-claude mcp add loveliness -e LOVELINESS_URL=http://localhost:8080 -- loveliness-mcp
+claude mcp add --scope user loveliness -e LOVELINESS_URL=http://localhost:8080 -- loveliness-mcp
 ```
 
 ### Claude Desktop

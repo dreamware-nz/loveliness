@@ -2,7 +2,8 @@
 # install-mcp.sh — install loveliness-mcp and wire it into Claude.
 #
 # Usage:
-#   ./scripts/install-mcp.sh                # install + register MCP + skill
+#   ./scripts/install-mcp.sh                # install + register MCP (user scope) + skill
+#   ./scripts/install-mcp.sh --local        # register at project (local) scope instead
 #   ./scripts/install-mcp.sh --no-skill     # skip skill install
 #   ./scripts/install-mcp.sh --no-register  # build + install only
 #   LOVELINESS_URL=http://prod:8080 ./scripts/install-mcp.sh
@@ -18,13 +19,16 @@ set -eu
 
 want_skill=1
 want_register=1
+scope=user
 
 for arg; do
   case "$arg" in
     --no-skill)    want_skill=0 ;;
     --no-register) want_register=0 ;;
+    --local)       scope=local ;;
+    --user)        scope=user ;;
     -h|--help)
-      sed -n '2,12p' "$0"
+      sed -n '2,13p' "$0"
       exit 0
       ;;
     *)
@@ -60,21 +64,22 @@ printf '    installed: %s/loveliness-mcp\n' "$PREFIX"
 
 if [ "$want_register" = 1 ]; then
   if command -v claude >/dev/null 2>&1; then
-    printf '==> registering MCP server with Claude\n'
-    # `claude mcp add` is idempotent in recent CLI versions; if it isn't,
-    # remove first to avoid a duplicate-name error.
-    claude mcp remove loveliness >/dev/null 2>&1 || true
+    printf '==> registering MCP server with Claude (scope=%s)\n' "$scope"
+    # Remove any existing registration at either scope so the new one
+    # wins cleanly; `claude mcp add` errors on duplicate names.
+    claude mcp remove loveliness --scope user  >/dev/null 2>&1 || true
+    claude mcp remove loveliness --scope local >/dev/null 2>&1 || true
     if [ -n "${LOVELINESS_TOKEN:-}" ]; then
-      claude mcp add loveliness \
+      claude mcp add loveliness --scope "$scope" \
         --env "LOVELINESS_URL=$LOVELINESS_URL" \
         --env "LOVELINESS_TOKEN=$LOVELINESS_TOKEN" \
         -- "$PREFIX/loveliness-mcp"
     else
-      claude mcp add loveliness \
+      claude mcp add loveliness --scope "$scope" \
         --env "LOVELINESS_URL=$LOVELINESS_URL" \
         -- "$PREFIX/loveliness-mcp"
     fi
-    printf '    registered as `loveliness` (URL=%s)\n' "$LOVELINESS_URL"
+    printf '    registered as `loveliness` (scope=%s, URL=%s)\n' "$scope" "$LOVELINESS_URL"
   else
     cat <<EOF
 ==> claude CLI not found; skipping auto-register
