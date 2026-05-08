@@ -1,6 +1,18 @@
 # Configuration
 
-All configuration is via environment variables.
+Most configuration is via environment variables. A few options also expose CLI flags on the `serve` subcommand; flags take precedence over env vars.
+
+## CLI flags
+
+```
+loveliness serve [flags]
+
+  --max-memory-per-shard MB   Per-shard LadybugDB buffer pool cap in MB.
+                              0 = use LOVELINESS_SHARD_BUFFER_MB env or
+                              auto-derived default.
+```
+
+Precedence for `max-memory-per-shard`: **flag > env > auto** (`host_ram × 0.7 / shard_count`).
 
 | Variable | Default | Description |
 |---|---|---|
@@ -32,7 +44,37 @@ All configuration is via environment variables.
 | `LOVELINESS_DISCOVER_ADDR` | *(empty)* | DNS name to resolve for peer discovery (e.g., `loveliness.internal`) |
 | `LOVELINESS_DISCOVER_INTERVAL` | `5` | Seconds between DNS discovery attempts |
 | `LOVELINESS_EXPECTED_NODES` | `0` | Expected node count for quorum-gated auto-bootstrap (0 = no expectation) |
-| `LOVELINESS_SHARD_BUFFER_MB` | *(auto)* | Per-shard LadybugDB buffer pool cap in MB. Default: `(total_memory × 0.7) / shard_count`. Set explicitly to override. |
+| `LOVELINESS_SHARD_BUFFER_MB` | *(auto)* | Per-shard LadybugDB buffer pool cap in MB. Default: `(host_ram × 0.7) / shard_count`. Set explicitly to override. The CLI flag `--max-memory-per-shard` overrides this. |
+
+## Memory sizing
+
+LadybugDB uses mmap for storage; during bulk `COPY FROM` the resident write footprint can spike well above the steady-state read footprint. By default each LadybugDB handle would claim 80% of host RAM as its buffer pool — with N shards on one host, that's N×80%, a guaranteed OOM.
+
+Loveliness caps each shard's buffer pool to keep total usage safe:
+
+- **Auto default**: `host_ram × 0.7 / shard_count`. Host RAM is read from `/proc/meminfo` on Linux and `sysctl hw.memsize` on macOS. On other platforms a 2 GiB assumption is used and a warning is logged — set the flag or env var explicitly there.
+- **Floor**: 256 MiB per shard. If the resolved value is below that, it is clamped and a warning is logged. Below this floor, warm reads will thrash the page cache.
+- **Recommended floor for production**: 1 GiB per shard. Below 1 GiB, expect frequent eviction under any non-trivial working set.
+- **Recommended ceiling**: leave at least 15% of host RAM unallocated for the OS, Raft Bolt store, and Go runtime overhead. The 0.7 factor in the default already accounts for this.
+
+### Sample sizings
+
+| Host RAM | Shards | Auto cap per shard | Notes |
+|---|---|---|---|
+| 8 GiB | 3 | ~1.87 GiB | Comfortable for development. |
+| 16 GiB | 4 | ~2.8 GiB | Good for small production workloads. |
+| 48 GiB | 6 | ~5.6 GiB | This is the host that originally OOMed at 23M nodes — the cap fixes it. |
+| 128 GiB | 8 | ~11.2 GiB | Large production node. |
+
+### Startup logging
+
+The resolved cap is logged at startup with the source it came from:
+
+```
+buffer pool configured per_shard_mb=5734 shards=6 source=auto
+buffer pool configured per_shard_mb=4096 shards=6 source=flag
+buffer pool configured per_shard_mb=2048 shards=6 source=env
+```
 
 ## Authentication
 

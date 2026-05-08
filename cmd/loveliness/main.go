@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log/slog"
 	"net"
@@ -28,12 +29,34 @@ import (
 	"github.com/johnjansen/loveliness/pkg/router"
 	"github.com/johnjansen/loveliness/pkg/schema"
 	"github.com/johnjansen/loveliness/pkg/shard"
+	"github.com/johnjansen/loveliness/pkg/sysmem"
 	"github.com/johnjansen/loveliness/pkg/tlsutil"
 	"github.com/johnjansen/loveliness/pkg/transport"
 )
 
+// serveFlags holds CLI overrides for the serve command. Only options
+// that need command-line ergonomics are surfaced here; everything else
+// stays env-driven via pkg/config. Precedence per option: flag > env >
+// auto-derived default.
+type serveFlags struct {
+	maxMemoryPerShardMB int
+}
+
+func parseServeFlags(args []string) serveFlags {
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	var f serveFlags
+	fs.IntVar(&f.maxMemoryPerShardMB, "max-memory-per-shard", 0,
+		"Per-shard buffer pool cap in MB. 0 = use LOVELINESS_SHARD_BUFFER_MB env or auto-derived default (host RAM * 0.7 / shard count).")
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	return f
+}
+
 func main() {
 	// Subcommand dispatch.
+	var serveArgs []string
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "up":
@@ -52,13 +75,15 @@ func main() {
 			fmt.Println("loveliness dev")
 			return
 		case "serve":
-			// Fall through to normal server startup.
+			serveArgs = os.Args[2:]
 		default:
 			fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", os.Args[1])
 			printUsage()
 			os.Exit(1)
 		}
 	}
+
+	flags := parseServeFlags(serveArgs)
 
 	cfg := config.FromEnv()
 	if err := cfg.Validate(); err != nil {
@@ -81,27 +106,44 @@ func main() {
 		threadsPerShard = 1
 	}
 
-	// Calculate per-shard buffer pool size.
-	// LadybugDB defaults to 80% of system memory PER shard — with N shards
-	// that's N*80% which guarantees OOM. Auto-calculate a safe limit.
-	var bufferPoolBytes uint64
-	if cfg.ShardBufferMB > 0 {
+	// Resolve per-shard buffer pool cap. LadybugDB defaults to 80% of
+	// system memory PER shard, so with N shards that's N*80% — a
+	// guaranteed OOM. Precedence: --max-memory-per-shard flag > env
+	// LOVELINESS_SHARD_BUFFER_MB > host_ram * 0.7 / shard_count.
+	var (
+		bufferPoolBytes uint64
+		bufferSource    string
+	)
+	switch {
+	case flags.maxMemoryPerShardMB > 0:
+		bufferPoolBytes = uint64(flags.maxMemoryPerShardMB) * 1024 * 1024
+		bufferSource = "flag"
+	case cfg.ShardBufferMB > 0:
 		bufferPoolBytes = uint64(cfg.ShardBufferMB) * 1024 * 1024
-	} else {
-		// Auto: 70% of total memory / shard count, minimum 256MB.
-		var m runtime.MemStats
-		runtime.ReadMemStats(&m)
-		totalMem := m.Sys
-		if totalMem < 512*1024*1024 {
-			// Sys can underreport early; fall back to a conservative estimate.
-			totalMem = 2 * 1024 * 1024 * 1024 // 2GB minimum assumption
+		bufferSource = "env"
+	default:
+		totalMem, err := sysmem.Total()
+		if err != nil {
+			// Unsupported platform — be loud and pick a defensive
+			// floor. Operators should set the flag or env on these
+			// hosts.
+			slog.Warn("sysmem.Total unavailable; falling back to 2 GiB assumption", "err", err)
+			totalMem = 2 * 1024 * 1024 * 1024
 		}
 		bufferPoolBytes = (totalMem * 7 / 10) / uint64(cfg.ShardCount)
-		if bufferPoolBytes < 256*1024*1024 {
-			bufferPoolBytes = 256 * 1024 * 1024
-		}
+		bufferSource = "auto"
 	}
-	slog.Info("buffer pool configured", "per_shard_mb", bufferPoolBytes/(1024*1024), "shards", cfg.ShardCount)
+	const minBufferBytes = 256 * 1024 * 1024
+	if bufferPoolBytes < minBufferBytes {
+		slog.Warn("buffer pool below recommended floor; clamping to 256 MiB",
+			"requested_mb", bufferPoolBytes/(1024*1024), "source", bufferSource)
+		bufferPoolBytes = minBufferBytes
+	}
+	slog.Info("buffer pool configured",
+		"per_shard_mb", bufferPoolBytes/(1024*1024),
+		"shards", cfg.ShardCount,
+		"source", bufferSource,
+	)
 
 	// Open local shards.
 	// Note: LadybugDB must create its own database directory. We only create
