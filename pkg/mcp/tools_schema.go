@@ -83,6 +83,10 @@ func (sc *schemaCache) invalidate() {
 
 // fetchSchema runs CALL show_tables() and CALL table_info(<name>) per
 // table, structuring the result.
+//
+// A multi-shard cluster returns the same table once per shard from
+// CALL show_tables() / CALL table_info(), so we dedupe by table name
+// and by property name within a table to keep the schema flat.
 func fetchSchema(ctx context.Context, c *Client) (*SchemaOutput, error) {
 	tablesRes, err := c.Cypher(ctx, "CALL show_tables() RETURN *", nil)
 	if err != nil {
@@ -90,12 +94,17 @@ func fetchSchema(ctx context.Context, c *Client) (*SchemaOutput, error) {
 	}
 
 	out := &SchemaOutput{}
+	seenTables := make(map[string]struct{})
 	for _, row := range tablesRes.Rows {
 		name, _ := row["name"].(string)
 		ttype, _ := row["type"].(string)
 		if name == "" {
 			continue
 		}
+		if _, dup := seenTables[name]; dup {
+			continue
+		}
+		seenTables[name] = struct{}{}
 		infoRes, err := c.Cypher(ctx, "CALL table_info('"+escapeSingle(name)+"') RETURN *", nil)
 		if err != nil {
 			// Propagate but still include what we have — a half-schema
@@ -105,18 +114,22 @@ func fetchSchema(ctx context.Context, c *Client) (*SchemaOutput, error) {
 		switch ttype {
 		case "NODE":
 			nt := NodeTable{Name: name}
+			seenProps := make(map[string]struct{})
 			for _, p := range infoRes.Rows {
-				prop := Property{
-					Name: strOr(p["name"], ""),
-					Type: strOr(p["type"], ""),
+				pn := strOr(p["name"], "")
+				if pn == "" {
+					continue
 				}
+				if _, dup := seenProps[pn]; dup {
+					continue
+				}
+				seenProps[pn] = struct{}{}
+				prop := Property{Name: pn, Type: strOr(p["type"], "")}
 				if asBool(p["primary key"]) {
 					prop.PrimaryKey = true
 					nt.PrimaryKey = prop.Name
 				}
-				if prop.Name != "" {
-					nt.Properties = append(nt.Properties, prop)
-				}
+				nt.Properties = append(nt.Properties, prop)
 			}
 			out.NodeTables = append(out.NodeTables, nt)
 		case "REL":
@@ -125,14 +138,17 @@ func fetchSchema(ctx context.Context, c *Client) (*SchemaOutput, error) {
 			// for REL tables in some versions. Best-effort extraction.
 			et.From = strOr(row["src table"], strOr(row["source table"], ""))
 			et.To = strOr(row["dst table"], strOr(row["destination table"], ""))
+			seenProps := make(map[string]struct{})
 			for _, p := range infoRes.Rows {
-				prop := Property{
-					Name: strOr(p["name"], ""),
-					Type: strOr(p["type"], ""),
+				pn := strOr(p["name"], "")
+				if pn == "" {
+					continue
 				}
-				if prop.Name != "" {
-					et.Properties = append(et.Properties, prop)
+				if _, dup := seenProps[pn]; dup {
+					continue
 				}
+				seenProps[pn] = struct{}{}
+				et.Properties = append(et.Properties, Property{Name: pn, Type: strOr(p["type"], "")})
 			}
 			out.EdgeTables = append(out.EdgeTables, et)
 		}
