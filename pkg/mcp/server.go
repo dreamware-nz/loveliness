@@ -52,6 +52,7 @@ func New(opts Options) *Server {
 	registerSchemaTool(sdk, client, cache)
 	registerClusterTool(sdk, client)
 	registerAdminTools(sdk, client, opts.Readonly)
+	registerAnnotationTools(sdk, client, cache, opts.Readonly)
 	if !opts.Readonly {
 		registerDDLTools(sdk, client, cache)
 		registerBulkTools(sdk, client)

@@ -215,6 +215,107 @@ func (c *Client) AdminCypher(ctx context.Context, query string) (map[string]any,
 	return out, nil
 }
 
+// AnnotationExample mirrors the server-side QueryExample without
+// taking a hard dependency on the cluster package. It is the shape
+// the MCP wire types use.
+type AnnotationExample struct {
+	Title       string         `json:"title,omitempty"`
+	Query       string         `json:"query"`
+	Params      map[string]any `json:"params,omitempty"`
+	Explanation string         `json:"explanation,omitempty"`
+}
+
+// Annotation is the MCP-side mirror of annotations.Annotation.
+type Annotation struct {
+	Target      string              `json:"target"`
+	Description string              `json:"description,omitempty"`
+	Examples    []AnnotationExample `json:"examples,omitempty"`
+	Tags        []string            `json:"tags,omitempty"`
+	Extra       map[string]string   `json:"extra,omitempty"`
+	UpdatedAt   string              `json:"updated_at,omitempty"`
+}
+
+// ListAnnotations calls GET /annotations[?prefix=...].
+func (c *Client) ListAnnotations(ctx context.Context, prefix string) ([]Annotation, error) {
+	path := "/annotations"
+	if prefix != "" {
+		// Light query-string escape: URL-encode the prefix value.
+		path += "?prefix=" + queryEscape(prefix)
+	}
+	body, err := c.get(ctx, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Annotations []Annotation `json:"annotations"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("annotations: decode response: %w", err)
+	}
+	return out.Annotations, nil
+}
+
+// GetAnnotation calls GET /annotations/{target}. Returns (nil, nil) if
+// the server responded 404 — callers can treat absence as a normal
+// state rather than an error.
+func (c *Client) GetAnnotation(ctx context.Context, target string) (*Annotation, error) {
+	body, err := c.get(ctx, "/annotations/"+target, nil)
+	if err != nil {
+		var he *HTTPError
+		if errors.As(err, &he) && he.Status == http.StatusNotFound {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var out Annotation
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("annotation: decode response: %w", err)
+	}
+	return &out, nil
+}
+
+// SetAnnotation calls POST /annotations.
+func (c *Client) SetAnnotation(ctx context.Context, a Annotation) error {
+	buf, err := json.Marshal(a)
+	if err != nil {
+		return fmt.Errorf("annotation: encode: %w", err)
+	}
+	_, err = c.post(ctx, "/annotations", "application/json", bytes.NewReader(buf), nil)
+	return err
+}
+
+// DeleteAnnotation calls DELETE /annotations/{target}.
+func (c *Client) DeleteAnnotation(ctx context.Context, target string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/annotations/"+target, nil)
+	if err != nil {
+		return err
+	}
+	c.applyHeaders(req, nil)
+	_, err = c.do(req)
+	return err
+}
+
+// queryEscape is a minimal escape sufficient for annotation prefixes,
+// which are restricted to identifier-safe characters plus '/' and ':'.
+// Using net/url here would also work but pulls in another import.
+func queryEscape(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		switch {
+		case ch >= 'A' && ch <= 'Z',
+			ch >= 'a' && ch <= 'z',
+			ch >= '0' && ch <= '9',
+			ch == '-', ch == '_', ch == '.', ch == '~',
+			ch == ':', ch == '/':
+			b.WriteByte(ch)
+		default:
+			fmt.Fprintf(&b, "%%%02X", ch)
+		}
+	}
+	return b.String()
+}
+
 // HTTPError represents a non-2xx HTTP response from Loveliness.
 type HTTPError struct {
 	Status int

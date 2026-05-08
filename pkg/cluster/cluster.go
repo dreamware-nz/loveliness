@@ -10,6 +10,7 @@ import (
 
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
+	"github.com/johnjansen/loveliness/pkg/annotations"
 	"github.com/johnjansen/loveliness/pkg/catalog"
 )
 
@@ -185,6 +186,32 @@ func (c *Cluster) RemoveTable(name string) error {
 // GetSchema returns the current schema keys from the FSM.
 func (c *Cluster) GetSchema() map[string]string {
 	return c.fsm.GetShardMap().SchemaKeys
+}
+
+// GetAnnotations returns the annotation registry. Reads go directly;
+// writes must go through SetAnnotation/DeleteAnnotation so they
+// replicate via Raft.
+func (c *Cluster) GetAnnotations() *annotations.Registry {
+	return c.fsm.GetAnnotations()
+}
+
+// SetAnnotation replicates an annotation write via Raft. Must be
+// called on the leader.
+func (c *Cluster) SetAnnotation(a annotations.Annotation) error {
+	if _, err := annotations.ValidateTarget(a.Target); err != nil {
+		return err
+	}
+	payload, err := json.Marshal(SetAnnotationPayload{Annotation: a})
+	if err != nil {
+		return fmt.Errorf("marshal annotation: %w", err)
+	}
+	return c.Apply(Command{Type: CmdSetAnnotation, Payload: payload})
+}
+
+// DeleteAnnotation replicates an annotation delete via Raft.
+func (c *Cluster) DeleteAnnotation(target string) error {
+	payload, _ := json.Marshal(DeleteAnnotationPayload{Target: target})
+	return c.Apply(Command{Type: CmdDeleteAnnotation, Payload: payload})
 }
 
 // SetSchemaCallback sets a callback that fires whenever schema state changes in the FSM.

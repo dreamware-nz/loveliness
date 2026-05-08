@@ -15,6 +15,8 @@ Read-only:
 - `cypher_read` — run a Cypher read query. Rejects writes (`CREATE`/`MERGE`/`SET`/`DELETE`/`DROP`/`REMOVE`/`LOAD`/`COPY`/`ALTER`/`DETACH`) and mutating `CALL` procedures.
 - `cluster_status` — leader, peers, per-shard assignment, registered schema.
 - `list_databases` — databases in the cluster catalog with state, shard count, and creation time.
+- `describe_schema` — schema joined with annotations in one payload. **Use this first** when you need to plan a query — it shows what each table holds and the example queries the operator left behind.
+- `list_annotations` / `get_annotation` — read schema annotations (descriptions, query examples, tags) for an element.
 
 Write (skipped when the server is launched with `--readonly`):
 
@@ -24,6 +26,7 @@ Write (skipped when the server is launched with `--readonly`):
 - `admin_cypher` — escape hatch for raw admin commands.
 - `bulk_nodes`, `bulk_edges` — synchronous CSV load. Provide either inline `csv_data` or a host-readable `csv_path`.
 - `ingest_nodes`, `ingest_edges` — async CSV load. Returns a `job_id` to poll with `ingest_status`.
+- `set_annotation`, `delete_annotation` — attach or remove a description, query examples, and tags on a schema target. Latest-wins (a SET replaces the previous body). Replicated through Raft alongside the schema, so annotations survive restart and follow the data.
 
 Resources (read-only blobs the client can fetch directly):
 
@@ -32,7 +35,7 @@ Resources (read-only blobs the client can fetch directly):
 
 ## Working pattern
 
-1. **Always run `schema` first.** Tool descriptions don't tell you what tables exist. The schema cache makes this cheap (30s).
+1. **Always start with `describe_schema`.** It returns the schema and the cluster's annotations (descriptions, query examples) joined. If `describe_schema` is missing, fall back to `schema` then `list_annotations`.
 2. **Use `params`, not string interpolation.** The `query` field accepts `$name` placeholders that map to the `params` object. Loveliness inlines parameters as escaped Cypher literals, so user-controlled strings stay safely quoted. Don't build queries with string concatenation.
 3. **Pick the right write tool:**
    - Schema (DDL): `create_node_table` / `create_edge_table` / `drop_table` over `cypher_write`. They validate identifiers and bust the schema cache.
@@ -88,6 +91,34 @@ ingest_edges(rel_table="KNOWS", from_table="Person", to_table="Person", csv_path
 ingest_status(job_id="abc123")
 → {"job": {"status": "running", "loaded": 1200000, ...}}
 ```
+
+Annotate a table so future LLM turns know what it holds:
+
+```
+set_annotation(
+  target="db:default/table:Person",
+  description="People in the social graph. Each row is a unique human. PII.",
+  examples=[
+    {"title": "by name",  "query": "MATCH (p:Person {name: $name}) RETURN p", "params": {"name": "Alice"}},
+    {"title": "top by friends", "query": "MATCH (p:Person)-[:KNOWS]->(f) RETURN p, count(f) AS n ORDER BY n DESC LIMIT $k", "params": {"k": 10}}
+  ],
+  tags=["core", "pii"]
+)
+```
+
+## Annotation targets
+
+`set_annotation` takes a hierarchical `target` string:
+
+- `cluster` — top-level "what is this cluster" description.
+- `db:<name>` — what a database holds.
+- `db:<name>/table:<name>` — node table description + example queries.
+- `db:<name>/table:<name>/property:<name>` — column-level note (units, format, deprecated, etc.).
+- `db:<name>/edge:<name>` — relationship table.
+- `db:<name>/edge:<name>/property:<name>` — edge column.
+- `db:<name>/saved_query:<id>` — a named, parameterized query template.
+
+For single-database clusters use `db:default`. Annotations are latest-wins (a SET replaces the body) and replicated through Raft like the schema and catalog — they survive restarts and follow snapshots.
 
 ## Common errors
 
