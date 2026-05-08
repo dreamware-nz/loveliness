@@ -1,0 +1,19 @@
+{
+  "name": "loveliness",
+  "description": "Loveliness graph database — local plugin marketplace",
+  "owner": {
+    "name": "Dreamware"
+  },
+  "plugins": [
+    {
+      "name": "loveliness",
+      "source": "./",
+      "category": "data",
+      "description": "MCP server + skill for the Loveliness clustered graph database (Cypher, bulk load, schema, cluster status)",
+      "version": "0.1.0",
+      "author": {
+        "name": "Dreamware"
+      }
+    }
+  ]
+}

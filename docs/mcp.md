@@ -11,7 +11,28 @@ running cluster via HTTP, and exposes a small opinionated tool surface.
 
 ## Install
 
-### One-shot installer
+### Claude Code plugin (recommended)
+
+```bash
+make install-plugin
+```
+
+This runs `scripts/install-plugin.sh`, which:
+
+1. Builds `loveliness-mcp` into `$GOBIN` (or `$(go env GOPATH)/bin`).
+2. Registers this repo as a Claude Code plugin marketplace
+   (`claude plugin marketplace add <repo>`).
+3. Installs the plugin at user scope
+   (`claude plugin install loveliness@loveliness --scope user`).
+
+The plugin ships `.claude-plugin/plugin.json`, `.mcp.json`, and the
+`skills/loveliness/` skill, so the MCP server and skill are visible
+from every Claude Code project after a restart.
+
+Pass `FLAGS=--no-build` to skip the Go build, or `FLAGS=--update` to
+refresh an already-registered marketplace.
+
+### One-shot MCP-only installer
 
 ```bash
 make install-mcp
@@ -30,6 +51,9 @@ This runs `scripts/install-mcp.sh`, which:
 Honors `LOVELINESS_URL` and `LOVELINESS_TOKEN` from the environment.
 Pass `FLAGS=--local` to register at project scope instead, or
 `FLAGS=--no-skill` / `FLAGS=--no-register` to skip steps.
+
+Use `install-plugin` if you want the same setup wrapped as a Claude
+Code plugin (single uninstall via `claude plugin uninstall`).
 
 ### Manual install
 

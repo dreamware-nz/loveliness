@@ -1,4 +1,4 @@
-.PHONY: build test run clean docker mcp install-mcp
+.PHONY: build test run clean docker mcp install-mcp install-plugin
 
 BINARY := loveliness
 MCP_BINARY := loveliness-mcp
@@ -19,6 +19,12 @@ mcp:
 # Pass FLAGS=... to forward args to the installer (e.g. --no-skill).
 install-mcp:
 	./scripts/install-mcp.sh $(FLAGS)
+
+# install-plugin builds loveliness-mcp into $GOBIN and registers this
+# repo as a Claude Code plugin marketplace, then installs the plugin at
+# user scope. Use this instead of install-mcp for plugin-style install.
+install-plugin:
+	./scripts/install-plugin.sh $(FLAGS)
 
 test:
 	go test ./pkg/... -v -count=1
