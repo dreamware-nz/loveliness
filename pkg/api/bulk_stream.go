@@ -136,6 +136,7 @@ func (s *Server) handleBulkNodesStream(w http.ResponseWriter, r *http.Request) {
 		Loaded: totalLoaded.Load(),
 		Errors: allErrors,
 	}
+	s.bulkLoadCounters.Add(tableName, result.Loaded)
 	if len(result.Errors) > 0 {
 		writeJSON(w, http.StatusMultiStatus, result)
 	} else {
@@ -303,6 +304,7 @@ func (s *Server) handleBulkEdgesStream(w http.ResponseWriter, r *http.Request) {
 		Loaded: totalLoaded.Load(),
 		Errors: allErrors,
 	}
+	s.bulkLoadCounters.Add(relTable, result.Loaded)
 	if len(result.Errors) > 0 {
 		writeJSON(w, http.StatusMultiStatus, result)
 	} else {

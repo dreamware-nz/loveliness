@@ -287,6 +287,113 @@ func TestWriteQueryHistogramMetrics_EmitsAllSeries(t *testing.T) {
 	}
 }
 
+func TestBulkLoadCounters_AddAndSnapshot(t *testing.T) {
+	b := newBulkLoadCounters()
+	b.Add("Person", 100)
+	b.Add("Person", 50)
+	b.Add("Movie", 7)
+
+	snap := b.Snapshot()
+	if len(snap) != 2 {
+		t.Fatalf("expected 2 series, got %d", len(snap))
+	}
+	// Sorted alphabetically: Movie, Person.
+	if snap[0].Table != "Movie" || snap[0].Count != 7 {
+		t.Errorf("snap[0] = %+v, want {Movie 7}", snap[0])
+	}
+	if snap[1].Table != "Person" || snap[1].Count != 150 {
+		t.Errorf("snap[1] = %+v, want {Person 150}", snap[1])
+	}
+}
+
+func TestBulkLoadCounters_DropsZeroAndNegative(t *testing.T) {
+	b := newBulkLoadCounters()
+	b.Add("Person", 0)
+	b.Add("Person", -5)
+	b.Add("", 10)
+	if got := b.Snapshot(); len(got) != 0 {
+		t.Errorf("expected no samples, got %+v", got)
+	}
+}
+
+func TestBulkLoadCounters_NilSafe(t *testing.T) {
+	var b *bulkLoadCounters
+	b.Add("Person", 5) // must not panic
+	if got := b.Snapshot(); got != nil {
+		t.Errorf("nil snapshot must be nil, got %v", got)
+	}
+}
+
+func TestBulkLoadCounters_ConcurrentAdd(t *testing.T) {
+	b := newBulkLoadCounters()
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				b.Add("Person", 1)
+			}
+		}()
+	}
+	wg.Wait()
+	snap := b.Snapshot()
+	if len(snap) != 1 || snap[0].Count != 5000 {
+		t.Errorf("expected 1 series with count=5000, got %+v", snap)
+	}
+}
+
+func TestWriteBulkLoadMetrics_EmptyEmitsNothing(t *testing.T) {
+	var buf bytes.Buffer
+	writeBulkLoadMetrics(&buf, nil)
+	if buf.Len() != 0 {
+		t.Errorf("empty samples must emit nothing, got:\n%s", buf.String())
+	}
+}
+
+func TestWriteBulkLoadMetrics_Format(t *testing.T) {
+	var buf bytes.Buffer
+	writeBulkLoadMetrics(&buf, []bulkLoadSample{
+		{Table: "Movie", Count: 7},
+		{Table: "Person", Count: 150},
+	})
+	out := buf.String()
+	mustContain := []string{
+		"# HELP loveliness_bulk_load_rows_total",
+		"# TYPE loveliness_bulk_load_rows_total counter",
+		`loveliness_bulk_load_rows_total{table="Movie"} 7`,
+		`loveliness_bulk_load_rows_total{table="Person"} 150`,
+	}
+	for _, s := range mustContain {
+		if !strings.Contains(out, s) {
+			t.Errorf("missing %q in:\n%s", s, out)
+		}
+	}
+}
+
+func TestBulkNodes_RecordsBulkLoadCounter(t *testing.T) {
+	srv := setupTestServerWithSchema()
+	body := "name,age,city\nAlice,30,Auckland\nBob,25,Wellington\nCharlie,28,Hamilton\n"
+	req := httptest.NewRequest("POST", "/bulk/nodes", bytes.NewBufferString(body))
+	req.Header.Set("X-Table", "Person")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("bulk/nodes returned %d: %s", w.Code, w.Body.String())
+	}
+
+	mreq := httptest.NewRequest("GET", "/metrics", nil)
+	mw := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(mw, mreq)
+	if mw.Code != http.StatusOK {
+		t.Fatalf("metrics endpoint returned %d: %s", mw.Code, mw.Body.String())
+	}
+	body2 := mw.Body.String()
+	if !strings.Contains(body2, `loveliness_bulk_load_rows_total{table="Person"} 3`) {
+		t.Errorf("expected Person counter at 3 in /metrics:\n%s", body2)
+	}
+}
+
 func TestCypher_RecordsQueryCounter(t *testing.T) {
 	srv := setupTestServer()
 
