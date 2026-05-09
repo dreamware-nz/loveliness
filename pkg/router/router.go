@@ -79,6 +79,16 @@ type Router struct {
 	nodeID    string
 	remote    RemoteQuerier
 	placement PlacementResolver
+
+	// scatterConcurrency caps the number of in-flight per-shard
+	// dispatches in scatterGather. Without a cap, a deployment with
+	// hundreds of shards would spawn hundreds of goroutines per query
+	// and exhaust the connection pool / pin a CPU core under load. The
+	// cap is set at 0 (unbounded) by default for backwards compat;
+	// production callers that wire SetRemoteTransport should set this
+	// to max(8, 2*shardCount) per the #6 spec. SetScatterConcurrency
+	// is the configuration knob.
+	scatterConcurrency int
 }
 
 // DDLHook is called when a DDL statement registers or removes a table.
@@ -196,10 +206,42 @@ func (r *Router) SetDDLHook(h DDLHook) {
 }
 
 // SetRemoteTransport configures distributed query routing to remote shards.
+//
+// Wiring remote transport also installs a sensible scatter-concurrency
+// cap if the caller hasn't set one yet. The default — max(8,
+// 2*shardCount) — matches the #6 spec and keeps the fan-out finite when
+// a deployment has more shards than the connection pool can sustain.
+// Callers that want a different value can call SetScatterConcurrency
+// after this.
 func (r *Router) SetRemoteTransport(nodeID string, remote RemoteQuerier, placement PlacementResolver) {
 	r.nodeID = nodeID
 	r.remote = remote
 	r.placement = placement
+	if r.scatterConcurrency == 0 {
+		r.scatterConcurrency = defaultScatterConcurrency(r.shardCount)
+	}
+}
+
+// SetScatterConcurrency sets the upper bound on parallel per-shard
+// dispatches in scatterGather. n <= 0 disables the cap (every shard
+// gets its own goroutine; matches the pre-#6 behavior).
+func (r *Router) SetScatterConcurrency(n int) {
+	if n < 0 {
+		n = 0
+	}
+	r.scatterConcurrency = n
+}
+
+// defaultScatterConcurrency yields the cap recommended by the #6 spec:
+// max(8, 2*shardCount). The 2× factor lets one shard be scheduling its
+// next request while another is mid-RPC; the 8 floor keeps small
+// deployments from over-throttling.
+func defaultScatterConcurrency(shardCount int) int {
+	cap := 2 * shardCount
+	if cap < 8 {
+		cap = 8
+	}
+	return cap
 }
 
 // queryShardRaw queries a shard and returns the raw QueryResponse.
@@ -487,10 +529,22 @@ func (r *Router) scatterGather(ctx context.Context, parsed *ParsedQuery) (*Resul
 	var wg sync.WaitGroup
 	results := make(chan shardResult, r.shardCount)
 
+	// Bounded fan-out: a buffered channel acts as a semaphore. Each
+	// goroutine acquires before dispatching the per-shard query and
+	// releases on return. Cap == 0 disables the gate (legacy behavior).
+	var sem chan struct{}
+	if r.scatterConcurrency > 0 && r.scatterConcurrency < r.shardCount {
+		sem = make(chan struct{}, r.scatterConcurrency)
+	}
+
 	for i := 0; i < r.shardCount; i++ {
 		wg.Add(1)
 		go func(shardID int) {
 			defer wg.Done()
+			if sem != nil {
+				sem <- struct{}{}
+				defer func() { <-sem }()
+			}
 			resp, err := r.queryShardRaw(shardID, shardQuery)
 			results <- shardResult{shardID: shardID, resp: resp, err: err}
 		}(i)
