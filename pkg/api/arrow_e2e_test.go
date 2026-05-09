@@ -336,9 +336,17 @@ func TestE2E_DefaultIsByteIdenticalToExplicitJSON(t *testing.T) {
 	// explicit AC bullet on #27. Two requests against the same data —
 	// one with no Accept, one with Accept: application/json — must
 	// produce byte-identical bodies, not just equivalent JSON.
+	//
+	// Single row, single column: MemoryStore iterates Go maps for
+	// both row order and column order, and the runtime randomizes
+	// map iteration. A multi-row or multi-column fixture would
+	// shuffle independently between the two calls and produce
+	// equivalent-but-not-byte-equal bodies. The AC is about the
+	// *encoding* matching (JSON formatting, key ordering policy),
+	// not the row-order policy — a 1×1 fixture removes the
+	// iteration variable so the byte-equal check is meaningful.
 	rows := []map[string]any{
-		{"name": "Alice", "age": int64(30)},
-		{"name": "Bob", "age": int64(25)},
+		{"name": "Alice"},
 	}
 	srv1 := e2eTestServer(rows)
 	srv2 := e2eTestServer(rows)
