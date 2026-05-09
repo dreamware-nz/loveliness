@@ -93,8 +93,35 @@ func (c *Cluster) IsLeader() bool {
 	return c.raft.State() == raft.Leader
 }
 
+// Role returns the current Raft role as a lowercase string:
+// "leader", "follower", "candidate", "shutdown", or "unknown".
+// Operationally surfaced via /health and the raft_state metric.
+func (c *Cluster) Role() string {
+	switch c.raft.State() {
+	case raft.Leader:
+		return "leader"
+	case raft.Follower:
+		return "follower"
+	case raft.Candidate:
+		return "candidate"
+	case raft.Shutdown:
+		return "shutdown"
+	default:
+		return "unknown"
+	}
+}
+
 // LeaderAddr returns the address of the current leader.
 func (c *Cluster) LeaderAddr() string {
+	_, id := c.raft.LeaderWithID()
+	return string(id)
+}
+
+// LeaderID returns the node ID of the current leader (or empty if unknown).
+// hashicorp/raft uses ServerID for the logical identity, distinct from the
+// raft transport address — they happen to be equal in our setup but tests
+// and dashboards should not assume that.
+func (c *Cluster) LeaderID() string {
 	_, id := c.raft.LeaderWithID()
 	return string(id)
 }
