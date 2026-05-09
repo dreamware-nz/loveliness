@@ -159,3 +159,36 @@ Internal cluster communication uses a binary TCP transport with MessagePack seri
 | 8-worker concurrent | 397us | 94us | **4.2x** |
 | Marshal 1000 rows | 481us | 198us | **2.4x** |
 | Unmarshal 1000 rows | 1,247us | 442us | **2.8x** |
+
+## Cross-Node Scatter-Gather (router → adapter → TCP → remote shard)
+
+`pkg/transport/cross_node_bench_test.go` exercises the full router
+path: a local `router.Router` with zero local shards, a
+`transport.RouterAdapter`, and N remote nodes each running their own
+TCP server. Every shard ID dispatches as a remote RPC, so this is
+the regression signal for any change in the scatter cap, retry
+budget, bloom-skip, or merge logic. Apple M1, loopback, 100 rows
+per shard unless noted:
+
+| Topology | Shards | ns/op |
+|---|---|---|
+| 2 nodes × 4 shards (10 rows) | 8 | ~210µs |
+| 2 nodes × 4 shards | 8 | ~560µs |
+| 2 nodes × 4 shards (1000 rows) | 8 | ~3.5ms |
+| 4 nodes × 4 shards | 16 | ~1.1ms |
+| 2 nodes × 16 shards | 32 | ~3.1ms |
+| 2 nodes × 4 shards, 8-worker concurrent | 8 | ~430µs/op |
+
+Run with:
+
+```sh
+go test -run '^$' -bench BenchmarkCrossNodeScatter \
+    -benchtime=100x ./pkg/transport/
+```
+
+Loopback over-reports throughput because there's no real network
+RTT — treat the absolute numbers as a floor. The interesting signal
+is shape: doubling shards-per-node roughly doubles the per-call
+cost (TCP pool contention starts to bind around shard count > pool
+size), and concurrent dispatch beats serial by ~30% even on a
+single host because msgpack encode/decode pipelines.
