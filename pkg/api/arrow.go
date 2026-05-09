@@ -16,9 +16,9 @@ import (
 // inspecting every row. NODE and RELATIONSHIP get strongly-typed
 // Arrow structs (see arrow_node.go). LIST is strongly typed when
 // every element across every row reduces to the same scalar kind;
-// otherwise the column falls back to the JSON-encoded utf8 path.
-// MAP currently still falls back to JSON until its dedicated slice
-// lands.
+// MAP is strongly typed when every entry's key is a string and every
+// value across every row reduces to the same scalar kind. Otherwise
+// the column falls back to the JSON-encoded utf8 path.
 type arrowColumnKind int
 
 const (
@@ -30,17 +30,20 @@ const (
 	arrowKindNode
 	arrowKindRelationship
 	arrowKindList
+	arrowKindMap
 	arrowKindJSON
 )
 
 // columnSpec is the resolved schema description for a result column.
 // `kind` is the top-level Arrow type; `listElem` is only meaningful
-// when kind == arrowKindList and carries the unified element kind
-// across every row's list. We never nest deeper — a list-of-list
-// degrades to the JSON fallback so the schema stays predictable.
+// when kind == arrowKindList; `mapValue` is only meaningful when
+// kind == arrowKindMap. We never nest deeper — a list-of-list or
+// map-of-map degrades to the JSON fallback so the schema stays
+// predictable.
 type columnSpec struct {
 	kind     arrowColumnKind
 	listElem arrowColumnKind
+	mapValue arrowColumnKind
 }
 
 func (s columnSpec) arrowType() arrow.DataType {
@@ -59,6 +62,8 @@ func (s columnSpec) arrowType() arrow.DataType {
 		return arrowRelationshipType
 	case arrowKindList:
 		return arrow.ListOf(listElementType(s.listElem))
+	case arrowKindMap:
+		return arrow.MapOf(arrow.BinaryTypes.String, listElementType(s.mapValue))
 	default:
 		return arrow.Null
 	}
@@ -127,10 +132,31 @@ func kindOf(v any) arrowColumnKind {
 	return arrowKindJSON
 }
 
-// specOf classifies a single cell value into a columnSpec. Lists
-// recurse: the slice's element kind is unified across all elements
-// in this row. Cross-row unification happens in mergeSpecs.
+// specOf classifies a single cell value into a columnSpec. Lists and
+// maps recurse: their element / value kinds are unified across the
+// row. Cross-row unification happens in mergeSpecs.
 func specOf(v any) columnSpec {
+	if entries, ok := asMapEntries(v); ok {
+		valKind := arrowKindNull
+		for _, e := range entries {
+			// Cypher MAP keys are always strings on the wire. A
+			// non-string key means the value isn't expressible as
+			// Arrow `map<utf8, V>`; collapse the entire column to
+			// JSON.
+			if _, keyOK := e.key.(string); !keyOK {
+				return columnSpec{kind: arrowKindJSON}
+			}
+			if e.value == nil {
+				continue
+			}
+			vk := kindOf(e.value)
+			valKind = mergeKinds(valKind, vk)
+			if valKind == arrowKindJSON {
+				return columnSpec{kind: arrowKindJSON}
+			}
+		}
+		return columnSpec{kind: arrowKindMap, mapValue: valKind}
+	}
 	if elems, ok := asListElements(v); ok {
 		elemKind := arrowKindNull
 		for _, e := range elems {
@@ -157,6 +183,10 @@ func specOf(v any) columnSpec {
 // from the slice path even though Go strings are byte-sliceable.
 func asListElements(v any) ([]any, bool) {
 	if s, ok := v.([]any); ok {
+		// `[]any` could carry either list elements or, when every
+		// element is a {Key, Value} pair, a map. asMapEntries
+		// (called first by specOf) handles the map case; if we
+		// reach here, treat it as a list.
 		return s, true
 	}
 	return nil, false
@@ -179,10 +209,11 @@ func mergeKinds(a, b arrowColumnKind) arrowColumnKind {
 	return arrowKindJSON
 }
 
-// mergeSpecs unifies two cell specs into a column spec. Lists merge
-// elementwise; mixing a list with a non-list collapses the column to
-// JSON utf8 (a column can't be "sometimes a scalar, sometimes a
-// list" in Arrow without a union type).
+// mergeSpecs unifies two cell specs into a column spec. Lists and
+// maps merge over their child kinds; mixing a list/map with a
+// scalar (or with each other) collapses the column to JSON utf8 (a
+// column can't be "sometimes a scalar, sometimes a list" in Arrow
+// without a union type).
 func mergeSpecs(a, b columnSpec) columnSpec {
 	if a.kind == arrowKindNull {
 		return b
@@ -197,7 +228,15 @@ func mergeSpecs(a, b columnSpec) columnSpec {
 		}
 		return columnSpec{kind: arrowKindList, listElem: merged}
 	}
-	if a.kind == arrowKindList || b.kind == arrowKindList {
+	if a.kind == arrowKindMap && b.kind == arrowKindMap {
+		merged := mergeKinds(a.mapValue, b.mapValue)
+		if merged == arrowKindJSON {
+			return columnSpec{kind: arrowKindJSON}
+		}
+		return columnSpec{kind: arrowKindMap, mapValue: merged}
+	}
+	if a.kind == arrowKindList || b.kind == arrowKindList ||
+		a.kind == arrowKindMap || b.kind == arrowKindMap {
 		return columnSpec{kind: arrowKindJSON}
 	}
 	return columnSpec{kind: mergeKinds(a.kind, b.kind)}
@@ -336,6 +375,9 @@ func appendCell(b array.Builder, spec columnSpec, v any) error {
 	if spec.kind == arrowKindList {
 		return appendListCell(b.(*array.ListBuilder), spec.listElem, v)
 	}
+	if spec.kind == arrowKindMap {
+		return appendMapCell(b.(*array.MapBuilder), spec.mapValue, v)
+	}
 	return appendScalarCell(b, spec.kind, v)
 }
 
@@ -419,6 +461,33 @@ func appendListCell(lb *array.ListBuilder, elemKind arrowColumnKind, v any) erro
 	valB := lb.ValueBuilder()
 	for _, e := range elems {
 		if err := appendScalarCell(valB, elemKind, e); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// appendMapCell pushes one map value into a MapBuilder. Entries with
+// non-string keys are skipped — classifyColumn already routes such
+// rows through the JSON fallback, so a non-string key reaching this
+// path means the cell shape disagreed with what the schema saw, and
+// silently dropping it is safer than panicking.
+func appendMapCell(mb *array.MapBuilder, valueKind arrowColumnKind, v any) error {
+	entries, ok := asMapEntries(v)
+	if !ok {
+		mb.AppendNull()
+		return nil
+	}
+	mb.Append(true)
+	keyB := mb.KeyBuilder().(*array.StringBuilder)
+	itemB := mb.ItemBuilder()
+	for _, e := range entries {
+		k, ok := e.key.(string)
+		if !ok {
+			continue
+		}
+		keyB.Append(k)
+		if err := appendScalarCell(itemB, valueKind, e.value); err != nil {
 			return err
 		}
 	}

@@ -11,9 +11,9 @@ and `application/vnd.apache.arrow.file`. They differ only in the
 container, not in the schema.
 
 > Status — the **current encoder** implements scalar types, NODE,
-> RELATIONSHIP, LIST<T>, and the JSON-fallback row in the table
-> below. MAP / PATH are part of issue [#27](https://github.com/dreamware-nz/loveliness/issues/27)
-> and ship as separate slices; until they land, those values arrive
+> RELATIONSHIP, LIST<T>, MAP<utf8, V>, and the JSON-fallback row in
+> the table below. PATH is part of issue [#27](https://github.com/dreamware-nz/loveliness/issues/27)
+> and ships as a separate slice; until it lands, path values arrive
 > as JSON-encoded `utf8` so clients still receive a parseable result.
 > The "Status" column flags which rows are live today vs. landing
 > later — the schema contract itself does not change when those
@@ -47,11 +47,29 @@ coerced to 0/1.
 | Cypher value | Arrow type | Status |
 |---|---|---|
 | `LIST<T>` | `list<T'>` where `T'` is `T`'s row above | live |
-| `MAP<utf8, V>` | `map<utf8, V'>` (keys always `utf8`, sorted) | follow-up |
+| `MAP<utf8, V>` | `map<utf8, V'>` (keys always `utf8`) | live |
 | `NODE` | `struct{ id: internal_id, labels: list<utf8>, properties: utf8 (JSON) }` | live |
 | `RELATIONSHIP` | `struct{ id: internal_id, start_id: internal_id, end_id: internal_id, label: utf8, properties: utf8 (JSON) }` | live |
 | `PATH` | `struct{ nodes: list<NODE>, relationships: list<RELATIONSHIP>, length: int64 }` | follow-up |
 | any other / heterogeneous column | `utf8` (JSON-encoded value per cell) | live |
+
+### MAP<utf8, V> classification
+
+A column lands as `map<utf8, V'>` when every cell is a slice of
+`{Key, Value}` entries (i.e. the Cypher MAP wire shape — `[]MapItem`
+in the LadybugDB binding) **and** every entry's key resolves to a Go
+`string`. The value type `V'` is unified across every entry's value
+under the same rules as scalar columns: `INTEGER` + `FLOAT` promotes
+to `float64`, anything else heterogeneous degrades the entire column
+to JSON `utf8`. A non-string key in any row also forces the JSON
+fallback — Arrow `map<K, V>` requires a single concrete key type and
+the wire contract pins it to `utf8`.
+
+A column that mixes maps with non-maps (scalars or lists) across
+rows uses the JSON fallback for the same reason `LIST<T>` does — Arrow
+has no "sometimes a map" type without a union. Note that we do
+**not** recognize Go `map[string]any` as a Cypher MAP: Cypher MAPs
+are ordered key/value sequences and we won't silently reorder them.
 
 ### LIST<T> classification
 
