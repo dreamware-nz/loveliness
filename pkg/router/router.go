@@ -63,6 +63,10 @@ type Router struct {
 	// WAL appender for recording writes (disaster recovery).
 	walAppender WALAppender
 
+	// Rewriter applied to write Cypher before WAL append + execution so
+	// replicas reproduce identical state when they replay the WAL.
+	writeRewriter WriteRewriter
+
 	// DDL hook for replicating schema changes via Raft.
 	ddlHook DDLHook
 
@@ -92,6 +96,15 @@ type PlacementResolver interface {
 // intent log. Implementations live in pkg/replication to avoid circular imports.
 type WALAppender interface {
 	Append(shardID int, cypher string) (uint64, error)
+}
+
+// WriteRewriter normalises non-deterministic Cypher functions (now(), rand(),
+// randomUUID(), …) to literal values BEFORE the statement is appended to the
+// WAL or executed on the primary. The same rewritten string is what replicas
+// replay, so primary and replicas converge to the same state. Implementations
+// live in pkg/replication to keep this package import-free.
+type WriteRewriter interface {
+	Rewrite(cypher string) string
 }
 
 // NewRouter creates a Router over the given shards.
@@ -133,6 +146,13 @@ func (r *Router) EdgeCut() *EdgeCutReplicator {
 // SetWAL attaches a WAL appender for recording write operations.
 func (r *Router) SetWAL(w WALAppender) {
 	r.walAppender = w
+}
+
+// SetWriteRewriter installs a rewriter that normalises non-deterministic
+// Cypher (now(), rand(), …) to literal values before WAL append and primary
+// execution. Pass nil to disable.
+func (r *Router) SetWriteRewriter(rw WriteRewriter) {
+	r.writeRewriter = rw
 }
 
 // SetDDLHook sets a hook that replicates schema DDL changes (e.g. via Raft).
@@ -348,9 +368,17 @@ func (r *Router) queryShard(ctx context.Context, shardID int, cypher string) (*R
 		if !s.IsHealthy() {
 			return nil, &QueryError{Code: "SHARD_UNAVAILABLE", Message: fmt.Sprintf("shard %d is unhealthy", shardID), ShardID: shardID}
 		}
-		if r.walAppender != nil && isWriteQuery(cypher) {
-			if _, err := r.walAppender.Append(shardID, cypher); err != nil {
-				return nil, &QueryError{Code: "WAL_ERROR", Message: fmt.Sprintf("WAL append failed: %v", err), ShardID: shardID}
+		if isWriteQuery(cypher) {
+			// Normalise non-deterministic functions (now(), rand(), …) to
+			// literals BEFORE WAL append AND execution so replicas replay the
+			// exact same statement and converge to the primary's state.
+			if r.writeRewriter != nil {
+				cypher = r.writeRewriter.Rewrite(cypher)
+			}
+			if r.walAppender != nil {
+				if _, err := r.walAppender.Append(shardID, cypher); err != nil {
+					return nil, &QueryError{Code: "WAL_ERROR", Message: fmt.Sprintf("WAL append failed: %v", err), ShardID: shardID}
+				}
 			}
 		}
 	}
