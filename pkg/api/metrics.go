@@ -72,6 +72,10 @@ func writeMetrics(w io.Writer, s *Server) {
 		writeRaftStateMetric(w, s.cluster)
 	}
 
+	if s.queryCounters != nil {
+		writeQueryCounterMetrics(w, s.queryCounters.Snapshot())
+	}
+
 	if s.dr == nil || s.dr.WAL == nil {
 		return
 	}
@@ -95,6 +99,22 @@ func writeMetrics(w io.Writer, s *Server) {
 	}
 
 	writeWALMetrics(w, s.dr.WAL, shardIDs, s.dr.ReplicaState, pairs)
+}
+
+// writeQueryCounterMetrics emits loveliness_query_total{query_type, status}
+// from a deterministic snapshot. Counters that have never observed a
+// value still emit nothing — a series only appears once it's been hit
+// at least once, matching client_golang's lazy-creation semantics.
+func writeQueryCounterMetrics(w io.Writer, samples []queryCounterSample) {
+	if len(samples) == 0 {
+		return
+	}
+	emitHelp(w, "loveliness_query_total",
+		"Number of /cypher requests by query type and status bucket.", "counter")
+	for _, s := range samples {
+		fprintf(w, "loveliness_query_total{query_type=%q,status=%q} %d\n",
+			s.QueryType, s.Status, s.Count)
+	}
 }
 
 // writeRaftStateMetric emits loveliness_raft_state as a one-hot gauge:
