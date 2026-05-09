@@ -21,6 +21,7 @@ explicitly here, not by collector defaults.
 | Metric | Type | Labels | Cardinality bound |
 |---|---|---|---|
 | `loveliness_local_shards` | gauge | — | 1 |
+| `loveliness_shard_healthy` | gauge | `shard_id` | ≤ 256 |
 | `loveliness_raft_state` | gauge | `node_id`, `state` | 1 × 5 = **5** |
 | `loveliness_query_total` | counter | `query_type`, `status` | 4 × 4 = **16** |
 | `loveliness_query_duration_seconds` | histogram | `query_type`, `status` | 4 × 4 × (13 buckets + `_sum` + `_count` + `+Inf`) ≈ **256** |

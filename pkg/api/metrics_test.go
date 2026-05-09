@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -196,6 +197,70 @@ func TestRaftState_AlwaysEmitsAllStates(t *testing.T) {
 			t.Errorf("missing series for state=%q in:\n%s", st, out)
 		}
 	}
+}
+
+func TestShardHealthMetric_AllHealthy(t *testing.T) {
+	srv := setupTestServer()
+	var buf bytes.Buffer
+	writeShardHealthMetric(&buf, srv)
+	out := buf.String()
+
+	mustContain := []string{
+		"# HELP loveliness_shard_healthy",
+		"# TYPE loveliness_shard_healthy gauge",
+	}
+	for _, s := range mustContain {
+		if !strings.Contains(out, s) {
+			t.Errorf("missing %q in:\n%s", s, out)
+		}
+	}
+	for _, sh := range srv.shards {
+		want := `loveliness_shard_healthy{shard_id="` + itoa(sh.ID) + `"} 1`
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestShardHealthMetric_SortedByShardID(t *testing.T) {
+	srv := setupTestServer()
+	var buf bytes.Buffer
+	writeShardHealthMetric(&buf, srv)
+	out := buf.String()
+	idx0 := strings.Index(out, `loveliness_shard_healthy{shard_id="0"}`)
+	idx1 := strings.Index(out, `loveliness_shard_healthy{shard_id="1"}`)
+	if idx0 < 0 || idx1 < 0 || idx0 >= idx1 {
+		t.Errorf("expected shard 0 before shard 1; got idx0=%d idx1=%d", idx0, idx1)
+	}
+}
+
+func TestShardHealthMetric_ScrapedViaEndpoint(t *testing.T) {
+	srv := setupTestServer()
+	req := httptest.NewRequest("GET", "/metrics", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("metrics endpoint returned %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "loveliness_shard_healthy{shard_id=") {
+		t.Errorf("missing loveliness_shard_healthy series in /metrics:\n%s", w.Body.String())
+	}
+}
+
+func TestShardHealthMetric_NoShardsEmitsNothing(t *testing.T) {
+	// A Server with no shards (degenerate case) must not emit the
+	// help/type headers either — empty exposition is what Prometheus
+	// expects for a metric with no series.
+	srv := &Server{}
+	var buf bytes.Buffer
+	writeShardHealthMetric(&buf, srv)
+	if buf.Len() != 0 {
+		t.Errorf("expected no output for empty shards, got:\n%s", buf.String())
+	}
+}
+
+func itoa(n int) string {
+	return fmt.Sprintf("%d", n)
 }
 
 func TestComputeLagSeconds(t *testing.T) {
