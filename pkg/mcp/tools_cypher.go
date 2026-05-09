@@ -12,14 +12,27 @@ import (
 type CypherInput struct {
 	Query  string         `json:"query" jsonschema:"Cypher statement to execute."`
 	Params map[string]any `json:"params,omitempty" jsonschema:"Optional parameter bindings (referenced as $name in the query)."`
+	// Format selects the response wire format. "json" (default) returns
+	// rows as structured output for the LLM to read directly. "arrow"
+	// returns an Apache Arrow IPC stream as an embedded resource on
+	// the tool result, paired with a brief text summary — use this
+	// when the downstream consumer (DuckDB-WASM, pyarrow, polars) can
+	// ingest Arrow bytes without a JSON parse step.
+	Format string `json:"format,omitempty" jsonschema:"Result format: 'json' (default) or 'arrow' (IPC stream attached as embedded resource)."`
 }
 
-// CypherOutput is the structured output.
+// CypherOutput is the structured output for the JSON path.
 type CypherOutput struct {
 	Columns []string         `json:"columns"`
 	Rows    []map[string]any `json:"rows"`
 	Stats   map[string]any   `json:"stats,omitempty"`
 }
+
+// arrowResourceURI is the URI we attach to embedded Arrow result
+// blobs. It is informational — clients identify the payload by MIME
+// type, not URI — but a stable scheme makes it easier to spot in
+// logs and traces.
+const arrowResourceURI = "loveliness:cypher-result.arrows"
 
 // writeKeywords are statements rejected by cypher_read.
 //
@@ -163,7 +176,7 @@ func registerCypherTools(s *mcp.Server, c *Client, readonly bool) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "cypher_read",
 		Title:       "Run a read-only Cypher query",
-		Description: "Execute a Cypher read query (MATCH/RETURN/CALL/...). Rejects write keywords (CREATE, MERGE, SET, DELETE, DROP, REMOVE, LOAD, COPY, ALTER, DETACH). Use $name placeholders with params for safe substitution.",
+		Description: "Execute a Cypher read query (MATCH/RETURN/CALL/...). Rejects write keywords (CREATE, MERGE, SET, DELETE, DROP, REMOVE, LOAD, COPY, ALTER, DETACH). Use $name placeholders with params for safe substitution. Set format='arrow' to receive an Apache Arrow IPC stream as an embedded resource (skip JSON parsing for analytics consumers).",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in CypherInput) (*mcp.CallToolResult, CypherOutput, error) {
 		if strings.TrimSpace(in.Query) == "" {
 			return toolError(fmt.Errorf("query is required")), CypherOutput{}, nil
@@ -171,11 +184,7 @@ func registerCypherTools(s *mcp.Server, c *Client, readonly bool) {
 		if isWrite(in.Query) {
 			return toolError(fmt.Errorf("cypher_read rejects write statements; use cypher_write for %s", firstKeyword(in.Query))), CypherOutput{}, nil
 		}
-		res, err := c.Cypher(ctx, in.Query, in.Params)
-		if err != nil {
-			return toolError(err), CypherOutput{}, nil
-		}
-		return nil, CypherOutput{Columns: res.Columns, Rows: res.Rows, Stats: res.Stats}, nil
+		return runCypher(ctx, c, in)
 	})
 
 	if readonly {
@@ -185,15 +194,57 @@ func registerCypherTools(s *mcp.Server, c *Client, readonly bool) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "cypher_write",
 		Title:       "Run a Cypher write query",
-		Description: "Execute a Cypher write statement (CREATE/MERGE/SET/DELETE/etc) or DDL. Not registered when --readonly is set.",
+		Description: "Execute a Cypher write statement (CREATE/MERGE/SET/DELETE/etc) or DDL. Not registered when --readonly is set. Set format='arrow' to receive an Apache Arrow IPC stream as an embedded resource (mostly useful for write-then-RETURN queries).",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in CypherInput) (*mcp.CallToolResult, CypherOutput, error) {
 		if strings.TrimSpace(in.Query) == "" {
 			return toolError(fmt.Errorf("query is required")), CypherOutput{}, nil
 		}
+		return runCypher(ctx, c, in)
+	})
+}
+
+// runCypher dispatches a Cypher request to the right code path based
+// on the requested response format. JSON is the default (LLM-friendly
+// structured output); Arrow attaches an IPC stream blob to the tool
+// result so analytics consumers can skip a JSON parse round-trip.
+func runCypher(ctx context.Context, c *Client, in CypherInput) (*mcp.CallToolResult, CypherOutput, error) {
+	switch strings.ToLower(strings.TrimSpace(in.Format)) {
+	case "", "json":
 		res, err := c.Cypher(ctx, in.Query, in.Params)
 		if err != nil {
 			return toolError(err), CypherOutput{}, nil
 		}
 		return nil, CypherOutput{Columns: res.Columns, Rows: res.Rows, Stats: res.Stats}, nil
-	})
+	case "arrow":
+		buf, err := c.CypherArrow(ctx, in.Query, in.Params)
+		if err != nil {
+			return toolError(err), CypherOutput{}, nil
+		}
+		return arrowResult(buf), CypherOutput{}, nil
+	default:
+		return toolError(fmt.Errorf("format must be 'json' or 'arrow', got %q", in.Format)), CypherOutput{}, nil
+	}
+}
+
+// arrowResult builds a CallToolResult that pairs a brief text
+// summary (for the LLM / human reader) with an embedded Arrow IPC
+// resource carrying the actual bytes. The text summary intentionally
+// stays terse — the whole point of the Arrow path is that the LLM
+// shouldn't need to read the full result; an analytics-aware client
+// reads the embedded resource instead.
+func arrowResult(buf []byte) *mcp.CallToolResult {
+	size := int64(len(buf))
+	summary := fmt.Sprintf("Arrow IPC stream attached (%d bytes). MIME type %s.", size, ArrowStreamMIME)
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{
+			&mcp.TextContent{Text: summary},
+			&mcp.EmbeddedResource{
+				Resource: &mcp.ResourceContents{
+					URI:      arrowResourceURI,
+					MIMEType: ArrowStreamMIME,
+					Blob:     buf,
+				},
+			},
+		},
+	}
 }

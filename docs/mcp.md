@@ -141,11 +141,52 @@ first non-comment keyword is `CREATE`, `MERGE`, `SET`, `DELETE`, `DROP`,
 
 Returns `{columns, rows, stats}`.
 
+#### Arrow output (`format: "arrow"`)
+
+Add `"format": "arrow"` to receive the result as an Apache Arrow IPC
+stream attached to the tool result as an embedded resource (MIME type
+`application/vnd.apache.arrow.stream`):
+
+```jsonc
+{
+  "query":  "MATCH (p:Person) RETURN p LIMIT 25000",
+  "format": "arrow"
+}
+```
+
+Tool result shape (abridged):
+
+```jsonc
+{
+  "content": [
+    { "type": "text", "text": "Arrow IPC stream attached (524288 bytes). MIME type application/vnd.apache.arrow.stream." },
+    { "type": "resource", "resource": {
+        "uri":      "loveliness:cypher-result.arrows",
+        "mimeType": "application/vnd.apache.arrow.stream",
+        "blob":     "<base64-encoded IPC stream>"
+    }}
+  ]
+}
+```
+
+Use this from MCP clients that can ingest Arrow directly
+(DuckDB-WASM `read_arrow`, pyarrow `ipc.open_stream`, polars
+`read_ipc_stream`, …) — it skips the JSON marshal/unmarshal
+round-trip and lands in the consumer's columnar memory layout
+without an intermediate parse step. The schema follows the
+[Cypher → Arrow type mapping](arrow-mapping.md). The default
+(`format` omitted or `"json"`) keeps the existing
+`{columns, rows, stats}` structured-content path that LLMs read
+directly.
+
 ### `cypher_write`
 
-Same input shape as `cypher_read`, no keyword gate. Registered only
-when `--readonly=false`. Clients that want per-tool gating (Claude
-Code's `/permissions`) can opt-in this tool specifically.
+Same input shape as `cypher_read`, including the `format` field, no
+keyword gate. Registered only when `--readonly=false`. Clients that
+want per-tool gating (Claude Code's `/permissions`) can opt-in this
+tool specifically. The Arrow path on `cypher_write` is mostly useful
+for write-then-`RETURN` queries where the returned rows feed an
+analytics consumer.
 
 ### `create_node_table` / `create_edge_table` / `drop_table`
 
