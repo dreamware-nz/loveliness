@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"testing"
+	"time"
 
 	"github.com/johnjansen/loveliness/pkg/router"
 )
@@ -177,6 +178,37 @@ func TestResolutionPlateau_HonorsCancelledContext(t *testing.T) {
 	})
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("expected context.Canceled, got %v", err)
+	}
+}
+
+// TestResolutionPlateau_CancelMidSweep: cancelling ctx while runSweep
+// is in flight must (a) eventually return ctx.Err() and (b) not leak
+// goroutines or race on partitions[i] writes. Mirrors the leiden
+// plugin's CancelMidSweep test — combined with -race it locks the
+// goroutine-cleanup contract for the resolution_plateau sweep.
+func TestResolutionPlateau_CancelMidSweep(t *testing.T) {
+	r := twoCliquesPlusBridge()
+	gammas := make([]any, 32)
+	for i := range gammas {
+		gammas[i] = float64(0.5 + 0.1*float64(i))
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(1 * time.Millisecond)
+		cancel()
+	}()
+
+	_, err := ResolutionPlateau{}.Compute(ctx, r, map[string]any{
+		"gammas": gammas,
+		"seed":   float64(1),
+	})
+
+	// Either cancellation hit mid-loop (context.Canceled) or all 32 γs
+	// finished first (nil). Both are valid; we just need the cancellation
+	// path to be race-free when it does fire.
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Errorf("expected nil or context.Canceled, got %v", err)
 	}
 }
 

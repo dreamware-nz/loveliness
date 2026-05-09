@@ -110,11 +110,9 @@ func NMI(a, b []int) float64 {
 		mi += pXY * math.Log(pXY/(pX*pY))
 	}
 
-	denom := hA + hB
-	if denom == 0 {
-		return 0
-	}
-	nmi := 2 * mi / denom
+	// hA + hB > 0 here: the trivial-vs-trivial case (hA == 0 && hB == 0)
+	// already returned 1 above.
+	nmi := 2 * mi / (hA + hB)
 	// Clamp to [0,1] to absorb floating-point drift; with finite-precision
 	// arithmetic NMI can land at 1.0000000003 for an identical partition.
 	if nmi > 1 {
