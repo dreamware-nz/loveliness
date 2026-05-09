@@ -10,9 +10,9 @@ The mapping is the same for both IPC variants — `application/vnd.apache.arrow.
 and `application/vnd.apache.arrow.file`. They differ only in the
 container, not in the schema.
 
-> Status — the **current encoder** implements scalar types and the
-> JSON-fallback row in the table below. NODE / RELATIONSHIP / LIST /
-> MAP / PATH are part of issue [#27](https://github.com/dreamware-nz/loveliness/issues/27)
+> Status — the **current encoder** implements scalar types, NODE,
+> RELATIONSHIP, LIST<T>, and the JSON-fallback row in the table
+> below. MAP / PATH are part of issue [#27](https://github.com/dreamware-nz/loveliness/issues/27)
 > and ship as separate slices; until they land, those values arrive
 > as JSON-encoded `utf8` so clients still receive a parseable result.
 > The "Status" column flags which rows are live today vs. landing
@@ -46,12 +46,25 @@ coerced to 0/1.
 
 | Cypher value | Arrow type | Status |
 |---|---|---|
-| `LIST<T>` | `list<T'>` where `T'` is `T`'s row above | follow-up |
+| `LIST<T>` | `list<T'>` where `T'` is `T`'s row above | live |
 | `MAP<utf8, V>` | `map<utf8, V'>` (keys always `utf8`, sorted) | follow-up |
 | `NODE` | `struct{ id: internal_id, labels: list<utf8>, properties: utf8 (JSON) }` | live |
 | `RELATIONSHIP` | `struct{ id: internal_id, start_id: internal_id, end_id: internal_id, label: utf8, properties: utf8 (JSON) }` | live |
 | `PATH` | `struct{ nodes: list<NODE>, relationships: list<RELATIONSHIP>, length: int64 }` | follow-up |
 | any other / heterogeneous column | `utf8` (JSON-encoded value per cell) | live |
+
+### LIST<T> classification
+
+The element type `T'` is resolved by walking every list value in the
+column and unifying each element's kind under the same rules used for
+scalar columns: `INTEGER` + `FLOAT` promotes to `float64`, anything
+else heterogeneous degrades the entire column to JSON `utf8`. A
+column that contains both list values and non-list values in
+different rows is also expressed via the JSON fallback (Arrow has no
+"sometimes a list" type without a union). A list column whose every
+list is empty or null defaults to `list<utf8>` so the schema is still
+concrete. Null elements inside a list ride the list's child null
+mask — clients can distinguish `[1, null, 3]` from `[1, 3]`.
 
 `internal_id` is the Arrow struct `struct{ table_id: int64, offset:
 int64 }`. It is a faithful representation of the LadybugDB 128-bit

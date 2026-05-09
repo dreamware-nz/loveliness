@@ -14,9 +14,11 @@ import (
 
 // arrowColumnKind classifies a column's effective Arrow type after
 // inspecting every row. NODE and RELATIONSHIP get strongly-typed
-// Arrow structs (see arrow_node.go); LIST / MAP currently fall
-// through to the JSON-encoded utf8 fallback while their dedicated
-// encoder slices land.
+// Arrow structs (see arrow_node.go). LIST is strongly typed when
+// every element across every row reduces to the same scalar kind;
+// otherwise the column falls back to the JSON-encoded utf8 path.
+// MAP currently still falls back to JSON until its dedicated slice
+// lands.
 type arrowColumnKind int
 
 const (
@@ -27,11 +29,22 @@ const (
 	arrowKindString
 	arrowKindNode
 	arrowKindRelationship
+	arrowKindList
 	arrowKindJSON
 )
 
-func (k arrowColumnKind) arrowType() arrow.DataType {
-	switch k {
+// columnSpec is the resolved schema description for a result column.
+// `kind` is the top-level Arrow type; `listElem` is only meaningful
+// when kind == arrowKindList and carries the unified element kind
+// across every row's list. We never nest deeper — a list-of-list
+// degrades to the JSON fallback so the schema stays predictable.
+type columnSpec struct {
+	kind     arrowColumnKind
+	listElem arrowColumnKind
+}
+
+func (s columnSpec) arrowType() arrow.DataType {
+	switch s.kind {
 	case arrowKindBool:
 		return arrow.FixedWidthTypes.Boolean
 	case arrowKindInt64:
@@ -44,28 +57,54 @@ func (k arrowColumnKind) arrowType() arrow.DataType {
 		return arrowNodeType
 	case arrowKindRelationship:
 		return arrowRelationshipType
+	case arrowKindList:
+		return arrow.ListOf(listElementType(s.listElem))
 	default:
 		return arrow.Null
 	}
 }
 
-// classifyColumn walks every row's value for the column and picks
-// the narrowest Arrow kind that fits. Numeric promotion rules:
-// int64 + float64 → float64; bool + anything-else → JSON utf8.
-func classifyColumn(rows []map[string]any, col string) arrowColumnKind {
-	kind := arrowKindNull
+// listElementType returns the Arrow type for a list column's element
+// kind. When all observed lists were empty / null, kind is Null and
+// we default to utf8 — list<null> is technically legal but no
+// downstream consumer reliably handles it.
+func listElementType(k arrowColumnKind) arrow.DataType {
+	switch k {
+	case arrowKindBool:
+		return arrow.FixedWidthTypes.Boolean
+	case arrowKindInt64:
+		return arrow.PrimitiveTypes.Int64
+	case arrowKindFloat64:
+		return arrow.PrimitiveTypes.Float64
+	case arrowKindString, arrowKindNull:
+		return arrow.BinaryTypes.String
+	}
+	// Heterogeneous element kinds shouldn't reach this path because
+	// classifyColumn collapses such columns to the JSON fallback
+	// before we land here. The default keeps the schema honest.
+	return arrow.BinaryTypes.String
+}
+
+// classifyColumn walks every row's value for the column and resolves
+// it to a columnSpec. Promotion rules within a column:
+//   - int + float    → float64
+//   - any other mix  → JSON utf8 fallback
+//   - list elements  → unified the same way; mixed-element lists
+//     degrade the entire column to JSON utf8
+func classifyColumn(rows []map[string]any, col string) columnSpec {
+	spec := columnSpec{kind: arrowKindNull}
 	for _, r := range rows {
 		v, ok := r[col]
 		if !ok || v == nil {
 			continue
 		}
-		next := kindOf(v)
-		kind = mergeKinds(kind, next)
-		if kind == arrowKindJSON {
-			return kind
+		next := specOf(v)
+		spec = mergeSpecs(spec, next)
+		if spec.kind == arrowKindJSON {
+			return spec
 		}
 	}
-	return kind
+	return spec
 }
 
 func kindOf(v any) arrowColumnKind {
@@ -88,6 +127,41 @@ func kindOf(v any) arrowColumnKind {
 	return arrowKindJSON
 }
 
+// specOf classifies a single cell value into a columnSpec. Lists
+// recurse: the slice's element kind is unified across all elements
+// in this row. Cross-row unification happens in mergeSpecs.
+func specOf(v any) columnSpec {
+	if elems, ok := asListElements(v); ok {
+		elemKind := arrowKindNull
+		for _, e := range elems {
+			if e == nil {
+				continue
+			}
+			ek := kindOf(e)
+			elemKind = mergeKinds(elemKind, ek)
+			if elemKind == arrowKindJSON {
+				// A list with heterogeneous / complex elements is
+				// not expressible as Arrow `list<T>`; degrade the
+				// whole column to JSON utf8.
+				return columnSpec{kind: arrowKindJSON}
+			}
+		}
+		return columnSpec{kind: arrowKindList, listElem: elemKind}
+	}
+	return columnSpec{kind: kindOf(v)}
+}
+
+// asListElements detects values that should land as Arrow lists.
+// `[]any` is the common shape for Cypher LIST values (every store
+// binding we currently target produces it). Strings are excluded
+// from the slice path even though Go strings are byte-sliceable.
+func asListElements(v any) ([]any, bool) {
+	if s, ok := v.([]any); ok {
+		return s, true
+	}
+	return nil, false
+}
+
 func mergeKinds(a, b arrowColumnKind) arrowColumnKind {
 	if a == arrowKindNull {
 		return b
@@ -105,6 +179,30 @@ func mergeKinds(a, b arrowColumnKind) arrowColumnKind {
 	return arrowKindJSON
 }
 
+// mergeSpecs unifies two cell specs into a column spec. Lists merge
+// elementwise; mixing a list with a non-list collapses the column to
+// JSON utf8 (a column can't be "sometimes a scalar, sometimes a
+// list" in Arrow without a union type).
+func mergeSpecs(a, b columnSpec) columnSpec {
+	if a.kind == arrowKindNull {
+		return b
+	}
+	if b.kind == arrowKindNull {
+		return a
+	}
+	if a.kind == arrowKindList && b.kind == arrowKindList {
+		merged := mergeKinds(a.listElem, b.listElem)
+		if merged == arrowKindJSON {
+			return columnSpec{kind: arrowKindJSON}
+		}
+		return columnSpec{kind: arrowKindList, listElem: merged}
+	}
+	if a.kind == arrowKindList || b.kind == arrowKindList {
+		return columnSpec{kind: arrowKindJSON}
+	}
+	return columnSpec{kind: mergeKinds(a.kind, b.kind)}
+}
+
 // buildArrowRecord turns the router.Result into a schema and a single
 // record batch, shared by the file and stream encoders. Caller owns
 // the returned record and must Release() it.
@@ -112,13 +210,13 @@ func buildArrowRecord(result *router.Result, mem memory.Allocator) (*arrow.Schem
 	cols := result.Columns
 	rows := result.Rows
 
-	kinds := make([]arrowColumnKind, len(cols))
+	specs := make([]columnSpec, len(cols))
 	fields := make([]arrow.Field, len(cols))
 	for i, c := range cols {
-		kinds[i] = classifyColumn(rows, c)
+		specs[i] = classifyColumn(rows, c)
 		fields[i] = arrow.Field{
 			Name:     c,
-			Type:     kinds[i].arrowType(),
+			Type:     specs[i].arrowType(),
 			Nullable: true,
 		}
 	}
@@ -134,7 +232,7 @@ func buildArrowRecord(result *router.Result, mem memory.Allocator) (*arrow.Schem
 
 	for _, row := range rows {
 		for i, c := range cols {
-			if err := appendCell(b.Field(i), kinds[i], row[c]); err != nil {
+			if err := appendCell(b.Field(i), specs[i], row[c]); err != nil {
 				return nil, nil, fmt.Errorf("column %q: %w", c, err)
 			}
 		}
@@ -230,7 +328,21 @@ func boolStr(b bool) string {
 
 // appendCell writes one cell into the matching column builder.
 // nil values append a null mask entry for any kind.
-func appendCell(b array.Builder, kind arrowColumnKind, v any) error {
+func appendCell(b array.Builder, spec columnSpec, v any) error {
+	if v == nil {
+		b.AppendNull()
+		return nil
+	}
+	if spec.kind == arrowKindList {
+		return appendListCell(b.(*array.ListBuilder), spec.listElem, v)
+	}
+	return appendScalarCell(b, spec.kind, v)
+}
+
+// appendScalarCell handles the non-list cases. Factored out so the
+// list path can reuse the same scalar-coercion logic when filling
+// element children.
+func appendScalarCell(b array.Builder, kind arrowColumnKind, v any) error {
 	if v == nil {
 		b.AppendNull()
 		return nil
@@ -289,6 +401,26 @@ func appendCell(b array.Builder, kind arrowColumnKind, v any) error {
 		b.(*array.StringBuilder).Append(string(raw))
 	case arrowKindNull:
 		b.AppendNull()
+	}
+	return nil
+}
+
+// appendListCell pushes one list value into a ListBuilder. A non-list
+// value lands as a null entry — classifyColumn already collapses
+// list+scalar columns to JSON, so we never see a real mix here, but
+// we stay defensive.
+func appendListCell(lb *array.ListBuilder, elemKind arrowColumnKind, v any) error {
+	elems, ok := asListElements(v)
+	if !ok {
+		lb.AppendNull()
+		return nil
+	}
+	lb.Append(true)
+	valB := lb.ValueBuilder()
+	for _, e := range elems {
+		if err := appendScalarCell(valB, elemKind, e); err != nil {
+			return err
+		}
 	}
 	return nil
 }
