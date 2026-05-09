@@ -327,14 +327,35 @@ func TestAnalyticsList(t *testing.T) {
 		t.Fatal(err)
 	}
 	plugins := got["plugins"]
-	if len(plugins) != 2 {
-		t.Errorf("expected 2 built-in plugins, got %v", plugins)
+	if len(plugins) != 3 {
+		t.Errorf("expected 3 built-in plugins, got %v", plugins)
 	}
 	have := map[string]bool{}
 	for _, n := range plugins {
 		have[n] = true
 	}
-	if !have["count_by_label"] || !have["connected_components"] {
-		t.Errorf("missing built-in plugin: %v", plugins)
+	for _, want := range []string{"count_by_label", "connected_components", "leiden"} {
+		if !have[want] {
+			t.Errorf("missing built-in plugin %q: %v", want, plugins)
+		}
+	}
+}
+
+func TestQuery_LeidenSurfacesErrorOnMissingColumns(t *testing.T) {
+	// MATCH (n) RETURN n returns a single 'n' column. Leiden requires
+	// src/dst columns; the plugin should surface a clean error in
+	// analytics_errors rather than crashing or silently producing
+	// empty results.
+	srv := setupAnalyticsServer(t)
+	body := `{
+		"cypher": "MATCH (n) RETURN n",
+		"analytics": [{"name": "leiden"}]
+	}`
+	w, resp := postQuery(t, srv, body)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if _, ok := resp.AnalyticsErrors["leiden"]; !ok {
+		t.Errorf("expected leiden error for missing src column: %+v", resp.AnalyticsErrors)
 	}
 }
