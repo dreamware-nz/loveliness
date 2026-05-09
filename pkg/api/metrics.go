@@ -3,6 +3,7 @@ package api
 import (
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"sort"
 	"strings"
@@ -76,6 +77,10 @@ func writeMetrics(w io.Writer, s *Server) {
 		writeQueryCounterMetrics(w, s.queryCounters.Snapshot())
 	}
 
+	if s.queryHistogram != nil {
+		writeQueryHistogramMetrics(w, s.queryHistogram.Snapshot())
+	}
+
 	if s.dr == nil || s.dr.WAL == nil {
 		return
 	}
@@ -99,6 +104,42 @@ func writeMetrics(w io.Writer, s *Server) {
 	}
 
 	writeWALMetrics(w, s.dr.WAL, shardIDs, s.dr.ReplicaState, pairs)
+}
+
+// writeQueryHistogramMetrics emits loveliness_query_duration_seconds in
+// the standard Prometheus histogram shape: one `_bucket{...,le="..."}`
+// series per cumulative bucket, plus `_sum` and `_count`. Exposition is
+// per-(query_type, status) series in stable order.
+func writeQueryHistogramMetrics(w io.Writer, snaps []histogramSnapshot) {
+	if len(snaps) == 0 {
+		return
+	}
+	emitHelp(w, "loveliness_query_duration_seconds",
+		"/cypher request latency in seconds, bucketed by query type and status.", "histogram")
+	for _, h := range snaps {
+		for _, p := range h.Buckets {
+			fprintf(w,
+				"loveliness_query_duration_seconds_bucket{query_type=%q,status=%q,le=%q} %d\n",
+				h.QueryType, h.Status, formatBucketBound(p.UpperBound), p.Count)
+		}
+		fprintf(w,
+			"loveliness_query_duration_seconds_sum{query_type=%q,status=%q} %s\n",
+			h.QueryType, h.Status, formatGaugeFloat(h.Sum))
+		fprintf(w,
+			"loveliness_query_duration_seconds_count{query_type=%q,status=%q} %d\n",
+			h.QueryType, h.Status, h.Count)
+	}
+}
+
+// formatBucketBound renders a bucket upper-bound exactly the way
+// Prometheus expects: positive infinity as "+Inf", everything else as
+// a trimmed decimal so dashboards built against the standard exposition
+// (`le="0.005"`, `le="+Inf"`) keep working.
+func formatBucketBound(v float64) string {
+	if math.IsInf(v, 1) {
+		return "+Inf"
+	}
+	return formatGaugeFloat(v)
 }
 
 // writeQueryCounterMetrics emits loveliness_query_total{query_type, status}
