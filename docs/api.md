@@ -49,6 +49,53 @@ curl -s localhost:8080/cypher -d "MATCH (a:Person {name: 'Alice'})-[:KNOWS]->(b)
 }
 ```
 
+### Apache Arrow output
+
+`/cypher` will return [Apache Arrow IPC](https://arrow.apache.org/docs/format/Columnar.html#format-ipc)
+when the client asks for it via the `Accept` header. Arrow responses
+skip the JSON encode/decode round-trip and stay zero-copy across the
+network and pandas / polars / DuckDB on the consumer side, which is a
+material throughput win on result sets above ~10k rows.
+
+| Accept value | Response Content-Type | Format |
+|---|---|---|
+| `application/json` *(default)* | `application/json` | JSON |
+| `application/vnd.apache.arrow.stream` | `application/vnd.apache.arrow.stream` | Arrow IPC stream |
+| `application/vnd.apache.arrow.file` | `application/vnd.apache.arrow.file` | Arrow IPC file |
+| `*/*` or `application/*` | `application/json` | JSON (fallback) |
+| anything else (concrete) | — | `406 Not Acceptable` |
+
+Quality values (`q=0.9`) are honored; ties broken by header order.
+
+```bash
+# Stream variant — best for piping into Python / Polars
+curl -s localhost:8080/cypher \
+  -H 'Accept: application/vnd.apache.arrow.stream' \
+  -d 'MATCH (p:Person) RETURN p.name, p.age LIMIT 10000' \
+  | python3 -c '
+import pyarrow.ipc, sys
+reader = pyarrow.ipc.open_stream(sys.stdin.buffer)
+print(reader.read_all().to_pandas().head())
+'
+```
+
+#### Type mapping
+
+Each result column is classified by walking every value once and
+picking the narrowest Arrow type that fits:
+
+| Result values | Arrow type |
+|---|---|
+| all booleans | `bool` |
+| all integers | `int64` |
+| mix of integers and floats | `float64` |
+| all strings | `utf8` |
+| anything else (lists, maps, nodes, mixed types) | `utf8` (JSON-encoded) |
+
+A column is nullable if any row has the field missing or `null`.
+Heterogeneous and complex columns currently fall back to JSON-encoded
+`utf8` — proper struct/list types are tracked as a follow-up to #27.
+
 ## Writes
 
 ```bash
