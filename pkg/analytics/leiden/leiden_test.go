@@ -88,6 +88,13 @@ func TestRun_GraphWithSelfLoops(t *testing.T) {
 		t.Errorf("clique with self-loops at γ=1 should be 1 community, got %d (%v)",
 			res.NumComms, res.Communities)
 	}
+	// For any complete graph with everything in one community,
+	// Σ_in = Σ_tot = 2m, so Q = 1 - 1 = 0 at γ=1. This locks in
+	// that the A_ii=w convention is consistent end-to-end (NodeWeight,
+	// TotalWeight, and modularity's sIn all agree on self-loop weight).
+	if math.Abs(res.Modularity) > 1e-9 {
+		t.Errorf("expected Q=0 for one-community complete graph, got %v", res.Modularity)
+	}
 }
 
 // TestAggregate_PreservesTotalWeight: 2m must be invariant under

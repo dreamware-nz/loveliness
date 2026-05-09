@@ -243,9 +243,17 @@ func countDistinct(p []int) int {
 //
 //	Q = 1/(2m) * Σ_C [Σ_in(C) - γ * (Σ_tot(C))^2 / (2m)]
 //
-// where Σ_in(C) is internal weight (each internal edge counted twice
-// for non-self-loops, twice for self-loops too), and Σ_tot(C) is total
-// incident weight.
+// Convention: A_uv = w throughout (including the diagonal — a self-loop
+// contributes w to A_uu, not 2w). Under this convention, summing the
+// adjacency-list directly yields each undirected non-self edge counted
+// twice (once from each endpoint) and each self-loop counted once. This
+// matches the bookkeeping in NodeWeight and TotalWeight: 2m =
+// Σ_u NodeWeight[u] = Σ_uv A_uv. Σ_in(C) is the sum of A_uv over u,v∈C
+// (so each internal non-self edge contributes 2w, each internal self-loop
+// contributes w). Σ_tot(C) is the sum of node weights in C.
+//
+// aggregate preserves all three quantities exactly: 2m, Σ_in(C), and
+// Σ_tot(C) under collapse, so Q is invariant across aggregation levels.
 func modularity(g *Graph, comm []int, gamma float64) float64 {
 	if g.TotalWeight == 0 {
 		return 0
