@@ -6,8 +6,8 @@ import (
 
 func TestPlanMoves_DeadPrimaryPromotesReplica(t *testing.T) {
 	assignments := map[int]ShardAssignment{
-		0: {Primary: "node-1", Replica: "node-2"},
-		1: {Primary: "node-2", Replica: "node-1"},
+		0: {Primary: "node-1", Replicas: []string{"node-2"}},
+		1: {Primary: "node-2", Replicas: []string{"node-1"}},
 	}
 	alive := []string{"node-2"} // node-1 is dead
 
@@ -51,8 +51,8 @@ func TestPlanMoves_RebalanceOverloaded(t *testing.T) {
 
 func TestPlanMoves_AlreadyBalanced(t *testing.T) {
 	assignments := map[int]ShardAssignment{
-		0: {Primary: "node-1", Replica: "node-2"},
-		1: {Primary: "node-2", Replica: "node-1"},
+		0: {Primary: "node-1", Replicas: []string{"node-2"}},
+		1: {Primary: "node-2", Replicas: []string{"node-1"}},
 	}
 	alive := []string{"node-1", "node-2"}
 
@@ -72,7 +72,7 @@ func TestPlanMoves_AlreadyBalanced(t *testing.T) {
 
 func TestPlanMoves_FixMissingReplica(t *testing.T) {
 	assignments := map[int]ShardAssignment{
-		0: {Primary: "node-1", Replica: ""},
+		0: {Primary: "node-1"},
 	}
 	alive := []string{"node-1", "node-2"}
 

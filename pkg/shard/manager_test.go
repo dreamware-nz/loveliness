@@ -9,9 +9,9 @@ func TestManager_OpenShardsOnAssignment(t *testing.T) {
 	m := NewTestManager("node-1")
 
 	m.UpdateAssignments(map[int]Assignment{
-		0: {Primary: "node-1", Replica: "node-2"},
-		1: {Primary: "node-2", Replica: "node-1"},
-		2: {Primary: "node-2", Replica: "node-3"},
+		0: {Primary: "node-1", Replicas: []string{"node-2"}},
+		1: {Primary: "node-2", Replicas: []string{"node-1"}},
+		2: {Primary: "node-2", Replicas: []string{"node-3"}},
 	})
 
 	// node-1 is primary for 0, replica for 1. Not assigned 2.
@@ -63,8 +63,8 @@ func TestManager_PrimaryAndReplica(t *testing.T) {
 	m := NewTestManager("node-1")
 
 	m.UpdateAssignments(map[int]Assignment{
-		0: {Primary: "node-1", Replica: "node-2"},
-		1: {Primary: "node-2", Replica: "node-1"},
+		0: {Primary: "node-1", Replicas: []string{"node-2"}},
+		1: {Primary: "node-2", Replicas: []string{"node-1"}},
 	})
 
 	// Node hosts both: shard 0 as primary, shard 1 as replica.
@@ -128,7 +128,7 @@ func TestManager_GetLocalShards(t *testing.T) {
 	m.UpdateAssignments(map[int]Assignment{
 		0: {Primary: "node-1"},
 		3: {Primary: "node-1"},
-		7: {Primary: "node-2", Replica: "node-1"},
+		7: {Primary: "node-2", Replicas: []string{"node-1"}},
 	})
 
 	shards := m.GetLocalShards()

@@ -16,7 +16,7 @@ func applyCommand(fsm *FSM, cmd Command) interface{} {
 func TestFSM_AssignShard(t *testing.T) {
 	fsm := NewFSM()
 
-	payload, _ := json.Marshal(AssignShardPayload{ShardID: 0, Primary: "node-1", Replica: "node-2"})
+	payload, _ := json.Marshal(AssignShardPayload{ShardID: 0, Primary: "node-1", Replicas: []string{"node-2"}})
 	result := applyCommand(fsm, Command{Type: CmdAssignShard, Payload: payload})
 	if result != nil {
 		t.Fatalf("unexpected error: %v", result)
@@ -25,7 +25,7 @@ func TestFSM_AssignShard(t *testing.T) {
 	sm := fsm.GetShardMap()
 	if a, ok := sm.Assignments[0]; !ok {
 		t.Fatal("shard 0 not assigned")
-	} else if a.Primary != "node-1" || a.Replica != "node-2" {
+	} else if a.Primary != "node-1" || len(a.Replicas) != 1 || a.Replicas[0] != "node-2" {
 		t.Errorf("unexpected assignment: %+v", a)
 	}
 }
@@ -74,7 +74,7 @@ func TestFSM_PromoteReplica(t *testing.T) {
 	fsm := NewFSM()
 
 	// Assign shard with primary and replica.
-	payload, _ := json.Marshal(AssignShardPayload{ShardID: 0, Primary: "node-1", Replica: "node-2"})
+	payload, _ := json.Marshal(AssignShardPayload{ShardID: 0, Primary: "node-1", Replicas: []string{"node-2"}})
 	applyCommand(fsm, Command{Type: CmdAssignShard, Payload: payload})
 
 	// Promote replica.
@@ -86,8 +86,8 @@ func TestFSM_PromoteReplica(t *testing.T) {
 	if a.Primary != "node-2" {
 		t.Errorf("expected primary=node-2, got %s", a.Primary)
 	}
-	if a.Replica != "" {
-		t.Errorf("expected empty replica, got %s", a.Replica)
+	if len(a.Replicas) != 0 {
+		t.Errorf("expected empty replicas after promotion, got %v", a.Replicas)
 	}
 }
 
@@ -353,10 +353,10 @@ func TestFSM_DatabaseSnapshotRestore(t *testing.T) {
 func TestShardMap_ShardsForNode(t *testing.T) {
 	sm := ShardMap{
 		Assignments: map[int]ShardAssignment{
-			0: {Primary: "node-1", Replica: "node-2"},
-			1: {Primary: "node-2", Replica: "node-1"},
-			2: {Primary: "node-1", Replica: "node-3"},
-			3: {Primary: "node-3", Replica: "node-2"},
+			0: {Primary: "node-1", Replicas: []string{"node-2"}},
+			1: {Primary: "node-2", Replicas: []string{"node-1"}},
+			2: {Primary: "node-1", Replicas: []string{"node-3"}},
+			3: {Primary: "node-3", Replicas: []string{"node-2"}},
 		},
 	}
 
@@ -379,7 +379,7 @@ func TestShardMap_ShardsForNode(t *testing.T) {
 func TestShardMap_NodesForShard(t *testing.T) {
 	sm := ShardMap{
 		Assignments: map[int]ShardAssignment{
-			0: {Primary: "node-1", Replica: "node-2"},
+			0: {Primary: "node-1", Replicas: []string{"node-2"}},
 			1: {Primary: "node-2"},
 		},
 	}
@@ -403,7 +403,7 @@ func TestShardMap_NodesForShard(t *testing.T) {
 func TestShardMap_PrimaryForShard(t *testing.T) {
 	sm := ShardMap{
 		Assignments: map[int]ShardAssignment{
-			0: {Primary: "node-1", Replica: "node-2"},
+			0: {Primary: "node-1", Replicas: []string{"node-2"}},
 		},
 	}
 	if p := sm.PrimaryForShard(0); p != "node-1" {

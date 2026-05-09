@@ -17,11 +17,28 @@ func NewRebalancer(c *Cluster) *Rebalancer {
 }
 
 // Move describes a shard migration from one node to another.
+// For Role == "replica", ReplicaIdx is the position in the
+// Replicas slice that the new node should occupy. For Role ==
+// "primary", ReplicaIdx is ignored.
 type Move struct {
-	ShardID   int
-	Role      string // "primary" or "replica"
-	FromNode  string
-	ToNode    string
+	ShardID    int
+	Role       string // "primary" or "replica"
+	FromNode   string
+	ToNode     string
+	ReplicaIdx int
+}
+
+// firstReplica returns the first non-empty replica or "".
+// Convenience for rebalancer logic that historically managed only
+// a single replica slot — kept until rebalance grows full multi-
+// replica awareness (filed as follow-up to #5).
+func firstReplica(a ShardAssignment) string {
+	for _, r := range a.Replicas {
+		if r != "" {
+			return r
+		}
+	}
+	return ""
 }
 
 type nodeLoad struct {
@@ -93,17 +110,25 @@ func planMoves(assignments map[int]ShardAssignment, alive []string) []Move {
 	// Phase 1: Fix primaries on dead nodes.
 	for shardID, a := range assignments {
 		if a.Primary != "" && !aliveSet[a.Primary] {
-			// Primary is on a dead node. If replica is alive, promote it.
-			if a.Replica != "" && aliveSet[a.Replica] {
+			// Primary is on a dead node. Promote the first alive
+			// replica if any; otherwise reassign to the least loaded
+			// alive node.
+			promoted := ""
+			for _, r := range a.Replicas {
+				if r != "" && aliveSet[r] {
+					promoted = r
+					break
+				}
+			}
+			if promoted != "" {
 				moves = append(moves, Move{
 					ShardID:  shardID,
 					Role:     "primary",
 					FromNode: a.Primary,
-					ToNode:   a.Replica,
+					ToNode:   promoted,
 				})
-				primaryCount[a.Replica]++
+				primaryCount[promoted]++
 			} else {
-				// Both dead — assign to least loaded alive node.
 				target := leastLoaded(loads)
 				if target != "" {
 					moves = append(moves, Move{
@@ -181,17 +206,21 @@ func planMoves(assignments map[int]ShardAssignment, alive []string) []Move {
 		}
 	}
 
-	// Phase 3: Fix replicas on same node as primary or dead nodes.
+	// Phase 3: Fix the first replica slot if it's empty, dead, or
+	// colocated with the primary. Multi-replica rebalance (filling
+	// every slot up to RF) is tracked as a follow-up to issue #5;
+	// this phase only ever touches Replicas[0].
 	for shardID, a := range assignments {
 		if len(alive) < 2 {
 			break // can't have replicas with only 1 node
 		}
+		current := firstReplica(a)
 		needsNewReplica := false
-		if a.Replica == "" {
+		if current == "" {
 			needsNewReplica = true
-		} else if !aliveSet[a.Replica] {
+		} else if !aliveSet[current] {
 			needsNewReplica = true
-		} else if a.Replica == a.Primary {
+		} else if current == a.Primary {
 			needsNewReplica = true
 		}
 
@@ -207,10 +236,11 @@ func planMoves(assignments map[int]ShardAssignment, alive []string) []Move {
 			for _, n := range alive {
 				if n != currentPrimary {
 					moves = append(moves, Move{
-						ShardID:  shardID,
-						Role:     "replica",
-						FromNode: a.Replica,
-						ToNode:   n,
+						ShardID:    shardID,
+						Role:       "replica",
+						FromNode:   current,
+						ToNode:     n,
+						ReplicaIdx: 0,
 					})
 					break
 				}
@@ -243,10 +273,17 @@ func (r *Rebalancer) Execute(moves []Move) error {
 		case "primary":
 			a.Primary = m.ToNode
 		case "replica":
-			a.Replica = m.ToNode
+			idx := m.ReplicaIdx
+			if idx < 0 {
+				idx = 0
+			}
+			for len(a.Replicas) <= idx {
+				a.Replicas = append(a.Replicas, "")
+			}
+			a.Replicas[idx] = m.ToNode
 		}
 
-		if err := r.cluster.AssignShard(m.ShardID, a.Primary, a.Replica); err != nil {
+		if err := r.cluster.AssignShard(m.ShardID, a.Primary, a.Replicas); err != nil {
 			return err
 		}
 		slog.Info("rebalanced shard",

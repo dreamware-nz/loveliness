@@ -115,11 +115,12 @@ func (c *Cluster) Apply(cmd Command) error {
 }
 
 // AssignShard records a shard assignment in the cluster state.
-func (c *Cluster) AssignShard(shardID int, primary, replica string) error {
+// Pass an empty replica list for primary-only placement (RF=1).
+func (c *Cluster) AssignShard(shardID int, primary string, replicas []string) error {
 	payload, _ := json.Marshal(AssignShardPayload{
-		ShardID: shardID,
-		Primary: primary,
-		Replica: replica,
+		ShardID:  shardID,
+		Primary:  primary,
+		Replicas: replicas,
 	})
 	return c.Apply(Command{Type: CmdAssignShard, Payload: payload})
 }
@@ -240,21 +241,29 @@ func (c *Cluster) Bootstrap() error {
 	return f.Error()
 }
 
-// BootstrapShards assigns shardCount shards round-robin across the given nodes.
-// Primary and replica are placed on different nodes.
-// Called once by the leader after cluster bootstrap.
-func (c *Cluster) BootstrapShards(shardCount int, nodeIDs []string) error {
-	n := len(nodeIDs)
-	if n == 0 {
+// BootstrapShards assigns shardCount shards across the given nodes
+// using the supplied placement strategy. rf is the desired replication
+// factor (1 = primary only, 2 = primary + 1 replica, etc.) — clamped
+// up to len(nodeIDs) so a small cluster can still bootstrap, with the
+// shortfall surfaced via UnderReplicatedShards. If strategy is nil,
+// the round-robin default is used.
+//
+// Called once by the leader after cluster bootstrap. Idempotent at the
+// FSM level via the epoch field, so re-runs after a partial failure
+// don't corrupt the placement map.
+func (c *Cluster) BootstrapShards(shardCount int, nodeIDs []string, rf int, strategy PlacementStrategy) error {
+	if strategy == nil {
+		strategy = RoundRobinStrategy{}
+	}
+	if len(nodeIDs) == 0 {
 		return fmt.Errorf("no nodes to assign shards to")
 	}
+	if rf < 1 {
+		rf = 1
+	}
 	for i := 0; i < shardCount; i++ {
-		primary := nodeIDs[i%n]
-		replica := ""
-		if n > 1 {
-			replica = nodeIDs[(i+1)%n]
-		}
-		if err := c.AssignShard(i, primary, replica); err != nil {
+		placement := strategy.Place(i, nodeIDs, rf, nil)
+		if err := c.AssignShard(i, placement.Primary, placement.Replicas); err != nil {
 			return fmt.Errorf("assign shard %d: %w", i, err)
 		}
 	}

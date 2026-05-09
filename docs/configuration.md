@@ -46,6 +46,7 @@ Precedence for `max-memory-per-shard`: **flag > env > auto** (`host_ram × 0.7 /
 | `LOVELINESS_EXPECTED_NODES` | `0` | Expected node count for quorum-gated auto-bootstrap (0 = no expectation) |
 | `LOVELINESS_SHARD_BUFFER_MB` | *(auto)* | Per-shard LadybugDB buffer pool cap in MB. Default: `(host_ram × 0.7) / shard_count`. Set explicitly to override. The CLI flag `--max-memory-per-shard` overrides this. |
 | `LOVELINESS_ALLOW_ALL_SHORTEST_UNSAFE` | `false` | Opt in to forwarding `ALL SHORTEST` path queries despite the known LadybugDB segfault (see [Unsafe queries](#unsafe-queries)). |
+| `LOVELINESS_REPLICATION_FACTOR` | `1` | Desired replication factor for shard placement at cluster bootstrap (1 = primary only, 2 = primary + 1 replica, etc.). Clamped to the number of nodes; shards beyond that count are reported as under-replicated rather than refused. |
 
 ## Unsafe queries
 
