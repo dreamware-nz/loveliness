@@ -67,10 +67,45 @@ func TestRegistry_RunErrorIsolation(t *testing.T) {
 
 func TestRegistry_Names(t *testing.T) {
 	r := NewRegistry()
-	_ = r.Register(stubPlugin{name: "a"})
 	_ = r.Register(stubPlugin{name: "b"})
+	_ = r.Register(stubPlugin{name: "a"})
 	got := r.Names()
 	if len(got) != 2 {
-		t.Errorf("names: %v", got)
+		t.Fatalf("names: %v", got)
 	}
+	// Sorted lexically for deterministic /analytics responses.
+	if got[0] != "a" || got[1] != "b" {
+		t.Errorf("expected sorted names, got %v", got)
+	}
+}
+
+func TestRegistry_RunDuplicateRejected(t *testing.T) {
+	r := NewRegistry()
+	calls := 0
+	_ = r.Register(stubPluginFunc{name: "p", fn: func() (any, error) {
+		calls++
+		return calls, nil
+	}})
+	out, errs := r.Run(context.Background(), &router.Result{}, []Request{
+		{Name: "p"}, {Name: "p"},
+	})
+	if calls != 1 {
+		t.Errorf("expected exactly 1 invocation, got %d (amplification!)", calls)
+	}
+	if out["p"] == nil {
+		t.Errorf("first occurrence should still produce a value")
+	}
+	if errs["p"] != "duplicate plugin in request" {
+		t.Errorf("expected duplicate error, got %q", errs["p"])
+	}
+}
+
+type stubPluginFunc struct {
+	name string
+	fn   func() (any, error)
+}
+
+func (s stubPluginFunc) Name() string { return s.name }
+func (s stubPluginFunc) Compute(_ context.Context, _ *router.Result, _ map[string]any) (any, error) {
+	return s.fn()
 }

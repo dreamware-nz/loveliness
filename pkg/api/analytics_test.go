@@ -126,26 +126,71 @@ func TestQuery_MultiplePluginsAtOnce(t *testing.T) {
 	}
 }
 
-func TestQuery_PreservesPartialAndStats(t *testing.T) {
-	// queryResponse must be a strict superset of router.Result. We can't
-	// easily induce a partial result in a unit test, but we can at least
-	// assert the embedded fields are reachable on the decoded response,
-	// proving the wire shape carries them.
+func TestQuery_WireFormatCarriesPartialAndErrors(t *testing.T) {
+	// Direct marshalling test: queryResponse must round-trip Partial,
+	// Errors, and Stats from router.Result so the new endpoint is a
+	// strict superset of /db/{name}/cypher. We can't easily induce a
+	// real partial scatter-gather in a unit test, so we construct the
+	// state we want to see and assert it survives the wire.
+	resp := queryResponse{
+		Result: &router.Result{
+			Columns: []string{"n"},
+			Rows:    []map[string]any{{"n": 1}},
+			Partial: true,
+			Errors: []router.ShardError{
+				{ShardID: 7, Error: "shard unavailable"},
+			},
+		},
+		Analytics: map[string]any{"x": 1},
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got["partial"] != true {
+		t.Errorf("partial dropped: %s", raw)
+	}
+	gotErrs, ok := got["errors"].([]any)
+	if !ok || len(gotErrs) != 1 {
+		t.Fatalf("errors dropped: %s", raw)
+	}
+	first := gotErrs[0].(map[string]any)
+	if first["shard_id"].(float64) != 7 || first["error"] != "shard unavailable" {
+		t.Errorf("errors content corrupted: %+v", first)
+	}
+	if _, ok := got["analytics"]; !ok {
+		t.Errorf("analytics block missing: %s", raw)
+	}
+}
+
+func TestQuery_DuplicatePluginRejected(t *testing.T) {
+	// Duplicate plugin names in one request must surface as an error,
+	// not silently last-write-wins. Otherwise a client can't tell why
+	// only one result came back, and a malicious client can amplify
+	// expensive plugin runs under one body limit.
 	srv := setupAnalyticsServer(t)
-	w, resp := postQuery(t, srv, `{"cypher":"MATCH (n) RETURN n"}`)
+	body := `{
+		"cypher": "MATCH (n) RETURN n",
+		"analytics": [
+			{"name": "count_by_label", "params": {"column": "label"}},
+			{"name": "count_by_label", "params": {"column": "name"}}
+		]
+	}`
+	w, resp := postQuery(t, srv, body)
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
-	if resp.Result == nil {
-		t.Fatalf("expected embedded *router.Result on response")
+	if resp.AnalyticsErrors["count_by_label"] != "duplicate plugin in request" {
+		t.Errorf("expected duplicate error, got %q", resp.AnalyticsErrors["count_by_label"])
 	}
-	if len(resp.Columns) == 0 {
-		t.Errorf("expected promoted Columns from embedded Result")
+	// The first occurrence still ran successfully.
+	if _, ok := resp.Analytics["count_by_label"]; !ok {
+		t.Errorf("first occurrence should still be in analytics: %+v", resp.Analytics)
 	}
-	// Partial/Errors are omitempty zero values; the field is reachable
-	// even when absent from the wire.
-	_ = resp.Partial
-	_ = resp.Errors
 }
 
 func TestQuery_UnknownPluginIsolated(t *testing.T) {

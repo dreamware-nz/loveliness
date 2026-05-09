@@ -6,6 +6,7 @@ package analytics
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 
 	"github.com/johnjansen/loveliness/pkg/router"
@@ -58,6 +59,9 @@ func (r *Registry) Lookup(name string) (Plugin, bool) {
 	return p, ok
 }
 
+// Names returns the registered plugin names in lexical order. Sorted so
+// /analytics responses are deterministic across calls — clients can diff
+// or cache without surprise from map iteration order.
 func (r *Registry) Names() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -65,16 +69,27 @@ func (r *Registry) Names() []string {
 	for n := range r.plugins {
 		out = append(out, n)
 	}
+	sort.Strings(out)
 	return out
 }
 
 // Run executes a slice of plugin requests against a result. Errors are
 // collected per-plugin so a single misbehaving plugin doesn't kill the
-// whole response.
+// whole response. Duplicate plugin names in a single request are
+// rejected on the second occurrence — otherwise the second silently
+// overwrites the first in the result map and the client can't tell why.
+// It also caps amplification: a request can't make the same expensive
+// plugin run N times under one body limit.
 func (r *Registry) Run(ctx context.Context, result *router.Result, reqs []Request) (map[string]any, map[string]string) {
 	out := map[string]any{}
 	errs := map[string]string{}
+	seen := map[string]bool{}
 	for _, req := range reqs {
+		if seen[req.Name] {
+			errs[req.Name] = "duplicate plugin in request"
+			continue
+		}
+		seen[req.Name] = true
 		p, ok := r.Lookup(req.Name)
 		if !ok {
 			errs[req.Name] = "unknown plugin"

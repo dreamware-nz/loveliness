@@ -110,9 +110,11 @@ func defaultAnalyticsRegistry() *analytics.Registry {
 	return reg
 }
 
-// RegisterAnalyticsPlugin registers an additional plugin at runtime.
-// Intended for cmd/server wire-up of out-of-tree plugins (e.g. a real
-// Leiden binding) before Handler() is called. Returns an error on
+// RegisterAnalyticsPlugin registers an additional plugin. The registry
+// is concurrency-safe so this is technically callable at any time, but
+// callers should register before the server begins accepting requests
+// — otherwise there is a window in which clients can hit /analytics or
+// POST /db/{name}/query and not see the plugin. Returns an error on
 // duplicate Name().
 func (s *Server) RegisterAnalyticsPlugin(p analytics.Plugin) error {
 	return s.analytics.Register(p)
