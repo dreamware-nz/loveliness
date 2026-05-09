@@ -2,6 +2,8 @@ package router
 
 import (
 	"context"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -256,5 +258,112 @@ func TestRouter_OptionalMatchIsRead(t *testing.T) {
 	}
 	if len(result.Rows) != 3 {
 		t.Errorf("expected 3 rows from scatter-gather, got %d", len(result.Rows))
+	}
+}
+
+// --- Write rewriter tests ---
+
+// fakeWAL records each Append call.
+type fakeWAL struct {
+	mu      sync.Mutex
+	entries []walAppendCall
+	nextSeq uint64
+}
+
+type walAppendCall struct {
+	shardID int
+	cypher  string
+}
+
+func (f *fakeWAL) Append(shardID int, cypher string) (uint64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nextSeq++
+	f.entries = append(f.entries, walAppendCall{shardID: shardID, cypher: cypher})
+	return f.nextSeq, nil
+}
+
+// fakeRewriter swaps any "now()" for a fixed literal — easy to assert on.
+type fakeRewriter struct{}
+
+func (fakeRewriter) Rewrite(cypher string) string {
+	return strings.ReplaceAll(cypher, "now()", "datetime('FIXED')")
+}
+
+func TestRouter_RewriterRunsBeforeWAL(t *testing.T) {
+	shards := makeTestShards(3)
+	r := NewRouter(shards, 5*time.Second)
+	wal := &fakeWAL{}
+	r.SetWAL(wal)
+	r.SetWriteRewriter(fakeRewriter{})
+
+	// Use a write query with a shard key so it routes to a single shard.
+	_, err := r.Execute(context.Background(), "CREATE (p:Person {name: 'alice', ts: now()})")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(wal.entries) != 1 {
+		t.Fatalf("expected 1 WAL entry, got %d", len(wal.entries))
+	}
+	if !strings.Contains(wal.entries[0].cypher, "datetime('FIXED')") {
+		t.Errorf("WAL entry should contain rewritten literal; got: %q", wal.entries[0].cypher)
+	}
+	if strings.Contains(wal.entries[0].cypher, "now()") {
+		t.Errorf("WAL entry should NOT contain raw now(); got: %q", wal.entries[0].cypher)
+	}
+
+	// And the shard that executed must have received the SAME rewritten string,
+	// not the original. This is the correctness invariant: primary's local
+	// state derives from the same statement that replicas will replay.
+	var executed string
+	for _, s := range shards {
+		ms := s.Store.(*shard.MemoryStore)
+		log := ms.QueryLog()
+		if len(log) > 0 {
+			executed = log[0]
+			break
+		}
+	}
+	if executed == "" {
+		t.Fatal("no shard saw the query")
+	}
+	if !strings.Contains(executed, "datetime('FIXED')") {
+		t.Errorf("primary execution must use rewritten cypher; got: %q", executed)
+	}
+}
+
+func TestRouter_RewriterSkippedForReads(t *testing.T) {
+	shards := makeTestShards(3)
+	r := NewRouter(shards, 5*time.Second)
+	wal := &fakeWAL{}
+	r.SetWAL(wal)
+	r.SetWriteRewriter(fakeRewriter{})
+
+	_, err := r.Execute(context.Background(), "MATCH (p:Person {name: 'alice'}) RETURN p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(wal.entries) != 0 {
+		t.Errorf("read query must not append to WAL, got %d entries", len(wal.entries))
+	}
+}
+
+func TestRouter_NoRewriterStillWALs(t *testing.T) {
+	shards := makeTestShards(3)
+	r := NewRouter(shards, 5*time.Second)
+	wal := &fakeWAL{}
+	r.SetWAL(wal)
+	// No rewriter set — write must still be recorded verbatim.
+
+	_, err := r.Execute(context.Background(), "CREATE (p:Person {name: 'alice', ts: now()})")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(wal.entries) != 1 {
+		t.Fatalf("expected 1 WAL entry, got %d", len(wal.entries))
+	}
+	if !strings.Contains(wal.entries[0].cypher, "now()") {
+		t.Errorf("without rewriter, WAL keeps original cypher; got: %q", wal.entries[0].cypher)
 	}
 }

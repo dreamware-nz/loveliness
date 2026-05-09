@@ -245,6 +245,7 @@ func main() {
 	}
 	slog.Info("WAL initialized", "dir", walDir, "sequence", wal.LastSequence())
 	r.SetWAL(wal)
+	r.SetWriteRewriter(replication.DefaultRewriter())
 
 	// Initialize backup store (S3 if configured, otherwise local).
 	backupMgr := backup.NewManager(cfg.DataDir, cfg.NodeID)
