@@ -51,6 +51,10 @@ type Server struct {
 
 	// discoveryInfo holds this node's join info for the public /discovery endpoint.
 	discoveryInfo *cluster.JoinInfo
+
+	// startTime is captured at NewServer time so /health can report uptime
+	// without piping a clock through every call site.
+	startTime time.Time
 }
 
 // NewServer creates a new API server.
@@ -63,6 +67,7 @@ func NewServer(r *router.Router, c *cluster.Cluster, shards []*shard.Shard, reg 
 		timeout:    timeout,
 		refTracker: make(map[int]map[string]bool),
 		joinTokens: cluster.NewTokenStore(),
+		startTime:  time.Now(),
 	}
 }
 
@@ -107,6 +112,8 @@ func (s *Server) Handler() http.Handler {
 	// Top-level mux: health and discovery are public, everything else goes through auth.
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
+	mux.HandleFunc("GET /health/live", s.handleHealthLive)
+	mux.HandleFunc("GET /health/ready", s.handleHealthReady)
 	mux.HandleFunc("GET /discovery", s.handleDiscovery)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	if s.auth != nil && s.auth.Enabled() {
@@ -293,40 +300,106 @@ func (s *Server) replicateSchemaDDL(cypher string) {
 	}
 }
 
-func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	resp := map[string]any{
-		"status": "ok",
+// healthSnapshot is the structured form of /health used by both the JSON
+// handler and the /health/ready gate. Splitting it out keeps the readiness
+// gate honest: ready returns 503 iff this snapshot says the node is
+// degraded or not-yet-ready, rather than re-deriving the same checks.
+type healthSnapshot struct {
+	Status         string            `json:"status"` // "ok" | "degraded"
+	NodeID         string            `json:"node_id,omitempty"`
+	Mode           string            `json:"mode,omitempty"` // "standalone" when no cluster
+	Role           string            `json:"role,omitempty"`
+	LeaderID       string            `json:"leader_id,omitempty"`
+	UptimeSeconds  float64           `json:"uptime_seconds"`
+	PlacementEpoch uint64            `json:"placement_epoch,omitempty"`
+	Shards         map[string]string `json:"shards,omitempty"`
+}
+
+// snapshotHealth gathers the current node's health into a structured form.
+// Both /health and /health/ready consume it; keeping a single function
+// means they can never disagree on what "ready" means.
+func (s *Server) snapshotHealth() healthSnapshot {
+	snap := healthSnapshot{
+		Status:        "ok",
+		UptimeSeconds: time.Since(s.startTime).Seconds(),
 	}
 
 	if s.cluster != nil {
-		role := "follower"
-		if s.cluster.IsLeader() {
-			role = "leader"
-		}
-		resp["role"] = role
-		resp["node_id"] = s.cluster.NodeID()
+		snap.Role = s.cluster.Role()
+		snap.NodeID = s.cluster.NodeID()
+		snap.LeaderID = s.cluster.LeaderID()
+		snap.PlacementEpoch = maxShardEpoch(s.cluster.GetShardMap())
 	} else {
-		resp["mode"] = "standalone"
+		snap.Mode = "standalone"
 	}
 
 	if len(s.shards) > 0 {
-		shardStatus := make(map[string]string, len(s.shards))
+		snap.Shards = make(map[string]string, len(s.shards))
 		allHealthy := true
 		for _, sh := range s.shards {
 			if sh.IsHealthy() {
-				shardStatus[strconv.Itoa(sh.ID)] = "healthy"
+				snap.Shards[strconv.Itoa(sh.ID)] = "healthy"
 			} else {
-				shardStatus[strconv.Itoa(sh.ID)] = "unhealthy"
+				snap.Shards[strconv.Itoa(sh.ID)] = "unhealthy"
 				allHealthy = false
 			}
 		}
-		resp["shards"] = shardStatus
 		if !allHealthy {
-			resp["status"] = "degraded"
+			snap.Status = "degraded"
 		}
 	}
 
-	writeJSON(w, http.StatusOK, resp)
+	return snap
+}
+
+// maxShardEpoch returns the highest per-shard placement epoch in the map,
+// or 0 if the map is empty. Surfaced as a coarse cluster-wide "placement
+// generation" indicator on /health — fine-grained per-shard epochs stay
+// in /cluster.
+func maxShardEpoch(sm cluster.ShardMap) uint64 {
+	var max uint64
+	for _, a := range sm.Assignments {
+		if a.Epoch > max {
+			max = a.Epoch
+		}
+	}
+	return max
+}
+
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.snapshotHealth())
+}
+
+// handleHealthLive is a Kubernetes-style liveness probe. It only confirms
+// the process is up and the HTTP mux is serving — it deliberately does
+// NOT check shard or cluster state, because a degraded cluster shouldn't
+// trigger pod restarts on its own (that would amplify outages).
+func (s *Server) handleHealthLive(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "alive"})
+}
+
+// handleHealthReady is a Kubernetes-style readiness probe. It returns 503
+// when the node should be removed from load-balancer rotation: any local
+// shard unhealthy, or (when clustered) no leader is yet known.
+func (s *Server) handleHealthReady(w http.ResponseWriter, r *http.Request) {
+	snap := s.snapshotHealth()
+	reasons := []string{}
+
+	if snap.Status != "ok" {
+		reasons = append(reasons, "shards_degraded")
+	}
+	if s.cluster != nil && snap.LeaderID == "" {
+		reasons = append(reasons, "no_leader")
+	}
+
+	if len(reasons) > 0 {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"status":  "not_ready",
+			"reasons": reasons,
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
 func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
