@@ -420,8 +420,31 @@ func (r *Router) Execute(ctx context.Context, cypher string) (*Result, error) {
 		if len(likely) == 1 {
 			shardID = likely[0]
 		}
+
+		// Bloom-skip: if every populated filter rules out this key,
+		// the query is provably empty and we can short-circuit
+		// without dispatching. The savings only matter — and only
+		// get counted — when the would-be target is a remote shard
+		// (a local query is cheap; a network round-trip is not).
+		// Bloom guarantees no false negatives, so this is safe:
+		// the actual data is not on any populated shard.
+		if r.bloomIndex.ShouldSkipKey(parsed.ShardKeys[0]) {
+			if !r.isLocalShard(shardID) {
+				r.metrics.IncBloomSkip(shardID)
+			}
+			return &Result{}, nil
+		}
 	}
 	return r.queryShard(ctx, shardID, parsed.Raw)
+}
+
+// isLocalShard reports whether shardID is hosted on this node — the
+// inverse of the "needs remote RPC" condition. Wrapping the same
+// check that queryShard uses keeps the predicate identical at every
+// site and lets the bloom-skip path identify which counters are
+// worth incrementing.
+func (r *Router) isLocalShard(shardID int) bool {
+	return shardID >= 0 && shardID < len(r.shards) && r.shards[shardID] != nil
 }
 
 // broadcast sends a query to ALL shards (used for schema DDL).
