@@ -135,14 +135,16 @@ func popcount(x uint64) int {
 // Instead of scatter-gathering to all shards, the router checks Bloom filters
 // to identify which shard(s) likely contain the key.
 type ShardBloomIndex struct {
-	filters map[int]*BloomFilter // shardID → Bloom filter
-	mu      sync.RWMutex
+	filters   map[int]*BloomFilter // shardID → Bloom filter
+	populated map[int]bool         // shardID → at least one Add has happened
+	mu        sync.RWMutex
 }
 
 // NewShardBloomIndex creates a new per-shard Bloom index.
 func NewShardBloomIndex() *ShardBloomIndex {
 	return &ShardBloomIndex{
-		filters: make(map[int]*BloomFilter),
+		filters:   make(map[int]*BloomFilter),
+		populated: make(map[int]bool),
 	}
 }
 
@@ -155,9 +157,12 @@ func (idx *ShardBloomIndex) InitShard(shardID, expectedKeys int, fpRate float64)
 
 // Add records a key on a specific shard.
 func (idx *ShardBloomIndex) Add(shardID int, key string) {
-	idx.mu.RLock()
+	idx.mu.Lock()
 	bf, ok := idx.filters[shardID]
-	idx.mu.RUnlock()
+	if ok {
+		idx.populated[shardID] = true
+	}
+	idx.mu.Unlock()
 	if ok {
 		bf.Add(key)
 	}
@@ -165,9 +170,12 @@ func (idx *ShardBloomIndex) Add(shardID int, key string) {
 
 // AddBatch adds multiple keys for a shard efficiently.
 func (idx *ShardBloomIndex) AddBatch(shardID int, keys []string) {
-	idx.mu.RLock()
+	idx.mu.Lock()
 	bf, ok := idx.filters[shardID]
-	idx.mu.RUnlock()
+	if ok && len(keys) > 0 {
+		idx.populated[shardID] = true
+	}
+	idx.mu.Unlock()
 	if !ok {
 		return
 	}
@@ -186,6 +194,43 @@ func (idx *ShardBloomIndex) MayContainOnShard(shardID int, key string) bool {
 		return false
 	}
 	return bf.MayContain(key)
+}
+
+// ShouldSkipKey reports whether the lookup for key can be safely
+// short-circuited because every populated Bloom filter says
+// "definitely not present." A nil index, an empty index, or an
+// index whose filters are all unpopulated returns false — the
+// caller must then dispatch the query because we don't have enough
+// information to rule it out.
+//
+// Bloom filters guarantee no false negatives, so a unanimous
+// "definitely not" across populated filters is correct: the key is
+// not in the dataset and any RPC would return zero rows. Returning
+// true to the router lets it skip the per-shard query entirely and
+// — when the would-be target was a remote shard — record one
+// avoided network round-trip in loveliness_router_bloom_skip_total.
+//
+// The "populated" gate is what keeps a freshly-initialised filter
+// from wrongly causing skips. InitShard alone is not enough; only
+// after at least one Add or AddBatch has run does that filter
+// become authoritative.
+func (idx *ShardBloomIndex) ShouldSkipKey(key string) bool {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	if len(idx.filters) == 0 {
+		return false
+	}
+	anyPopulated := false
+	for shardID, bf := range idx.filters {
+		if !idx.populated[shardID] {
+			continue
+		}
+		anyPopulated = true
+		if bf.MayContain(key) {
+			return false
+		}
+	}
+	return anyPopulated
 }
 
 // LikelyShards returns the shard IDs that may contain the given key.

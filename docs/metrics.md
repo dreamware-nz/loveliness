@@ -97,6 +97,15 @@ plan. Bounded by `RF × shard_count`.
 Catalogued node/edge table name. Cardinality is bounded by the schema —
 production deployments typically have ≤ ~200 tables.
 
+### `loveliness_router_bloom_skip_total` semantics
+
+Bumped each time the router resolves a read query to a remote shard,
+finds that one or more populated per-shard Bloom filters explicitly
+rule the lookup key out, and short-circuits the RPC. The metric only
+counts the remote case — local shards skip silently because no
+network round-trip is saved. Bloom filters guarantee no false
+negatives, so each increment represents a provably empty result set.
+
 ### `code` (router remote error, closed set ≤ 7)
 
 `timeout` · `canceled` · `conn_refused` · `conn_reset` · `broken_pipe` ·
