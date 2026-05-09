@@ -34,14 +34,20 @@ type Neighbor struct {
 }
 
 // Graph is an undirected weighted graph. Adj[i] holds i's outgoing
-// edges; for an undirected edge (u,v,w) both Adj[u] and Adj[v] hold it.
-// Self-loops appear once in Adj[i] and contribute weight w (not 2w) to
-// NodeWeight[i] — the doubling for modularity is handled in the kernel.
+// edges; for an undirected non-self edge (u,v,w) both Adj[u] and
+// Adj[v] hold an entry of weight w. A self-loop (u,u,w) appears once
+// in Adj[u].
+//
+// Convention: under modularity, a self-loop of weight w contributes w
+// (not 2w) to NodeWeight[u] and w to TotalWeight. The kernel's ΔQ
+// formula is symmetric under this choice — the self-loop terms cancel
+// when a node moves communities — so localMove handles self-loops
+// correctly without an explicit branch.
 type Graph struct {
 	N           int
 	Adj         [][]Neighbor
-	NodeWeight  []float64 // sum of incident edge weights
-	TotalWeight float64   // 2m: sum of all edge weights, with each edge counted twice
+	NodeWeight  []float64 // sum of incident edge weights (self-loop counted once)
+	TotalWeight float64   // sum over nodes of NodeWeight[i]
 }
 
 // NewGraph allocates an empty graph with n nodes.
@@ -54,8 +60,12 @@ func NewGraph(n int) *Graph {
 }
 
 // AddEdge adds an undirected edge u—v with weight w. Self-loops are
-// allowed and contribute correctly to modularity. Adding a duplicate
-// edge stacks weights — callers can pre-aggregate or rely on this.
+// allowed. Adding a duplicate edge stacks weights — callers can
+// pre-aggregate or rely on this.
+//
+// Self-loop convention: weight w contributes w (not 2w) to
+// NodeWeight[u] and w to TotalWeight. See Graph for why this choice
+// is internally consistent with the kernel formulas.
 func (g *Graph) AddEdge(u, v int, w float64) {
 	if w == 0 {
 		return
@@ -66,13 +76,6 @@ func (g *Graph) AddEdge(u, v int, w float64) {
 	if u != v {
 		g.Adj[v] = append(g.Adj[v], Neighbor{To: u, Weight: w})
 		g.NodeWeight[v] += w
-		g.TotalWeight += w
-	}
-	// Self-loop: counted once in Adj, w added once to NodeWeight, w
-	// added once to TotalWeight here. Modularity treats self-loops as
-	// 2w in degree and 2w in TotalWeight; we'll correct in the kernel.
-	if u == v {
-		g.NodeWeight[u] += w
 		g.TotalWeight += w
 	}
 }
@@ -318,17 +321,20 @@ func localMove(g *Graph, comm []int, gamma float64, rng *rand.Rand) bool {
 			eUtoCU := toComm[cu] // weight from u to cu \ {u} (self-loop excluded above)
 			sumCUminusU := sTot[cu] - ku
 
+			// Self-loops are excluded from toComm above. They cancel
+			// out of ΔQ symmetrically (a self-loop on u moves with u,
+			// so its Σ_in contribution leaves cu and enters c by the
+			// same amount), so ignoring them here is correct.
+			_ = selfLoop
+
 			for c, eUtoC := range toComm {
 				if c == cu {
 					continue
 				}
 				sumC := sTot[c]
-				// ΔQ for u: cu -> c
-				// gain: (eUtoC - eUtoCU)/m - gamma*ku*(sumC - sumCUminusU)/(2m^2)
-				// Factor out 1/m and 1/(2m): use twoM (which is 2m).
-				delta := (eUtoC-eUtoCU)/(twoM/2) - gamma*ku*(sumC-sumCUminusU)/(twoM*twoM/2)
-				// Equivalent simpler form:
-				delta = 2*(eUtoC-eUtoCU)/twoM - gamma*ku*(sumC-sumCUminusU)*2/(twoM*twoM)
+				// ΔQ for u: cu -> c, derived from
+				//   ΔQ = 2(eUtoC - eUtoCU)/2m - γ·ku·(sumC - (sumCu-ku))/(2m)²
+				delta := 2*(eUtoC-eUtoCU)/twoM - 2*gamma*ku*(sumC-sumCUminusU)/(twoM*twoM)
 				if delta > bestDelta+1e-12 {
 					bestDelta = delta
 					bestComm = c
@@ -336,17 +342,12 @@ func localMove(g *Graph, comm []int, gamma float64, rng *rand.Rand) bool {
 			}
 
 			if bestComm != cu {
-				// Apply move.
 				sTot[cu] -= ku
 				sTot[bestComm] += ku
 				comm[u] = bestComm
 				improvedThisPass = true
 				anyImproved = true
 			}
-			// Self-loop value used implicitly via toComm[cu] not
-			// including selfLoop; since we never move to cu, it does
-			// not matter for the comparison above.
-			_ = selfLoop
 		}
 		if !improvedThisPass {
 			break
@@ -358,11 +359,15 @@ func localMove(g *Graph, comm []int, gamma float64, rng *rand.Rand) bool {
 
 // refine takes the post-local-move partition and, for each community
 // from that partition, splits it into well-connected sub-communities.
-// We start every node in its own singleton sub-community, then run a
-// Leiden-style refinement: a node may move only to a sub-community
-// that lies entirely inside its parent community, and only if the move
-// strictly improves Q at the current γ. This guarantees the aggregated
-// graph respects connectivity (the central Leiden fix vs. Louvain).
+// Each node starts in its own singleton sub-community; we then run a
+// Leiden-style refinement to fixpoint: a node may move only to a
+// sub-community that lies entirely inside its parent community, and
+// only if the move strictly improves Q at the current γ. Iterating to
+// fixpoint matches the paper's specification — a single pass would let
+// early-shuffled nodes block better moves for later nodes.
+//
+// This restriction is what makes the aggregated graph respect
+// connectivity (the central Leiden fix vs. Louvain).
 func refine(g *Graph, parent []int, gamma float64, rng *rand.Rand) []int {
 	twoM := g.TotalWeight
 	if twoM == 0 {
@@ -370,60 +375,64 @@ func refine(g *Graph, parent []int, gamma float64, rng *rand.Rand) []int {
 	}
 
 	// Each node starts in its own sub-community. Sub-community labels
-	// are global (across parent communities) and use the original node
-	// indices as labels.
+	// are global (across parent communities); we seed them with the
+	// original node indices.
 	sub := identityPartition(g.N)
 	sTot := make(map[int]float64, g.N)
 	for u := 0; u < g.N; u++ {
 		sTot[sub[u]] = g.NodeWeight[u]
 	}
 
-	// Iterate nodes in random order. For each node u, consider only
-	// sub-communities in u's parent community. Apply the best move if
-	// it's a strict improvement.
 	order := make([]int, g.N)
 	for i := range order {
 		order[i] = i
 	}
-	rng.Shuffle(len(order), func(i, j int) { order[i], order[j] = order[j], order[i] })
 
-	for _, u := range order {
-		pu := parent[u]
-		ku := g.NodeWeight[u]
-		cu := sub[u]
+	for {
+		rng.Shuffle(len(order), func(i, j int) { order[i], order[j] = order[j], order[i] })
+		improved := false
+		for _, u := range order {
+			pu := parent[u]
+			ku := g.NodeWeight[u]
+			cu := sub[u]
 
-		toSub := map[int]float64{}
-		for _, e := range g.Adj[u] {
-			if e.To == u {
-				continue
+			toSub := map[int]float64{}
+			for _, e := range g.Adj[u] {
+				if e.To == u {
+					continue
+				}
+				if parent[e.To] != pu {
+					continue
+				}
+				toSub[sub[e.To]] += e.Weight
 			}
-			if parent[e.To] != pu {
-				continue
+
+			bestDelta := 0.0
+			bestComm := cu
+			eUtoCU := toSub[cu]
+			sumCUminusU := sTot[cu] - ku
+
+			for c, eUtoC := range toSub {
+				if c == cu {
+					continue
+				}
+				sumC := sTot[c]
+				delta := 2*(eUtoC-eUtoCU)/twoM - 2*gamma*ku*(sumC-sumCUminusU)/(twoM*twoM)
+				if delta > bestDelta+1e-12 {
+					bestDelta = delta
+					bestComm = c
+				}
 			}
-			toSub[sub[e.To]] += e.Weight
+
+			if bestComm != cu {
+				sTot[cu] -= ku
+				sTot[bestComm] += ku
+				sub[u] = bestComm
+				improved = true
+			}
 		}
-
-		bestDelta := 0.0
-		bestComm := cu
-		eUtoCU := toSub[cu]
-		sumCUminusU := sTot[cu] - ku
-
-		for c, eUtoC := range toSub {
-			if c == cu {
-				continue
-			}
-			sumC := sTot[c]
-			delta := 2*(eUtoC-eUtoCU)/twoM - gamma*ku*(sumC-sumCUminusU)*2/(twoM*twoM)
-			if delta > bestDelta+1e-12 {
-				bestDelta = delta
-				bestComm = c
-			}
-		}
-
-		if bestComm != cu {
-			sTot[cu] -= ku
-			sTot[bestComm] += ku
-			sub[u] = bestComm
+		if !improved {
+			break
 		}
 	}
 
@@ -433,8 +442,20 @@ func refine(g *Graph, parent []int, gamma float64, rng *rand.Rand) []int {
 // aggregate collapses each refined sub-community into one node in a
 // new graph. Returns the aggregate graph and a mapping
 // newNode -> []origNode.
+//
+// 2m invariance: original 2m must equal aggregated 2m. With our
+// self-loop-weight-w-contributes-w-to-2m convention this means:
+//
+//   - cross-community non-self edges (u,v,w) → super-edge (a,b,w)
+//   - within-community non-self edge (u,v,w) → contributes 2w to the
+//     self-loop on its super-node (each end of the original edge added
+//     w to original 2m; the resulting self-loop must add 2w to keep 2m
+//     invariant under our convention)
+//   - within-community self-loop (u,u,w) → contributes w to the self-
+//     loop on its super-node
 func aggregate(g *Graph, sub []int) (*Graph, [][]int) {
-	// Gather members of each sub-community in deterministic order.
+	// Gather members of each sub-community in deterministic order so
+	// the new node indexing is stable across runs with the same RNG.
 	type pair struct{ label, node int }
 	pairs := make([]pair, 0, g.N)
 	for u, c := range sub {
@@ -460,54 +481,44 @@ func aggregate(g *Graph, sub []int) (*Graph, [][]int) {
 	}
 
 	newG := NewGraph(len(mapping))
-	// Sum edge weights between super-nodes.
+
 	type key struct{ a, b int }
-	weights := map[key]float64{}
+	cross := map[key]float64{} // canonical a<=b: sum of original cross edge weights, each counted ONCE
+	self := map[int]float64{}  // super-node a: aggregated self-loop weight (already adjusted)
+
 	for u := 0; u < g.N; u++ {
 		nu := labelToNew[sub[u]]
 		for _, e := range g.Adj[u] {
 			nv := labelToNew[sub[e.To]]
-			if nv < nu {
+			if e.To == u {
+				// Original self-loop: appears once in Adj[u].
+				self[nu] += e.Weight
 				continue
 			}
-			weights[key{nu, nv}] += e.Weight
-		}
-	}
-	// Collapse: for each (a,b) pair, the AddEdge call below counts
-	// the undirected edge once. But our weights map already summed
-	// weights from BOTH directions (u->v and v->u contributed when
-	// nv >= nu)... wait, no — we only added when nv >= nu, so each
-	// undirected edge contributed once from u->v (when nu==nv it's a
-	// self-loop and we count only once; when nu<nv we count u->v but
-	// not v->u). Let's re-check.
-	//
-	// For an undirected edge u—v with nu != nv, Adj[u] has (v,w) and
-	// Adj[v] has (u,w). When iterating u, e.To=v gives (nu, nv). If
-	// nv > nu we record. When iterating v, e.To=u gives (nv, nu).
-	// Since nu < nv, "nv < nu" is false → we'd record (nv, nu) too.
-	// That's two records for one undirected edge. Fix: restrict
-	// the storage key to ordered pairs.
-	weights = map[key]float64{}
-	for u := 0; u < g.N; u++ {
-		nu := labelToNew[sub[u]]
-		for _, e := range g.Adj[u] {
-			nv := labelToNew[sub[e.To]]
+			if nu == nv {
+				// Within-community non-self edge u-v (u≠v). Adj[u] has
+				// (v,w) and Adj[v] has (u,w); both iterations contribute
+				// e.Weight here. Sum of both = 2w, which is exactly the
+				// self-loop weight needed to preserve 2m.
+				self[nu] += e.Weight
+				continue
+			}
+			// Cross-community non-self edge. Both directions contribute;
+			// halve at the end for canonical single-counting.
 			a, b := nu, nv
 			if a > b {
 				a, b = b, a
 			}
-			weights[key{a, b}] += e.Weight
+			cross[key{a, b}] += e.Weight
 		}
 	}
-	// Each undirected edge u—v (u != v) is recorded in both Adj[u]
-	// and Adj[v]; so weights[key{a,b}] for a<b is 2*w_uv. For
-	// self-loops (a==b) Adj[u] has (u,w) once, so weights[key{u,u}]
-	// is w. But AddEdge expects single-edge weight. Halve non-self.
-	for k, w := range weights {
-		if k.a == k.b {
-			newG.AddEdge(k.a, k.b, w)
-		} else {
-			newG.AddEdge(k.a, k.b, w/2)
+
+	for k, w := range cross {
+		newG.AddEdge(k.a, k.b, w/2)
+	}
+	for a, w := range self {
+		if w > 0 {
+			newG.AddEdge(a, a, w)
 		}
 	}
 

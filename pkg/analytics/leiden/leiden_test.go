@@ -53,10 +53,9 @@ func TestRun_SingleClique(t *testing.T) {
 	}
 }
 
-// TestRun_HighGammaShattersClique: at very high γ the resolution
-// penalty exceeds the internal-edge gain, and even a clique should
-// fragment. We don't assert an exact community count — just "more
-// than 1" — because the exact value depends on node count.
+// TestRun_HighGammaShattersClique: at γ well above any internal-edge
+// gain, every node should be alone in its own community. For an
+// 8-clique with unit weights, γ=5 is far past the shatter threshold.
 func TestRun_HighGammaShattersClique(t *testing.T) {
 	const n = 8
 	g := NewGraph(n)
@@ -66,8 +65,71 @@ func TestRun_HighGammaShattersClique(t *testing.T) {
 		}
 	}
 	res := Run(g, 5.0, 1, 0)
-	if res.NumComms == 1 {
-		t.Errorf("γ=5 should fragment a clique, got 1 community")
+	if res.NumComms != n {
+		t.Errorf("γ=5 should fully fragment an %d-clique into %d communities, got %d (%v)",
+			n, n, res.NumComms, res.Communities)
+	}
+}
+
+// TestRun_GraphWithSelfLoops verifies the self-loop convention is
+// internally consistent. A clique whose nodes carry self-loops should
+// still resolve to one community at γ=1.
+func TestRun_GraphWithSelfLoops(t *testing.T) {
+	const n = 5
+	g := NewGraph(n)
+	for i := 0; i < n; i++ {
+		g.AddEdge(i, i, 0.5) // self-loop on every node
+		for j := i + 1; j < n; j++ {
+			g.AddEdge(i, j, 1.0)
+		}
+	}
+	res := Run(g, 1.0, 1, 0)
+	if res.NumComms != 1 {
+		t.Errorf("clique with self-loops at γ=1 should be 1 community, got %d (%v)",
+			res.NumComms, res.Communities)
+	}
+}
+
+// TestAggregate_PreservesTotalWeight: 2m must be invariant under
+// aggregation. A direct check that the aggregate routine doesn't
+// inflate (or shrink) total edge weight.
+func TestAggregate_PreservesTotalWeight(t *testing.T) {
+	g := NewGraph(6)
+	addUndirectedEdges(g, [][2]int{
+		{0, 1}, {1, 2}, {2, 0}, // triangle A
+		{3, 4}, {4, 5}, {5, 3}, // triangle B
+		{2, 3},                 // bridge
+	})
+	// Group: nodes 0..2 in label 100, nodes 3..5 in label 200.
+	// (Labels need not be 0-indexed; aggregate normalises.)
+	sub := []int{100, 100, 100, 200, 200, 200}
+	originalTW := g.TotalWeight
+	agg, _ := aggregate(g, sub)
+	if math.Abs(agg.TotalWeight-originalTW) > 1e-9 {
+		t.Errorf("aggregate altered TotalWeight: original=%v aggregated=%v",
+			originalTW, agg.TotalWeight)
+	}
+}
+
+// TestAggregate_SelfLoopFromInternalEdges: if every edge in a graph
+// is internal to one community, the aggregate should be a single
+// node with a self-loop whose weight equals 2 × (sum of original
+// edge weights), matching the modularity 2m invariance.
+func TestAggregate_SelfLoopFromInternalEdges(t *testing.T) {
+	g := NewGraph(3)
+	addUndirectedEdges(g, [][2]int{{0, 1}, {1, 2}, {2, 0}})
+	originalTW := g.TotalWeight // 2m = 6 (3 edges × 2)
+	sub := []int{42, 42, 42}
+	agg, mapping := aggregate(g, sub)
+	if len(mapping) != 1 {
+		t.Fatalf("expected 1 super-node, got %d", len(mapping))
+	}
+	if math.Abs(agg.TotalWeight-originalTW) > 1e-9 {
+		t.Errorf("2m not preserved: original=%v aggregated=%v", originalTW, agg.TotalWeight)
+	}
+	// Single node should carry one self-loop (with the aggregated weight).
+	if len(agg.Adj[0]) != 1 || agg.Adj[0][0].To != 0 {
+		t.Errorf("expected single self-loop on the super-node, got Adj[0]=%v", agg.Adj[0])
 	}
 }
 
