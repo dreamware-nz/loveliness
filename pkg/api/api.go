@@ -24,12 +24,12 @@ import (
 
 // Server is the HTTP API server for a Loveliness node.
 type Server struct {
-	router  *router.Router
+	router   *router.Router
 	dbRouter *router.DatabaseRouter
-	cluster *cluster.Cluster
-	shards  []*shard.Shard
-	schema  *schema.Registry
-	timeout time.Duration
+	cluster  *cluster.Cluster
+	shards   []*shard.Shard
+	schema   *schema.Registry
+	timeout  time.Duration
 
 	// refTracker tracks known node keys per shard for fast duplicate
 	// detection during bulk edge loading. Avoids expensive full-table
@@ -108,6 +108,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /discovery", s.handleDiscovery)
+	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	if s.auth != nil && s.auth.Enabled() {
 		mux.Handle("/", s.auth.Middleware(protected))
 	} else {
@@ -294,12 +295,12 @@ func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
 	sm := s.cluster.GetShardMap()
 	schemaTables := s.cluster.GetSchema()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"leader":      s.cluster.LeaderAddr(),
-		"node_id":     s.cluster.NodeID(),
-		"is_leader":   s.cluster.IsLeader(),
-		"shard_map":   sm.Assignments,
-		"nodes":       sm.Nodes,
-		"schema":      schemaTables,
+		"leader":    s.cluster.LeaderAddr(),
+		"node_id":   s.cluster.NodeID(),
+		"is_leader": s.cluster.IsLeader(),
+		"shard_map": sm.Assignments,
+		"nodes":     sm.Nodes,
+		"schema":    schemaTables,
 	})
 }
 
