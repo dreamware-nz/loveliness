@@ -74,6 +74,35 @@ func (c *Client) Cypher(ctx context.Context, query string, params map[string]any
 	return &out, nil
 }
 
+// ArrowStreamMIME is the MIME type of an Arrow IPC stream payload.
+// Mirrors api.contentTypeArrowStream — duplicated here to avoid an
+// import cycle between pkg/mcp and pkg/api.
+const ArrowStreamMIME = "application/vnd.apache.arrow.stream"
+
+// CypherArrow executes the same Cypher statement as Cypher but
+// negotiates an Apache Arrow IPC stream response from /cypher. The
+// returned bytes are a complete IPC stream (schema + record batches +
+// EOS) — feed them to pyarrow.ipc.open_stream, DuckDB-WASM
+// `read_arrow`, polars.read_ipc_stream, or any other Arrow-aware
+// reader without a JSON decode step.
+//
+// Use this from MCP tooling when the consumer is itself
+// analytics-aware (e.g. a DuckDB-WASM cosmograph spike) so the tool
+// result skips the JSON marshal/unmarshal round-trip.
+func (c *Client) CypherArrow(ctx context.Context, query string, params map[string]any) ([]byte, error) {
+	expanded, err := inlineParams(query, params)
+	if err != nil {
+		return nil, err
+	}
+	body, err := c.post(ctx, "/cypher", "text/plain", strings.NewReader(expanded), map[string]string{
+		"Accept": ArrowStreamMIME,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return body, nil
+}
+
 // ClusterStatus is the shape returned by GET /cluster.
 type ClusterStatus struct {
 	Leader       string         `json:"leader"`
