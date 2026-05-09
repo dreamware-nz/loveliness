@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Loveliness Arrow → DuckDB-WASM smoke test</title>
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; background: #0a0a0a; color: #ddd; font-family: -apple-system, system-ui, sans-serif; }
+    #app { display: grid; grid-template-rows: auto auto 1fr; height: 100vh; }
+    header { padding: 12px 16px; background: #111; border-bottom: 1px solid #222; }
+    header h1 { margin: 0; font-size: 14px; font-weight: 500; color: #ddd; }
+    header p { margin: 4px 0 0; font-size: 12px; color: #888; }
+    #toolbar { padding: 8px 16px; background: #111; border-bottom: 1px solid #222; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    #toolbar button { background: #222; color: #ddd; border: 1px solid #333; padding: 6px 12px; border-radius: 4px; font: inherit; font-size: 12px; cursor: pointer; }
+    #toolbar button:hover:not(:disabled) { background: #2c2c2c; }
+    #toolbar button:disabled { opacity: 0.5; cursor: wait; }
+    #toolbar input[type=text] { background: #1a1a1a; color: #ddd; border: 1px solid #333; padding: 6px 8px; border-radius: 4px; font: inherit; font-size: 12px; min-width: 320px; }
+    #toolbar label { font-size: 12px; color: #888; }
+    #results { padding: 16px; overflow: auto; font: 12px/1.5 monospace; white-space: pre-wrap; }
+    .step { margin: 0 0 12px; padding: 8px 12px; border-left: 3px solid #333; background: #111; border-radius: 0 4px 4px 0; }
+    .step.ok { border-left-color: #4ade80; }
+    .step.err { border-left-color: #ef4444; }
+    .step.run { border-left-color: #fbbf24; }
+    .step .title { color: #ddd; font-weight: 600; }
+    .step .detail { color: #aaa; margin-top: 4px; white-space: pre-wrap; }
+    .step.ok .title { color: #4ade80; }
+    .step.err .title { color: #ef4444; }
+    .step.run .title { color: #fbbf24; }
+    table { border-collapse: collapse; margin-top: 6px; font-size: 11px; }
+    th, td { padding: 4px 8px; border: 1px solid #2a2a2a; text-align: left; }
+    th { background: #1a1a1a; color: #aaa; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <header>
+      <h1>Loveliness Arrow → DuckDB-WASM smoke test</h1>
+      <p>
+        Acceptance check for issue #27: pull a Cypher result as <code>application/vnd.apache.arrow.stream</code>,
+        ingest the buffer with DuckDB-WASM via <code>read_arrow(...)</code>, and run
+        <code>INSERT INTO points SELECT * FROM read_arrow(buf)</code> from the browser.
+      </p>
+    </header>
+
+    <div id="toolbar">
+      <label>Query:</label>
+      <input id="query" type="text" value="MATCH (n:Person) RETURN n.name AS name, n.age AS age LIMIT 100" />
+      <button id="run">Run smoke test</button>
+      <span id="status" style="color:#888; font-size:12px; margin-left:auto;"></span>
+    </div>
+
+    <div id="results">
+      <div class="step" id="step-init">
+        <div class="title">Smoke test idle</div>
+        <div class="detail">Click Run smoke test to fetch /cypher with the Arrow Accept header,
+          register the buffer in DuckDB-WASM, and run the documented INSERT pattern.</div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    // Pull DuckDB-WASM straight from JSDelivr — keeps the smoke test
+    // self-contained (no `npm install` required to run it). The MVP
+    // bundle is the smallest one without parallel workers; fine for
+    // a smoke test that processes <100K rows.
+    import * as duckdb from 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.29.0/+esm';
+
+    const ARROW_STREAM_MIME = 'application/vnd.apache.arrow.stream';
+
+    const els = {
+      query: document.getElementById('query'),
+      run: document.getElementById('run'),
+      status: document.getElementById('status'),
+      results: document.getElementById('results'),
+    };
+
+    // Each step is a row in the results panel. The smoke test reads
+    // green-green-green or stops at the first red — same UX as a
+    // unit-test runner, but inline because we can't surface
+    // pass/fail to CI from a manual browser test.
+    //
+    // We build the DOM with createElement / textContent rather than
+    // innerHTML so error messages from upstream (which can carry
+    // arbitrary text) can never inject markup.
+    function step(id, title, detail = '', state = 'run', detailNode = null) {
+      let el = document.getElementById(id);
+      if (!el) {
+        el = document.createElement('div');
+        el.id = id;
+        els.results.appendChild(el);
+      }
+      el.className = `step ${state}`;
+      el.replaceChildren();
+
+      const titleEl = document.createElement('div');
+      titleEl.className = 'title';
+      titleEl.textContent = title;
+      el.appendChild(titleEl);
+
+      if (detail || detailNode) {
+        const detailEl = document.createElement('div');
+        detailEl.className = 'detail';
+        if (detail) detailEl.textContent = detail;
+        if (detailNode) detailEl.appendChild(detailNode);
+        el.appendChild(detailEl);
+      }
+      return el;
+    }
+
+    function fail(id, title, detail) {
+      step(id, title, detail, 'err');
+      els.status.textContent = 'failed';
+      els.status.style.color = '#ef4444';
+      els.run.disabled = false;
+    }
+    function ok(id, title, detail, detailNode = null) {
+      step(id, title, detail, 'ok', detailNode);
+    }
+
+    async function fetchArrowBuffer(query) {
+      const res = await fetch('/cypher', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'text/plain',
+          'Accept': ARROW_STREAM_MIME,
+        },
+        body: query,
+      });
+      const ctype = res.headers.get('Content-Type') || '';
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`HTTP ${res.status} ${res.statusText}: ${text}`);
+      }
+      if (!ctype.includes('apache.arrow.stream')) {
+        throw new Error(
+          `server did not honour Arrow Accept header — got Content-Type ${ctype || '(none)'}.\n` +
+          `If you're behind serve.py, make sure it forwards Accept.`,
+        );
+      }
+      const buf = await res.arrayBuffer();
+      return new Uint8Array(buf);
+    }
+
+    // Selecting the right DuckDB bundle is the one piece of plumbing
+    // that DuckDB-WASM doesn't auto-resolve over the CDN — we
+    // hand it the URLs it should fetch.
+    async function initDuckDB() {
+      const JSDELIVR = duckdb.getJsDelivrBundles();
+      const bundle = await duckdb.selectBundle(JSDELIVR);
+      const worker_url = URL.createObjectURL(
+        new Blob([`importScripts("${bundle.mainWorker}");`], { type: 'text/javascript' }),
+      );
+      const worker = new Worker(worker_url);
+      const logger = new duckdb.ConsoleLogger();
+      const db = new duckdb.AsyncDuckDB(logger, worker);
+      await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
+      URL.revokeObjectURL(worker_url);
+      return db;
+    }
+
+    function buildPreviewTable(arrowResult) {
+      const fields = arrowResult.schema.fields;
+      const rows = arrowResult.toArray().map(r => r.toJSON());
+      const wrap = document.createElement('div');
+
+      const schemaLine = document.createElement('div');
+      schemaLine.textContent = 'Schema: ' +
+        fields.map(f => `${f.name}: ${f.type.toString()}`).join(', ');
+      wrap.appendChild(schemaLine);
+
+      if (rows.length === 0) {
+        const empty = document.createElement('em');
+        empty.textContent = '(no rows)';
+        wrap.appendChild(empty);
+        return wrap;
+      }
+
+      const previewLine = document.createElement('div');
+      previewLine.textContent = 'Preview:';
+      wrap.appendChild(previewLine);
+
+      const table = document.createElement('table');
+      const headRow = document.createElement('tr');
+      for (const f of fields) {
+        const th = document.createElement('th');
+        th.textContent = f.name;
+        headRow.appendChild(th);
+      }
+      table.appendChild(headRow);
+      for (const r of rows) {
+        const tr = document.createElement('tr');
+        for (const f of fields) {
+          const td = document.createElement('td');
+          const v = r[f.name];
+          td.textContent = v === null || v === undefined ? '' : String(v);
+          tr.appendChild(td);
+        }
+        table.appendChild(tr);
+      }
+      wrap.appendChild(table);
+      return wrap;
+    }
+
+    async function runSmoke() {
+      els.run.disabled = true;
+      els.results.replaceChildren();
+      els.status.textContent = 'running…';
+      els.status.style.color = '#fbbf24';
+
+      const query = els.query.value.trim();
+      if (!query) {
+        fail('s-query', 'No query', 'Enter a Cypher query first.');
+        return;
+      }
+
+      // Step 1: fetch with Arrow Accept header
+      step('s-fetch', '1. POST /cypher with Accept: application/vnd.apache.arrow.stream');
+      let buf;
+      try {
+        buf = await fetchArrowBuffer(query);
+        ok('s-fetch', `1. Fetched ${buf.byteLength.toLocaleString()} bytes of Arrow IPC stream`);
+      } catch (err) {
+        fail('s-fetch', '1. Fetch failed', String(err.message ?? err));
+        return;
+      }
+
+      // Step 2: instantiate DuckDB-WASM
+      step('s-init', '2. Boot DuckDB-WASM');
+      let db, conn;
+      try {
+        db = await initDuckDB();
+        conn = await db.connect();
+        ok('s-init', '2. DuckDB-WASM booted');
+      } catch (err) {
+        fail('s-init', '2. DuckDB-WASM init failed', String(err.message ?? err));
+        return;
+      }
+
+      // Step 3: register the Arrow buffer as a virtual file. DuckDB
+      // resolves `read_arrow('name')` against the registered name.
+      step('s-register', '3. Register Arrow buffer with DuckDB-WASM');
+      try {
+        await db.registerFileBuffer('cypher.arrows', buf);
+        ok('s-register', '3. Buffer registered as cypher.arrows');
+      } catch (err) {
+        fail('s-register', '3. Register failed', String(err.message ?? err));
+        return;
+      }
+
+      // Step 4: the AC's literal pattern. CREATE the table from the
+      // Arrow schema first so the subsequent INSERT can match
+      // INSERT INTO points SELECT * FROM read_arrow(...). The
+      // CREATE-AS form would also work but the AC pins INSERT, so
+      // we exercise the INSERT path explicitly.
+      step('s-create', '4. CREATE TABLE points + INSERT INTO points SELECT * FROM read_arrow(buf)');
+      try {
+        // LIMIT 0 so DuckDB only borrows the schema, not the rows —
+        // the INSERT below carries the rows.
+        await conn.query(`CREATE TABLE points AS SELECT * FROM read_arrow('cypher.arrows') LIMIT 0`);
+        await conn.query(`INSERT INTO points SELECT * FROM read_arrow('cypher.arrows')`);
+        ok('s-create', '4. Rows ingested into points');
+      } catch (err) {
+        fail('s-create', '4. INSERT failed', String(err.message ?? err));
+        return;
+      }
+
+      // Step 5: count + preview
+      step('s-count', '5. Verify ingest');
+      try {
+        const countRes = await conn.query(`SELECT COUNT(*) AS n FROM points`);
+        const count = Number(countRes.toArray()[0].n);
+        const preview = await conn.query(`SELECT * FROM points LIMIT 5`);
+        const detailNode = buildPreviewTable(preview);
+        ok('s-count', `5. COUNT(*) = ${count.toLocaleString()}`, '', detailNode);
+        els.status.textContent = 'smoke test passed';
+        els.status.style.color = '#4ade80';
+      } catch (err) {
+        fail('s-count', '5. Verify failed', String(err.message ?? err));
+        return;
+      } finally {
+        try { await conn.close(); } catch {}
+        try { await db.terminate(); } catch {}
+        els.run.disabled = false;
+      }
+    }
+
+    els.run.addEventListener('click', runSmoke);
+  </script>
+</body>
+</html>
