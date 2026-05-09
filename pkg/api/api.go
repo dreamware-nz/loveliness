@@ -14,6 +14,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/johnjansen/loveliness/pkg/analytics"
+	"github.com/johnjansen/loveliness/pkg/analytics/plugins"
 	"github.com/johnjansen/loveliness/pkg/auth"
 	"github.com/johnjansen/loveliness/pkg/cluster"
 	"github.com/johnjansen/loveliness/pkg/ingest"
@@ -67,6 +69,11 @@ type Server struct {
 	// bulkLoadCounters tracks rows ingested via /bulk/* endpoints,
 	// labeled by table, for the loveliness_bulk_load_rows_total metric.
 	bulkLoadCounters *bulkLoadCounters
+
+	// analytics is the registry of opt-in, post-execution plugins that run
+	// against a Cypher Result when the client hits POST /db/{name}/query
+	// with an analytics[] selector. Plugins register at boot.
+	analytics *analytics.Registry
 }
 
 // NewServer creates a new API server.
@@ -83,7 +90,32 @@ func NewServer(r *router.Router, c *cluster.Cluster, shards []*shard.Shard, reg 
 		queryCounters:    newQueryCounters(),
 		queryHistogram:   newQueryHistogram(),
 		bulkLoadCounters: newBulkLoadCounters(),
+		analytics:        defaultAnalyticsRegistry(),
 	}
+}
+
+// defaultAnalyticsRegistry returns the registry the server boots with —
+// the built-in plugins shipped in pkg/analytics/plugins. Registration is
+// fail-fast: a duplicate Name() at this layer is a programming error.
+func defaultAnalyticsRegistry() *analytics.Registry {
+	reg := analytics.NewRegistry()
+	for _, p := range []analytics.Plugin{
+		plugins.CountByLabel{},
+		plugins.ConnectedComponents{},
+	} {
+		if err := reg.Register(p); err != nil {
+			panic(fmt.Sprintf("analytics: register %q: %v", p.Name(), err))
+		}
+	}
+	return reg
+}
+
+// RegisterAnalyticsPlugin registers an additional plugin at runtime.
+// Intended for cmd/server wire-up of out-of-tree plugins (e.g. a real
+// Leiden binding) before Handler() is called. Returns an error on
+// duplicate Name().
+func (s *Server) RegisterAnalyticsPlugin(p analytics.Plugin) error {
+	return s.analytics.Register(p)
 }
 
 type contextKey string
@@ -120,6 +152,11 @@ func (s *Server) Handler() http.Handler {
 	protected.HandleFunc("POST /db/{name}/cypher", s.handleCypherScoped)
 	protected.HandleFunc("POST /db/{name}/bulk/nodes", s.handleBulkNodesScoped)
 	protected.HandleFunc("POST /db/{name}/bulk/edges", s.handleBulkEdgesScoped)
+
+	// Analytics: cypher + opt-in post-execution plugins, JSON envelope.
+	// Strict superset of POST /db/{name}/cypher — analytics[] is optional.
+	protected.HandleFunc("POST /db/{name}/query", s.handleQuery)
+	protected.HandleFunc("GET /analytics", s.handleAnalyticsList)
 
 	// Admin endpoint (not db-scoped) for CREATE/STOP/START/DROP DATABASE, SHOW DATABASES.
 	protected.HandleFunc("POST /admin/cypher", s.handleAdminCypher)
@@ -673,6 +710,103 @@ func (s *Server) handleCypherScoped(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+// queryRequest is the JSON envelope for POST /db/{name}/query.
+// `cypher` is required; `analytics` is optional. Empty `analytics`
+// makes this endpoint a strict superset of /db/{name}/cypher.
+type queryRequest struct {
+	Cypher    string              `json:"cypher"`
+	Analytics []analytics.Request `json:"analytics,omitempty"`
+}
+
+// queryResponse mirrors the cypher result, with an extra analytics block.
+// `analytics_errors` is per-plugin so one bad plugin can't poison the
+// rest of the response — clients should always consult both maps.
+type queryResponse struct {
+	Columns         []string          `json:"columns"`
+	Rows            []map[string]any  `json:"rows"`
+	Analytics       map[string]any    `json:"analytics,omitempty"`
+	AnalyticsErrors map[string]string `json:"analytics_errors,omitempty"`
+}
+
+// handleQuery is the JSON-envelope sibling of handleCypherScoped: cypher
+// runs through the same dbRouter, then any requested analytics plugins
+// post-process the Result. The wire format is the design coming out of
+// spike/analytics-plugin-poc; see issue #62 for the promotion checklist.
+func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
+	dbName := r.PathValue("name")
+	if dbName == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "database name required in path", 0)
+		return
+	}
+	if s.dbRouter == nil {
+		writeError(w, http.StatusServiceUnavailable, "NO_MULTI_DB", "multi-database not enabled", 0)
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "cannot read body: "+err.Error(), 0)
+		return
+	}
+	var req queryRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_JSON", err.Error(), 0)
+		return
+	}
+	cypher := strings.TrimSpace(req.Cypher)
+	if cypher == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "missing cypher", 0)
+		return
+	}
+	if router.IsAdminCommand(cypher) {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST",
+			"admin commands must use POST /admin/cypher", 0)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), s.timeout)
+	defer cancel()
+
+	result, err := s.dbRouter.Execute(ctx, dbName, cypher)
+	if err != nil {
+		if qe, ok := err.(*router.QueryError); ok {
+			status := http.StatusInternalServerError
+			switch qe.Code {
+			case "CYPHER_PARSE_ERROR", "MISSING_SHARD_KEY":
+				status = http.StatusBadRequest
+			case "DATABASE_ERROR":
+				status = http.StatusNotFound
+			case "SHARD_UNAVAILABLE":
+				status = http.StatusServiceUnavailable
+			case "QUERY_TIMEOUT":
+				status = http.StatusGatewayTimeout
+			}
+			writeError(w, status, qe.Code, qe.Message, qe.ShardID)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error(), 0)
+		return
+	}
+
+	resp := queryResponse{Columns: result.Columns, Rows: result.Rows}
+	if len(req.Analytics) > 0 {
+		out, errs := s.analytics.Run(ctx, result, req.Analytics)
+		if len(out) > 0 {
+			resp.Analytics = out
+		}
+		if len(errs) > 0 {
+			resp.AnalyticsErrors = errs
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleAnalyticsList returns the names of registered analytics plugins.
+// Useful as a discovery endpoint for clients building UI around them.
+func (s *Server) handleAnalyticsList(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"plugins": s.analytics.Names()})
 }
 
 // handleBulkNodesScoped routes bulk node loading to a specific database.
