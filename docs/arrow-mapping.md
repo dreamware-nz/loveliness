@@ -184,3 +184,17 @@ version is higher than they were built against.
 - HTTP API content negotiation: [`docs/api.md`](api.md#apache-arrow-output)
 - Server encoder: `pkg/api/arrow.go`
 - Issue tracking remaining slices: [#27](https://github.com/dreamware-nz/loveliness/issues/27)
+
+## Verifying client ingestion
+
+The cosmograph spike ships a self-contained DuckDB-WASM smoke test at
+`spike/cosmograph-poc/arrow-smoke.html`. With a Loveliness cluster
+running on `:8080` and the spike server on `:8765`
+(`python3 spike/cosmograph-poc/serve.py`), open
+<http://localhost:8765/arrow-smoke.html> and click *Run smoke test*.
+The page POSTs `/cypher` with `Accept: application/vnd.apache.arrow.stream`,
+hands the buffer to DuckDB-WASM via `read_arrow(...)`, and exercises
+the documented `INSERT INTO points SELECT * FROM read_arrow(buf)`
+pattern. Each step turns green (or surfaces the error) inline so the
+ingestion path can be eyeballed end-to-end without building a JS
+test harness.
