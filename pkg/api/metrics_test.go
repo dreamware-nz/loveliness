@@ -133,6 +133,71 @@ func TestWriteWALMetrics_StableOrder(t *testing.T) {
 	}
 }
 
+// fakeCluster implements metricsCluster with hand-set values.
+type fakeCluster struct {
+	nodeID string
+	role   string
+}
+
+func (f *fakeCluster) NodeID() string { return f.nodeID }
+func (f *fakeCluster) Role() string   { return f.role }
+
+func TestRaftState_OneHotForCurrentRole(t *testing.T) {
+	var buf bytes.Buffer
+	writeRaftStateMetric(&buf, &fakeCluster{nodeID: "node-1", role: "leader"})
+	out := buf.String()
+
+	mustContain := []string{
+		"# HELP loveliness_raft_state",
+		"# TYPE loveliness_raft_state gauge",
+		`loveliness_raft_state{node_id="node-1",state="leader"} 1`,
+		`loveliness_raft_state{node_id="node-1",state="follower"} 0`,
+		`loveliness_raft_state{node_id="node-1",state="candidate"} 0`,
+		`loveliness_raft_state{node_id="node-1",state="shutdown"} 0`,
+		`loveliness_raft_state{node_id="node-1",state="unknown"} 0`,
+	}
+	for _, s := range mustContain {
+		if !strings.Contains(out, s) {
+			t.Errorf("output missing %q\nfull output:\n%s", s, out)
+		}
+	}
+}
+
+func TestRaftState_FollowerOneHot(t *testing.T) {
+	var buf bytes.Buffer
+	writeRaftStateMetric(&buf, &fakeCluster{nodeID: "node-2", role: "follower"})
+	out := buf.String()
+	if !strings.Contains(out, `loveliness_raft_state{node_id="node-2",state="follower"} 1`) {
+		t.Errorf("follower must be 1, got:\n%s", out)
+	}
+	if !strings.Contains(out, `loveliness_raft_state{node_id="node-2",state="leader"} 0`) {
+		t.Errorf("leader must be 0 when follower is current, got:\n%s", out)
+	}
+}
+
+func TestRaftState_UnknownRoleFallback(t *testing.T) {
+	// If Role() returns something we don't enumerate, no series should be 1.
+	var buf bytes.Buffer
+	writeRaftStateMetric(&buf, &fakeCluster{nodeID: "node-3", role: "garbled"})
+	out := buf.String()
+	if strings.Contains(out, "} 1\n") {
+		t.Errorf("no state should be 1 for unrecognized role, got:\n%s", out)
+	}
+}
+
+func TestRaftState_AlwaysEmitsAllStates(t *testing.T) {
+	// Even in shutdown, the full enum is emitted so dashboards show
+	// continuous lines instead of breaking when a node gets demoted.
+	var buf bytes.Buffer
+	writeRaftStateMetric(&buf, &fakeCluster{nodeID: "n", role: "shutdown"})
+	out := buf.String()
+	for _, st := range []string{"leader", "follower", "candidate", "shutdown", "unknown"} {
+		if !strings.Contains(out, `state="`+st+`"`) {
+			t.Errorf("missing series for state=%q in:\n%s", st, out)
+		}
+	}
+}
+
 func TestComputeLagSeconds(t *testing.T) {
 	zero := time.Time{}
 	head := time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC)

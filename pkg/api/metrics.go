@@ -44,6 +44,20 @@ type metricsReplicaState interface {
 	GetTimestamp(shardID int, nodeID string) time.Time
 }
 
+// metricsCluster is the slice of *cluster.Cluster the metrics handler
+// needs for raft_state. Kept narrow so tests inject fakes without
+// standing up a real Raft.
+type metricsCluster interface {
+	NodeID() string
+	Role() string
+}
+
+// raftStates is the set of one-hot label values emitted by
+// loveliness_raft_state. Listed explicitly so the metric shape doesn't
+// drift if we ever add more raft.RaftState values upstream — all known
+// states get a 0/1 value at every scrape, alerts can pick any one.
+var raftStates = []string{"leader", "follower", "candidate", "shutdown", "unknown"}
+
 // replicaLagPair identifies a (shard, replica) pair the handler should emit.
 type replicaLagPair struct {
 	ShardID int
@@ -53,6 +67,10 @@ type replicaLagPair struct {
 func writeMetrics(w io.Writer, s *Server) {
 	emitHelp(w, "loveliness_local_shards", "Number of shards opened on this node.", "gauge")
 	fprintf(w, "loveliness_local_shards %d\n", len(s.shards))
+
+	if s.cluster != nil {
+		writeRaftStateMetric(w, s.cluster)
+	}
 
 	if s.dr == nil || s.dr.WAL == nil {
 		return
@@ -77,6 +95,24 @@ func writeMetrics(w io.Writer, s *Server) {
 	}
 
 	writeWALMetrics(w, s.dr.WAL, shardIDs, s.dr.ReplicaState, pairs)
+}
+
+// writeRaftStateMetric emits loveliness_raft_state as a one-hot gauge:
+// one series per known state, value=1 for the active one, 0 for the rest.
+// One-hot is the standard Prometheus shape for enum-like metrics — it
+// lets dashboards alert on any single state without having to map an int.
+func writeRaftStateMetric(w io.Writer, c metricsCluster) {
+	emitHelp(w, "loveliness_raft_state",
+		"Current Raft role for this node, one-hot encoded across known states.", "gauge")
+	current := c.Role()
+	nodeID := c.NodeID()
+	for _, st := range raftStates {
+		v := 0
+		if st == current {
+			v = 1
+		}
+		fprintf(w, "loveliness_raft_state{node_id=%q,state=%q} %d\n", nodeID, st, v)
+	}
 }
 
 // writeWALMetrics emits the WAL- and replica-related series. It's split out
