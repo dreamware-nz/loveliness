@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"sync"
 
 	"github.com/hashicorp/raft"
@@ -11,11 +12,47 @@ import (
 	"github.com/johnjansen/loveliness/pkg/catalog"
 )
 
-// ShardAssignment tracks which node owns the primary for a shard
-// and which node has the replica.
+// ShardAssignment tracks which nodes own a shard.
+// Primary is the leader for the shard; Replicas are followers.
+// Epoch is bumped on every placement change so out-of-order Raft
+// applies are idempotent — readers can ignore an update whose epoch
+// is not strictly greater than the one they last saw.
 type ShardAssignment struct {
-	Primary string `json:"primary"`
-	Replica string `json:"replica,omitempty"`
+	Primary  string   `json:"primary"`
+	Replicas []string `json:"replicas,omitempty"`
+	Epoch    uint64   `json:"epoch,omitempty"`
+}
+
+// shardAssignmentLegacy is the on-disk shape from before issue #5.
+// We keep it for snapshot back-compat: the old FSM wrote a single
+// `replica` string, the new one writes a `replicas` slice. Both are
+// accepted; only the new shape is written going forward.
+type shardAssignmentLegacy struct {
+	Primary  string   `json:"primary"`
+	Replica  string   `json:"replica,omitempty"`
+	Replicas []string `json:"replicas,omitempty"`
+	Epoch    uint64   `json:"epoch,omitempty"`
+}
+
+// UnmarshalJSON accepts both the legacy single-replica shape and the
+// new multi-replica shape. If both `replica` and `replicas` are present
+// the new field wins; the legacy field is folded in only when the new
+// one is empty.
+func (a *ShardAssignment) UnmarshalJSON(data []byte) error {
+	var v shardAssignmentLegacy
+	if err := json.Unmarshal(data, &v); err != nil {
+		return err
+	}
+	a.Primary = v.Primary
+	a.Epoch = v.Epoch
+	if len(v.Replicas) > 0 {
+		a.Replicas = v.Replicas
+	} else if v.Replica != "" {
+		a.Replicas = []string{v.Replica}
+	} else {
+		a.Replicas = nil
+	}
+	return nil
 }
 
 // ShardMap is the cluster-wide mapping of shard IDs to node assignments.
@@ -61,10 +98,41 @@ type Command struct {
 }
 
 // AssignShardPayload is the data for CmdAssignShard.
+// Replicas replaces the legacy single-replica field; UnmarshalJSON
+// folds the old `replica` shape in for back-compat.
 type AssignShardPayload struct {
-	ShardID int    `json:"shard_id"`
-	Primary string `json:"primary"`
-	Replica string `json:"replica,omitempty"`
+	ShardID  int      `json:"shard_id"`
+	Primary  string   `json:"primary"`
+	Replicas []string `json:"replicas,omitempty"`
+	Epoch    uint64   `json:"epoch,omitempty"`
+}
+
+type assignShardPayloadLegacy struct {
+	ShardID  int      `json:"shard_id"`
+	Primary  string   `json:"primary"`
+	Replica  string   `json:"replica,omitempty"`
+	Replicas []string `json:"replicas,omitempty"`
+	Epoch    uint64   `json:"epoch,omitempty"`
+}
+
+// UnmarshalJSON folds the legacy single-replica payload into the new
+// Replicas slice when no new-shape replicas are provided.
+func (p *AssignShardPayload) UnmarshalJSON(data []byte) error {
+	var v assignShardPayloadLegacy
+	if err := json.Unmarshal(data, &v); err != nil {
+		return err
+	}
+	p.ShardID = v.ShardID
+	p.Primary = v.Primary
+	p.Epoch = v.Epoch
+	if len(v.Replicas) > 0 {
+		p.Replicas = v.Replicas
+	} else if v.Replica != "" {
+		p.Replicas = []string{v.Replica}
+	} else {
+		p.Replicas = nil
+	}
+	return nil
 }
 
 // JoinNodePayload is the data for CmdJoinNode.
@@ -119,24 +187,66 @@ type DeleteAnnotationPayload struct {
 func (sm ShardMap) ShardsForNode(nodeID string) []int {
 	var ids []int
 	for id, a := range sm.Assignments {
-		if a.Primary == nodeID || a.Replica == nodeID {
+		if a.Primary == nodeID {
 			ids = append(ids, id)
+			continue
+		}
+		for _, r := range a.Replicas {
+			if r == nodeID {
+				ids = append(ids, id)
+				break
+			}
 		}
 	}
 	return ids
 }
 
-// NodesForShard returns the node IDs that host a shard (primary first, then replica).
+// NodesForShard returns the node IDs that host a shard (primary first, then replicas).
 func (sm ShardMap) NodesForShard(shardID int) []string {
 	a, ok := sm.Assignments[shardID]
 	if !ok {
 		return nil
 	}
-	nodes := []string{a.Primary}
-	if a.Replica != "" {
-		nodes = append(nodes, a.Replica)
+	nodes := make([]string, 0, 1+len(a.Replicas))
+	if a.Primary != "" {
+		nodes = append(nodes, a.Primary)
+	}
+	for _, r := range a.Replicas {
+		if r != "" {
+			nodes = append(nodes, r)
+		}
 	}
 	return nodes
+}
+
+// UnderReplicatedShards returns shard IDs whose total holder count
+// (primary + replicas) is below rf. Used by observability and the
+// rebalancer to decide which shards need additional placements.
+//
+// rf=1 means "every shard must have a primary"; rf=2 means "primary
+// plus at least one replica"; etc. A shard with a missing primary
+// also counts as under-replicated even if its replica list is full.
+func (sm ShardMap) UnderReplicatedShards(rf int) []int {
+	if rf < 1 {
+		rf = 1
+	}
+	var ids []int
+	for id, a := range sm.Assignments {
+		holders := 0
+		if a.Primary != "" {
+			holders++
+		}
+		for _, r := range a.Replicas {
+			if r != "" && r != a.Primary {
+				holders++
+			}
+		}
+		if holders < rf {
+			ids = append(ids, id)
+		}
+	}
+	sort.Ints(ids)
+	return ids
 }
 
 // PrimaryForShard returns the primary node for a shard.
@@ -241,9 +351,22 @@ func (f *FSM) Apply(log *raft.Log) interface{} {
 		if err := json.Unmarshal(cmd.Payload, &p); err != nil {
 			return fmt.Errorf("unmarshal assign shard: %w", err)
 		}
+		// Idempotency: if a payload carries an epoch, drop applies that
+		// don't strictly advance it. Epoch=0 (legacy / unset) always wins
+		// over an existing epoch=0 entry — needed so the migration path
+		// from old snapshots is a no-op rewrite, not a rejection.
+		existing, hadExisting := f.shardMap.Assignments[p.ShardID]
+		if hadExisting && p.Epoch != 0 && existing.Epoch != 0 && p.Epoch <= existing.Epoch {
+			return nil
+		}
+		newEpoch := p.Epoch
+		if newEpoch == 0 && hadExisting {
+			newEpoch = existing.Epoch + 1
+		}
 		f.shardMap.Assignments[p.ShardID] = ShardAssignment{
-			Primary: p.Primary,
-			Replica: p.Replica,
+			Primary:  p.Primary,
+			Replicas: append([]string(nil), p.Replicas...),
+			Epoch:    newEpoch,
 		}
 		return nil
 
@@ -272,8 +395,18 @@ func (f *FSM) Apply(log *raft.Log) interface{} {
 			return fmt.Errorf("unmarshal promote replica: %w", err)
 		}
 		if a, ok := f.shardMap.Assignments[p.ShardID]; ok {
+			// Drop the promoted node from the replica list — it's now
+			// the primary. Remaining replicas stay; the rebalancer
+			// will fill any gap on the next pass.
+			filtered := a.Replicas[:0]
+			for _, r := range a.Replicas {
+				if r != p.NewPrimary {
+					filtered = append(filtered, r)
+				}
+			}
 			a.Primary = p.NewPrimary
-			a.Replica = "" // replica slot now empty, needs reassignment
+			a.Replicas = append([]string(nil), filtered...)
+			a.Epoch++
 			f.shardMap.Assignments[p.ShardID] = a
 		}
 		return nil

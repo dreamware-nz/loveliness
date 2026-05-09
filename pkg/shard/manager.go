@@ -9,9 +9,11 @@ import (
 )
 
 // Assignment mirrors cluster.ShardAssignment to avoid circular imports.
+// Replicas replaces the legacy single-Replica field; the deprecated
+// alias remains for the few tests that still construct one slot.
 type Assignment struct {
-	Primary string
-	Replica string
+	Primary  string
+	Replicas []string
 }
 
 // StoreFactory creates a Store for a given shard path.
@@ -57,8 +59,15 @@ func (m *Manager) UpdateAssignments(assignments map[int]Assignment) {
 	// Determine which shards this node should host.
 	want := make(map[int]bool)
 	for id, a := range assignments {
-		if a.Primary == m.nodeID || a.Replica == m.nodeID {
+		if a.Primary == m.nodeID {
 			want[id] = true
+			continue
+		}
+		for _, r := range a.Replicas {
+			if r == m.nodeID {
+				want[id] = true
+				break
+			}
 		}
 	}
 

@@ -304,14 +304,24 @@ func (s *Server) handleWALStatus(w http.ResponseWriter, r *http.Request) {
 		sm := s.cluster.GetShardMap()
 		replicas := make(map[string]any)
 		for shardID, assignment := range sm.Assignments {
-			if assignment.Replica != "" {
-				walHead := s.dr.WAL.ShardSequence(shardID)
-				pos := s.dr.ReplicaState.GetPosition(shardID, assignment.Replica)
-				replicas[fmt.Sprintf("shard-%d", shardID)] = map[string]any{
-					"replica":  assignment.Replica,
+			if len(assignment.Replicas) == 0 {
+				continue
+			}
+			walHead := s.dr.WAL.ShardSequence(shardID)
+			entries := make([]map[string]any, 0, len(assignment.Replicas))
+			for _, r := range assignment.Replicas {
+				if r == "" {
+					continue
+				}
+				pos := s.dr.ReplicaState.GetPosition(shardID, r)
+				entries = append(entries, map[string]any{
+					"replica":  r,
 					"position": pos,
 					"lag":      walHead - pos,
-				}
+				})
+			}
+			if len(entries) > 0 {
+				replicas[fmt.Sprintf("shard-%d", shardID)] = entries
 			}
 		}
 		status["replicas"] = replicas

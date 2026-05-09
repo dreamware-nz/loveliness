@@ -72,6 +72,13 @@ type Config struct {
 	// can flip this to true.
 	AllowAllShortestUnsafe bool
 
+	// ReplicationFactor is the desired number of node copies per shard
+	// when bootstrapping a new cluster's placement (primary + (rf-1)
+	// replicas). 1 disables replication; 2 places one replica; etc.
+	// Clamped at runtime to len(nodes) so a small cluster can still
+	// bootstrap and surface the shortfall through observability.
+	ReplicationFactor int
+
 	// DNS discovery configuration.
 	DiscoverMode     string // "dns" to enable DNS-based peer discovery, empty to disable
 	DiscoverAddr     string // DNS name to resolve for peer discovery (e.g., "loveliness.internal")
@@ -95,6 +102,7 @@ func DefaultConfig() Config {
 		BoltAddr:             ":7687",
 		TLSMode:              "off",
 		TLSClientAuth:        "require",
+		ReplicationFactor:    1,
 	}
 }
 
@@ -206,6 +214,11 @@ func FromEnv() Config {
 	}
 	if v := os.Getenv("LOVELINESS_ALLOW_ALL_SHORTEST_UNSAFE"); v == "true" || v == "1" {
 		c.AllowAllShortestUnsafe = true
+	}
+	if v := os.Getenv("LOVELINESS_REPLICATION_FACTOR"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.ReplicationFactor = n
+		}
 	}
 	return c
 }
