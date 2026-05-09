@@ -142,22 +142,32 @@ got rows back).
 
 The Arrow stream format flushes the schema message before the first
 record batch, so there is no way to return a 4xx/5xx HTTP status
-once a batch has been written. Errors discovered mid-stream are
-encoded as a final record batch with these schema-metadata flags:
+once a batch has been written. The Loveliness encoder surfaces
+errors as schema-level metadata so a single read of the schema
+metadata tells a client whether the result is authoritative:
 
 | Key | Value |
 |---|---|
 | `loveliness.error` | `"true"` |
-| `loveliness.error.code` | server error code (e.g. `SHARD_TIMEOUT`) |
-| `loveliness.error.message` | human-readable detail |
+| `loveliness.error.code` | `SHARD_ERROR` (one shard failed) or `SHARD_ERRORS` (multiple) |
+| `loveliness.error.message` | human-readable detail; for multi-shard cases prefixed with the failed-shard count |
 
-Clients **must** check for `loveliness.error == "true"` after the
-last batch and surface the error to the user — silent truncation
-would otherwise look like an empty result. This trailer mechanism is
-documented here so clients across languages have one contract; it
-does not exist in the file format because file payloads are always
-fully buffered before the response headers are sent (a regular HTTP
-500 covers that path).
+Clients **must** check for `loveliness.error == "true"` and surface
+the error to the user — silent truncation would otherwise look like
+an empty result. The structured per-shard list still rides along on
+`loveliness.errors` (JSON array) when clients want machine-readable
+detail; the flat keys above exist so a client can do one metadata
+lookup. The same keys are emitted on both the stream and file
+formats so client code can share the check.
+
+Today the encoder is fully buffered, so all errors are observed
+before any byte is written and the metadata lands on the initial
+schema message. A future truly-incremental encoder that flushes
+record batches as shards reply will need a sentinel terminal-batch
+mechanism (likely a zero-row batch with column-level metadata) to
+signal errors discovered after the schema is on the wire; the wire
+contract for clients does not change — they still check
+`loveliness.error` after the last batch.
 
 ## Versioning
 

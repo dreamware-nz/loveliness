@@ -344,7 +344,12 @@ const arrowMappingVersion = "1"
 func schemaMetadataKeys(result *router.Result) []string {
 	keys := []string{"loveliness.arrow_mapping_version", "loveliness.partial"}
 	if len(result.Errors) > 0 {
-		keys = append(keys, "loveliness.errors")
+		keys = append(keys,
+			"loveliness.errors",
+			"loveliness.error",
+			"loveliness.error.code",
+			"loveliness.error.message",
+		)
 	}
 	return keys
 }
@@ -353,9 +358,33 @@ func schemaMetadataValues(result *router.Result) []string {
 	values := []string{arrowMappingVersion, boolStr(result.Partial)}
 	if len(result.Errors) > 0 {
 		errsJSON, _ := json.Marshal(result.Errors)
-		values = append(values, string(errsJSON))
+		code, msg := errorTrailer(result.Errors)
+		values = append(values, string(errsJSON), "true", code, msg)
 	}
 	return values
+}
+
+// errorTrailer derives the (code, message) pair attached to the
+// stream as the mid-stream error trailer documented in
+// docs/arrow-mapping.md. The full structured list still rides on
+// `loveliness.errors`; these flat keys exist so clients can perform
+// a single metadata lookup to decide whether to surface an error.
+//
+// Shape choice: pick the first shard error as the canonical
+// (code, message) — for a single failed shard this is exact; for
+// multiple, the message degrades to "N shards failed" so a client
+// that only reads the trailer doesn't quietly drop the count. The
+// structured list remains the source of truth.
+func errorTrailer(errs []router.ShardError) (code, message string) {
+	if len(errs) == 0 {
+		return "", ""
+	}
+	first := errs[0]
+	if len(errs) == 1 {
+		return "SHARD_ERROR", fmt.Sprintf("shard %d: %s", first.ShardID, first.Error)
+	}
+	return "SHARD_ERRORS", fmt.Sprintf("%d shards failed; first: shard %d: %s",
+		len(errs), first.ShardID, first.Error)
 }
 
 func boolStr(b bool) string {
