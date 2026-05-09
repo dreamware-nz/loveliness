@@ -63,21 +63,26 @@ type Server struct {
 	// queryHistogram tracks /cypher latencies by (query_type, status)
 	// for the loveliness_query_duration_seconds metric.
 	queryHistogram *queryHistogram
+
+	// bulkLoadCounters tracks rows ingested via /bulk/* endpoints,
+	// labeled by table, for the loveliness_bulk_load_rows_total metric.
+	bulkLoadCounters *bulkLoadCounters
 }
 
 // NewServer creates a new API server.
 func NewServer(r *router.Router, c *cluster.Cluster, shards []*shard.Shard, reg *schema.Registry, timeout time.Duration) *Server {
 	return &Server{
-		router:         r,
-		cluster:        c,
-		shards:         shards,
-		schema:         reg,
-		timeout:        timeout,
-		refTracker:     make(map[int]map[string]bool),
-		joinTokens:     cluster.NewTokenStore(),
-		startTime:      time.Now(),
-		queryCounters:  newQueryCounters(),
-		queryHistogram: newQueryHistogram(),
+		router:           r,
+		cluster:          c,
+		shards:           shards,
+		schema:           reg,
+		timeout:          timeout,
+		refTracker:       make(map[int]map[string]bool),
+		joinTokens:       cluster.NewTokenStore(),
+		startTime:        time.Now(),
+		queryCounters:    newQueryCounters(),
+		queryHistogram:   newQueryHistogram(),
+		bulkLoadCounters: newBulkLoadCounters(),
 	}
 }
 

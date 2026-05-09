@@ -99,6 +99,8 @@ func (s *Server) handleBulkNodes(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	s.bulkLoadCounters.Add(tableName, result.Loaded)
+
 	if len(result.Errors) > 0 {
 		writeJSON(w, http.StatusMultiStatus, result)
 	} else {
@@ -195,9 +197,14 @@ func (s *Server) handleBulkEdges(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if refsOnly {
+		loaded := int64(totalRefs - len(refErrors))
+		// Refs-only loads materialise nodes in the "to" table, not the
+		// rel table — count them under toTable so dashboards see them
+		// against the right entity.
+		s.bulkLoadCounters.Add(toTable, loaded)
 		writeJSON(w, http.StatusOK, bulkResult{
 			Table:  relTable,
-			Loaded: int64(totalRefs - len(refErrors)),
+			Loaded: loaded,
 			Errors: refErrors,
 		})
 		return
@@ -206,6 +213,8 @@ func (s *Server) handleBulkEdges(w http.ResponseWriter, r *http.Request) {
 	// COPY FROM edges per shard.
 	result := s.copyFromShards(relTable, headerLine, buckets)
 	result.Errors = append(refErrors, result.Errors...)
+
+	s.bulkLoadCounters.Add(relTable, result.Loaded)
 
 	if len(result.Errors) > 0 {
 		writeJSON(w, http.StatusMultiStatus, result)

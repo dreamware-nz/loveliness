@@ -81,6 +81,10 @@ func writeMetrics(w io.Writer, s *Server) {
 		writeQueryHistogramMetrics(w, s.queryHistogram.Snapshot())
 	}
 
+	if s.bulkLoadCounters != nil {
+		writeBulkLoadMetrics(w, s.bulkLoadCounters.Snapshot())
+	}
+
 	if s.dr == nil || s.dr.WAL == nil {
 		return
 	}
@@ -140,6 +144,20 @@ func formatBucketBound(v float64) string {
 		return "+Inf"
 	}
 	return formatGaugeFloat(v)
+}
+
+// writeBulkLoadMetrics emits loveliness_bulk_load_rows_total{table} from
+// a deterministic snapshot. Empty snapshots emit nothing — a series only
+// appears once a /bulk/* request has loaded at least one row for the table.
+func writeBulkLoadMetrics(w io.Writer, samples []bulkLoadSample) {
+	if len(samples) == 0 {
+		return
+	}
+	emitHelp(w, "loveliness_bulk_load_rows_total",
+		"Cumulative rows loaded via /bulk/* endpoints, by table.", "counter")
+	for _, s := range samples {
+		fprintf(w, "loveliness_bulk_load_rows_total{table=%q} %d\n", s.Table, s.Count)
+	}
 }
 
 // writeQueryCounterMetrics emits loveliness_query_total{query_type, status}

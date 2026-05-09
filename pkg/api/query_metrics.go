@@ -199,6 +199,51 @@ func (h *queryHistogram) Snapshot() []histogramSnapshot {
 	return out
 }
 
+// bulkLoadCounters tracks total rows loaded by /bulk/* endpoints,
+// labeled by table. Cardinality is bounded by the number of tables in
+// the cluster (≤ ~hundreds in production); we deliberately don't add
+// a status label here — partial loads still count rows actually
+// applied, and total errors are surfaced via loveliness_query_total.
+type bulkLoadCounters struct {
+	mu     sync.Mutex
+	counts map[string]uint64 // table → cumulative row count
+}
+
+func newBulkLoadCounters() *bulkLoadCounters {
+	return &bulkLoadCounters{counts: make(map[string]uint64)}
+}
+
+// Add records `rows` rows loaded into `table`. Negative or zero rows
+// are dropped — empty bulk requests should not bump the counter.
+func (b *bulkLoadCounters) Add(table string, rows int64) {
+	if b == nil || rows <= 0 || table == "" {
+		return
+	}
+	b.mu.Lock()
+	b.counts[table] += uint64(rows)
+	b.mu.Unlock()
+}
+
+type bulkLoadSample struct {
+	Table string
+	Count uint64
+}
+
+// Snapshot returns a stable, alphabetically-sorted dump for emission.
+func (b *bulkLoadCounters) Snapshot() []bulkLoadSample {
+	if b == nil {
+		return nil
+	}
+	b.mu.Lock()
+	out := make([]bulkLoadSample, 0, len(b.counts))
+	for t, c := range b.counts {
+		out = append(out, bulkLoadSample{Table: t, Count: c})
+	}
+	b.mu.Unlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].Table < out[j].Table })
+	return out
+}
+
 // statusBucket collapses an HTTP status into the three buckets exposed
 // as the `status` label: "ok" (2xx), "client_error" (4xx),
 // "server_error" (5xx). Keeps cardinality bounded — the spec forbids
