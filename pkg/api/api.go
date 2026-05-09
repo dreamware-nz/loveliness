@@ -158,7 +158,6 @@ func (s *Server) Handler() http.Handler {
 	// Analytics: cypher + opt-in post-execution plugins, JSON envelope.
 	// Strict superset of POST /db/{name}/cypher — analytics[] is optional.
 	protected.HandleFunc("POST /db/{name}/query", s.handleQuery)
-	protected.HandleFunc("GET /analytics", s.handleAnalyticsList)
 
 	// Admin endpoint (not db-scoped) for CREATE/STOP/START/DROP DATABASE, SHOW DATABASES.
 	protected.HandleFunc("POST /admin/cypher", s.handleAdminCypher)
@@ -170,6 +169,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /health/ready", s.handleHealthReady)
 	mux.HandleFunc("GET /discovery", s.handleDiscovery)
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
+	// Plugin directory is a discovery endpoint — public, like /discovery.
+	// Returns only plugin names (no graph data, no auth context).
+	mux.HandleFunc("GET /analytics", s.handleAnalyticsList)
 	if s.auth != nil && s.auth.Enabled() {
 		mux.Handle("/", s.auth.Middleware(protected))
 	} else {
