@@ -59,20 +59,25 @@ type Server struct {
 	// queryCounters tracks /cypher request counts by (query_type, status)
 	// for the loveliness_query_total metric.
 	queryCounters *queryCounters
+
+	// queryHistogram tracks /cypher latencies by (query_type, status)
+	// for the loveliness_query_duration_seconds metric.
+	queryHistogram *queryHistogram
 }
 
 // NewServer creates a new API server.
 func NewServer(r *router.Router, c *cluster.Cluster, shards []*shard.Shard, reg *schema.Registry, timeout time.Duration) *Server {
 	return &Server{
-		router:        r,
-		cluster:       c,
-		shards:        shards,
-		schema:        reg,
-		timeout:       timeout,
-		refTracker:    make(map[int]map[string]bool),
-		joinTokens:    cluster.NewTokenStore(),
-		startTime:     time.Now(),
-		queryCounters: newQueryCounters(),
+		router:         r,
+		cluster:        c,
+		shards:         shards,
+		schema:         reg,
+		timeout:        timeout,
+		refTracker:     make(map[int]map[string]bool),
+		joinTokens:     cluster.NewTokenStore(),
+		startTime:      time.Now(),
+		queryCounters:  newQueryCounters(),
+		queryHistogram: newQueryHistogram(),
 	}
 }
 
@@ -197,16 +202,23 @@ func (s *Server) handleCypherLegacy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCypher(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	record := func(qtype string, code int) {
+		bucket := statusBucket(code)
+		s.queryCounters.Inc(qtype, bucket)
+		s.queryHistogram.Observe(qtype, bucket, time.Since(start).Seconds())
+	}
+
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1 MB max
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "cannot read body: "+err.Error(), 0)
-		s.queryCounters.Inc("unknown", statusBucket(http.StatusBadRequest))
+		record("unknown", http.StatusBadRequest)
 		return
 	}
 	cypher := strings.TrimSpace(string(body))
 	if cypher == "" {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "empty query body", 0)
-		s.queryCounters.Inc("unknown", statusBucket(http.StatusBadRequest))
+		record("unknown", http.StatusBadRequest)
 		return
 	}
 
@@ -228,11 +240,11 @@ func (s *Server) handleCypher(w http.ResponseWriter, r *http.Request) {
 				status = http.StatusGatewayTimeout
 			}
 			writeError(w, status, qe.Code, qe.Message, qe.ShardID)
-			s.queryCounters.Inc(qtype, statusBucket(status))
+			record(qtype, status)
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error(), 0)
-		s.queryCounters.Inc(qtype, statusBucket(http.StatusInternalServerError))
+		record(qtype, http.StatusInternalServerError)
 		return
 	}
 
@@ -242,7 +254,7 @@ func (s *Server) handleCypher(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeNegotiated(w, r, result)
-	s.queryCounters.Inc(qtype, statusBucket(http.StatusOK))
+	record(qtype, http.StatusOK)
 }
 
 // writeNegotiated picks the response format based on the request's

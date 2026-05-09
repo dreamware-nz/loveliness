@@ -170,6 +170,123 @@ func TestWriteQueryCounterMetrics_Format(t *testing.T) {
 	}
 }
 
+func TestQueryHistogram_ObserveAndSnapshot(t *testing.T) {
+	h := newQueryHistogram()
+	h.Observe("read", "ok", 0.001)   // ≤ 0.001
+	h.Observe("read", "ok", 0.003)   // ≤ 0.005
+	h.Observe("read", "ok", 0.4)     // ≤ 0.5
+	h.Observe("read", "ok", 5.0)     // > 2.5 → only +Inf
+	h.Observe("write", "ok", 0.0001) // ≤ 0.00025
+
+	snaps := h.Snapshot()
+	if len(snaps) != 2 {
+		t.Fatalf("expected 2 series, got %d", len(snaps))
+	}
+
+	read := snaps[0]
+	if read.QueryType != "read" || read.Status != "ok" {
+		t.Fatalf("first should be read/ok, got %+v", read)
+	}
+	if read.Count != 4 {
+		t.Errorf("read count = %d, want 4", read.Count)
+	}
+	wantSum := 0.001 + 0.003 + 0.4 + 5.0
+	if read.Sum < wantSum-1e-9 || read.Sum > wantSum+1e-9 {
+		t.Errorf("read sum = %v, want %v", read.Sum, wantSum)
+	}
+
+	// +Inf bucket must equal total count.
+	last := read.Buckets[len(read.Buckets)-1]
+	if last.UpperBound == 0 {
+		t.Fatal("expected +Inf bucket at the end")
+	}
+	if last.Count != read.Count {
+		t.Errorf("+Inf bucket count %d != total count %d", last.Count, read.Count)
+	}
+
+	// le=0.001 bucket: 0.001 falls into it (≤), 0.003 doesn't.
+	bucket0p001 := findBucket(read.Buckets, 0.001)
+	if bucket0p001 != 1 {
+		t.Errorf("le=0.001 bucket count = %d, want 1", bucket0p001)
+	}
+	// le=0.005 bucket: 0.001 and 0.003 both fall in.
+	bucket0p005 := findBucket(read.Buckets, 0.005)
+	if bucket0p005 != 2 {
+		t.Errorf("le=0.005 bucket count = %d, want 2", bucket0p005)
+	}
+	// le=0.5 bucket: 0.001, 0.003, and 0.4 all fall in.
+	bucket0p5 := findBucket(read.Buckets, 0.5)
+	if bucket0p5 != 3 {
+		t.Errorf("le=0.5 bucket count = %d, want 3", bucket0p5)
+	}
+	// le=2.5 bucket: 5.0 doesn't fall in, so still 3.
+	bucket2p5 := findBucket(read.Buckets, 2.5)
+	if bucket2p5 != 3 {
+		t.Errorf("le=2.5 bucket count = %d, want 3", bucket2p5)
+	}
+}
+
+func findBucket(points []bucketPoint, le float64) uint64 {
+	for _, p := range points {
+		if p.UpperBound == le {
+			return p.Count
+		}
+	}
+	return 0
+}
+
+func TestQueryHistogram_NilSafe(t *testing.T) {
+	var h *queryHistogram
+	h.Observe("read", "ok", 0.1) // must not panic
+	if got := h.Snapshot(); got != nil {
+		t.Errorf("nil snapshot must be nil, got %v", got)
+	}
+}
+
+func TestQueryHistogram_ConcurrentObserve(t *testing.T) {
+	h := newQueryHistogram()
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				h.Observe("read", "ok", 0.001)
+			}
+		}()
+	}
+	wg.Wait()
+	snap := h.Snapshot()
+	if len(snap) != 1 || snap[0].Count != 5000 {
+		t.Errorf("expected count=5000, got %+v", snap)
+	}
+}
+
+func TestWriteQueryHistogramMetrics_EmitsAllSeries(t *testing.T) {
+	h := newQueryHistogram()
+	h.Observe("read", "ok", 0.0009) // ≤ 0.001 bucket
+	h.Observe("read", "ok", 1.5)    // ≤ 2.5 bucket
+
+	var buf bytes.Buffer
+	writeQueryHistogramMetrics(&buf, h.Snapshot())
+	out := buf.String()
+
+	mustContain := []string{
+		"# HELP loveliness_query_duration_seconds",
+		"# TYPE loveliness_query_duration_seconds histogram",
+		`loveliness_query_duration_seconds_bucket{query_type="read",status="ok",le="0.001"} 1`,
+		`loveliness_query_duration_seconds_bucket{query_type="read",status="ok",le="2.5"} 2`,
+		`loveliness_query_duration_seconds_bucket{query_type="read",status="ok",le="+Inf"} 2`,
+		`loveliness_query_duration_seconds_count{query_type="read",status="ok"} 2`,
+		`loveliness_query_duration_seconds_sum{query_type="read",status="ok"}`,
+	}
+	for _, s := range mustContain {
+		if !strings.Contains(out, s) {
+			t.Errorf("missing %q in:\n%s", s, out)
+		}
+	}
+}
+
 func TestCypher_RecordsQueryCounter(t *testing.T) {
 	srv := setupTestServer()
 
