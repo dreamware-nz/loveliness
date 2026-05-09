@@ -308,17 +308,34 @@ func (s *Server) handleWALStatus(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			walHead := s.dr.WAL.ShardSequence(shardID)
+			headTS := s.dr.WAL.HeadTimestamp(shardID)
 			entries := make([]map[string]any, 0, len(assignment.Replicas))
 			for _, r := range assignment.Replicas {
 				if r == "" {
 					continue
 				}
 				pos := s.dr.ReplicaState.GetPosition(shardID, r)
-				entries = append(entries, map[string]any{
-					"replica":  r,
-					"position": pos,
-					"lag":      walHead - pos,
-				})
+				appliedTS := s.dr.ReplicaState.GetTimestamp(shardID, r)
+				entry := map[string]any{
+					"replica":   r,
+					"position":  pos,
+					"lag":       walHead - pos,
+					"lag_bytes": s.dr.WAL.LagBytes(shardID, pos),
+				}
+				// Time-lag in seconds = origin time of WAL head minus origin
+				// time of replica's last-applied entry. Only meaningful if
+				// both timestamps are non-zero (replica has applied at least
+				// one entry and the WAL has at least one entry).
+				if !headTS.IsZero() && !appliedTS.IsZero() {
+					entry["lag_seconds"] = headTS.Sub(appliedTS).Seconds()
+				} else if !headTS.IsZero() && pos == 0 {
+					// Replica hasn't applied anything yet — lag is the full
+					// age of the WAL head relative to wall-clock now.
+					entry["lag_seconds"] = time.Since(headTS).Seconds()
+				} else {
+					entry["lag_seconds"] = 0.0
+				}
+				entries = append(entries, entry)
 			}
 			if len(entries) > 0 {
 				replicas[fmt.Sprintf("shard-%d", shardID)] = entries

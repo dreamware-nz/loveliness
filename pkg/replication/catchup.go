@@ -13,7 +13,7 @@ import (
 // ReplicaState tracks the replication position for each replica of each shard.
 type ReplicaState struct {
 	mu    sync.RWMutex
-	state map[replicaKey]uint64 // (shardID, nodeID) → last acked sequence
+	state map[replicaKey]replicaPos
 }
 
 type replicaKey struct {
@@ -21,18 +21,32 @@ type replicaKey struct {
 	nodeID  string
 }
 
+type replicaPos struct {
+	seq uint64    // last acked sequence
+	ts  time.Time // timestamp of the WAL entry at `seq` (origin time, not ack time)
+}
+
 // NewReplicaState creates an empty replica state tracker.
 func NewReplicaState() *ReplicaState {
-	return &ReplicaState{state: make(map[replicaKey]uint64)}
+	return &ReplicaState{state: make(map[replicaKey]replicaPos)}
 }
 
 // SetPosition records that a replica has caught up to a given sequence.
+// The position only advances — older sequences are ignored.
 func (rs *ReplicaState) SetPosition(shardID int, nodeID string, seq uint64) {
+	rs.SetPositionAt(shardID, nodeID, seq, time.Time{})
+}
+
+// SetPositionAt records that a replica has caught up to a given sequence
+// whose origin timestamp at the primary was ts. Used so callers can later
+// derive time-lag without re-reading the WAL. Position only advances.
+func (rs *ReplicaState) SetPositionAt(shardID int, nodeID string, seq uint64, ts time.Time) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	key := replicaKey{shardID, nodeID}
-	if seq > rs.state[key] {
-		rs.state[key] = seq
+	cur := rs.state[key]
+	if seq > cur.seq {
+		rs.state[key] = replicaPos{seq: seq, ts: ts}
 	}
 }
 
@@ -40,7 +54,15 @@ func (rs *ReplicaState) SetPosition(shardID int, nodeID string, seq uint64) {
 func (rs *ReplicaState) GetPosition(shardID int, nodeID string) uint64 {
 	rs.mu.RLock()
 	defer rs.mu.RUnlock()
-	return rs.state[replicaKey{shardID, nodeID}]
+	return rs.state[replicaKey{shardID, nodeID}].seq
+}
+
+// GetTimestamp returns the WAL-origin timestamp of the replica's last
+// applied entry. Zero time if none recorded.
+func (rs *ReplicaState) GetTimestamp(shardID int, nodeID string) time.Time {
+	rs.mu.RLock()
+	defer rs.mu.RUnlock()
+	return rs.state[replicaKey{shardID, nodeID}].ts
 }
 
 // Lag returns how far behind a replica is relative to the WAL head.
@@ -109,7 +131,7 @@ func (cm *CatchupManager) CatchupShard(ctx context.Context, shardID int, nodeID 
 			// Continue — some queries may fail on replay (e.g., already applied).
 			// Record position up to this point so we don't re-replay.
 		}
-		cm.state.SetPosition(shardID, nodeID, entry.Sequence)
+		cm.state.SetPositionAt(shardID, nodeID, entry.Sequence, entry.Timestamp)
 		replayed++
 	}
 

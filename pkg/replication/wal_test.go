@@ -3,6 +3,7 @@ package replication
 import (
 	"os"
 	"testing"
+	"time"
 )
 
 func TestWALAppendAndRead(t *testing.T) {
@@ -146,5 +147,119 @@ func TestWALShardSequence(t *testing.T) {
 	}
 	if w.ShardSequence(99) != 0 {
 		t.Fatalf("expected shard 99 seq 0, got %d", w.ShardSequence(99))
+	}
+}
+
+func TestWAL_HeadTimestamp(t *testing.T) {
+	dir, _ := os.MkdirTemp("", "wal-headts-*")
+	defer os.RemoveAll(dir)
+
+	w, _ := NewWAL(dir)
+	defer w.Close()
+
+	// Empty shard — zero time.
+	if !w.HeadTimestamp(0).IsZero() {
+		t.Error("empty shard head timestamp must be zero")
+	}
+
+	before := time.Now()
+	w.Append(0, "q1")
+	after := time.Now()
+
+	got := w.HeadTimestamp(0)
+	if got.Before(before) || got.After(after) {
+		t.Errorf("head timestamp %v outside [%v, %v]", got, before, after)
+	}
+
+	// Second append — head advances.
+	time.Sleep(10 * time.Millisecond)
+	w.Append(0, "q2")
+	if !w.HeadTimestamp(0).After(got) {
+		t.Errorf("head timestamp must advance on append")
+	}
+}
+
+func TestWAL_LagBytes(t *testing.T) {
+	dir, _ := os.MkdirTemp("", "wal-lagbytes-*")
+	defer os.RemoveAll(dir)
+
+	w, _ := NewWAL(dir)
+	defer w.Close()
+
+	w.Append(0, "q1")
+	w.Append(0, "q2")
+	w.Append(0, "q3")
+
+	// Caught up — zero lag.
+	if got := w.LagBytes(0, 3); got != 0 {
+		t.Errorf("expected 0 lag bytes when caught up, got %d", got)
+	}
+
+	// Behind by all 3 entries — non-zero lag.
+	all := w.LagBytes(0, 0)
+	if all <= 0 {
+		t.Errorf("expected positive lag bytes for fully-behind replica, got %d", all)
+	}
+
+	// Behind by last entry only — strictly less than `all`.
+	one := w.LagBytes(0, 2)
+	if one <= 0 || one >= all {
+		t.Errorf("expected partial < total lag, got partial=%d total=%d", one, all)
+	}
+
+	// Non-existent shard — zero.
+	if got := w.LagBytes(99, 0); got != 0 {
+		t.Errorf("expected 0 lag bytes for missing shard, got %d", got)
+	}
+}
+
+func TestWAL_HeadTimestampSurvivesReopen(t *testing.T) {
+	dir, _ := os.MkdirTemp("", "wal-headts-recover-*")
+	defer os.RemoveAll(dir)
+
+	w1, _ := NewWAL(dir)
+	w1.Append(0, "q1")
+	w1.Append(0, "q2")
+	first := w1.HeadTimestamp(0)
+	w1.Close()
+
+	w2, _ := NewWAL(dir)
+	defer w2.Close()
+	// HeadTimestamp(0) is zero until the file is reopened for write — but
+	// once an Append happens the cached state must advance from the
+	// recovered head, not start fresh.
+	if seq := w2.LastSequence(); seq != 2 {
+		t.Fatalf("expected recovered sequence 2, got %d", seq)
+	}
+	w2.Append(0, "q3")
+	got := w2.HeadTimestamp(0)
+	if !got.After(first) {
+		t.Errorf("after reopen+append head should advance past prior head")
+	}
+}
+
+func TestReplicaState_TimestampTracking(t *testing.T) {
+	rs := NewReplicaState()
+	now := time.Now()
+
+	rs.SetPositionAt(0, "node-2", 5, now)
+	if got := rs.GetPosition(0, "node-2"); got != 5 {
+		t.Errorf("expected position 5, got %d", got)
+	}
+	if got := rs.GetTimestamp(0, "node-2"); !got.Equal(now) {
+		t.Errorf("expected timestamp %v, got %v", now, got)
+	}
+
+	// Older sequence ignored.
+	earlier := now.Add(-time.Hour)
+	rs.SetPositionAt(0, "node-2", 3, earlier)
+	if got := rs.GetTimestamp(0, "node-2"); !got.Equal(now) {
+		t.Errorf("regression — old timestamp overwrote newer one: %v", got)
+	}
+
+	// Plain SetPosition path still works (zero time).
+	rs.SetPosition(1, "node-3", 10)
+	if got := rs.GetPosition(1, "node-3"); got != 10 {
+		t.Errorf("plain SetPosition broken, got %d", got)
 	}
 }
