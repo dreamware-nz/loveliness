@@ -13,10 +13,10 @@ import (
 )
 
 // arrowColumnKind classifies a column's effective Arrow type after
-// inspecting every row. Heterogeneous columns and complex types
-// (lists, maps, nodes) fall back to JSON-encoded utf8 — that keeps
-// the wire format honest while we ship the simple cases first;
-// proper struct/list types are a follow-up slice.
+// inspecting every row. NODE and RELATIONSHIP get strongly-typed
+// Arrow structs (see arrow_node.go); LIST / MAP currently fall
+// through to the JSON-encoded utf8 fallback while their dedicated
+// encoder slices land.
 type arrowColumnKind int
 
 const (
@@ -25,6 +25,8 @@ const (
 	arrowKindInt64
 	arrowKindFloat64
 	arrowKindString
+	arrowKindNode
+	arrowKindRelationship
 	arrowKindJSON
 )
 
@@ -38,6 +40,10 @@ func (k arrowColumnKind) arrowType() arrow.DataType {
 		return arrow.PrimitiveTypes.Float64
 	case arrowKindString, arrowKindJSON:
 		return arrow.BinaryTypes.String
+	case arrowKindNode:
+		return arrowNodeType
+	case arrowKindRelationship:
+		return arrowRelationshipType
 	default:
 		return arrow.Null
 	}
@@ -72,9 +78,14 @@ func kindOf(v any) arrowColumnKind {
 		return arrowKindFloat64
 	case string:
 		return arrowKindString
-	default:
-		return arrowKindJSON
 	}
+	if _, ok := extractNode(v); ok {
+		return arrowKindNode
+	}
+	if _, ok := extractRelationship(v); ok {
+		return arrowKindRelationship
+	}
+	return arrowKindJSON
 }
 
 func mergeKinds(a, b arrowColumnKind) arrowColumnKind {
@@ -253,6 +264,20 @@ func appendCell(b array.Builder, kind arrowColumnKind, v any) error {
 			return nil
 		}
 		b.(*array.StringBuilder).Append(s)
+	case arrowKindNode:
+		n, ok := extractNode(v)
+		if !ok {
+			b.AppendNull()
+			return nil
+		}
+		appendNode(b.(*array.StructBuilder), n)
+	case arrowKindRelationship:
+		r, ok := extractRelationship(v)
+		if !ok {
+			b.AppendNull()
+			return nil
+		}
+		appendRelationship(b.(*array.StructBuilder), r)
 	case arrowKindJSON:
 		// Heterogeneous / complex values: serialize each cell as JSON
 		// so clients can still read them. This is documented as the

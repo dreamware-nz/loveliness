@@ -48,19 +48,28 @@ coerced to 0/1.
 |---|---|---|
 | `LIST<T>` | `list<T'>` where `T'` is `T`'s row above | follow-up |
 | `MAP<utf8, V>` | `map<utf8, V'>` (keys always `utf8`, sorted) | follow-up |
-| `NODE` | `struct{ id: int64, labels: list<dictionary<utf8>>, properties: map<utf8, utf8> }` | follow-up |
-| `RELATIONSHIP` | `struct{ id: int64, start_id: int64, end_id: int64, type: dictionary<utf8>, properties: map<utf8, utf8> }` | follow-up |
+| `NODE` | `struct{ id: internal_id, labels: list<utf8>, properties: utf8 (JSON) }` | live |
+| `RELATIONSHIP` | `struct{ id: internal_id, start_id: internal_id, end_id: internal_id, label: utf8, properties: utf8 (JSON) }` | live |
 | `PATH` | `struct{ nodes: list<NODE>, relationships: list<RELATIONSHIP>, length: int64 }` | follow-up |
 | any other / heterogeneous column | `utf8` (JSON-encoded value per cell) | live |
 
-`properties` lands as `map<utf8, utf8>` with property values
-JSON-encoded inside the string value slot. That keeps the schema flat
-and stable across rows that have different property sets — every node
-in a graph has its own property bag, and trying to express that as a
-strongly-typed struct would mean either schema-per-row (which Arrow
-forbids inside a single batch) or a sparse schema with one column
-per property name (which explodes on real graphs). The follow-up to
-strongly-type properties for a single label is tracked on #27 itself.
+`internal_id` is the Arrow struct `struct{ table_id: int64, offset:
+int64 }`. It is a faithful representation of the LadybugDB 128-bit
+internal identifier, which would not fit in a single `int64` if a
+deployment ever allocated IDs near the upper end of the range. Two
+int64s round-trip every legal value losslessly today and stay in
+range for ID schemes other backends might adopt.
+
+`properties` lands as `utf8` with the property bag JSON-encoded into
+the string value. This keeps the schema flat and stable across rows
+that have different property sets — every node in a graph has its
+own property bag, and trying to express that as a strongly-typed
+struct would mean either schema-per-row (which Arrow forbids inside
+a single batch) or a sparse schema with one column per property name
+(which explodes on real graphs). A follow-up slice promotes
+`properties` to `map<utf8, utf8>` (keys utf8, values still
+JSON-encoded utf8 strings); the `loveliness.arrow_mapping_version`
+metadata key bumps when that lands so clients can detect the change.
 
 ## Heterogeneous columns
 
