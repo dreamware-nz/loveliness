@@ -57,6 +57,10 @@ skip the JSON encode/decode round-trip and stay zero-copy across the
 network and pandas / polars / DuckDB on the consumer side, which is a
 material throughput win on result sets above ~10k rows.
 
+The full Cypher→Arrow type mapping is documented in
+[`arrow-mapping.md`](arrow-mapping.md) — that doc is the contract for
+schema metadata, mid-stream error handling, and version negotiation.
+
 | Accept value | Response Content-Type | Format |
 |---|---|---|
 | `application/json` *(default)* | `application/json` | JSON |
