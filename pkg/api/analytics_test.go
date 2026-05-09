@@ -281,11 +281,35 @@ func TestRegisterAnalyticsPlugin_FrozenAfterHandler(t *testing.T) {
 	if err := srv.RegisterAnalyticsPlugin(stubFreezePlugin{name: "early"}); err != nil {
 		t.Fatalf("pre-Handler register: %v", err)
 	}
-	_ = srv.Handler() // freezes the registry
+	h := srv.Handler() // freezes the registry
 	err := srv.RegisterAnalyticsPlugin(stubFreezePlugin{name: "late"})
 	if !errors.Is(err, analytics.ErrRegistryFrozen) {
 		t.Errorf("expected ErrRegistryFrozen after Handler(), got %v", err)
 	}
+
+	// Pre-freeze plugin must still appear in the discovery directory —
+	// freezing must not drop anything that was registered before.
+	req := httptest.NewRequest("GET", "/analytics", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("/analytics: %d %s", w.Code, w.Body.String())
+	}
+	var got map[string][]string
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	have := map[string]bool{}
+	for _, n := range got["plugins"] {
+		have[n] = true
+	}
+	if !have["early"] {
+		t.Errorf("pre-freeze plugin 'early' missing from /analytics: %v", got["plugins"])
+	}
+	if have["late"] {
+		t.Errorf("post-freeze plugin 'late' should not be present: %v", got["plugins"])
+	}
+
 	// Calling Handler() again must remain safe (idempotent freeze).
 	_ = srv.Handler()
 }

@@ -5,6 +5,7 @@ package analytics
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -45,7 +46,7 @@ type Registry struct {
 func NewRegistry() *Registry { return &Registry{plugins: map[string]Plugin{}} }
 
 // ErrRegistryFrozen is returned by Register after Freeze() has run.
-var ErrRegistryFrozen = fmt.Errorf("analytics: registry is frozen; register plugins before serving")
+var ErrRegistryFrozen = errors.New("analytics: registry is frozen; register plugins before serving")
 
 func (r *Registry) Register(p Plugin) error {
 	r.mu.Lock()

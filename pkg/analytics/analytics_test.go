@@ -3,6 +3,8 @@ package analytics
 import (
 	"context"
 	"errors"
+	"strconv"
+	"sync"
 	"testing"
 
 	"github.com/johnjansen/loveliness/pkg/router"
@@ -142,5 +144,51 @@ func TestRegistry_FreezeIdempotent(t *testing.T) {
 	}
 	if err := r.Register(stubPlugin{name: "x"}); !errors.Is(err, ErrRegistryFrozen) {
 		t.Errorf("expected ErrRegistryFrozen, got %v", err)
+	}
+}
+
+// TestRegistry_ConcurrentRegisterAndFreeze stresses the mutex contract:
+// many goroutines race Register() against Freeze(). After the dust
+// settles, every plugin name in the registry must satisfy Lookup, and
+// no Register that "succeeded" can have happened after Freeze. Run
+// under -race to catch unsynchronised access.
+func TestRegistry_ConcurrentRegisterAndFreeze(t *testing.T) {
+	const N = 64
+	r := NewRegistry()
+
+	var wg sync.WaitGroup
+	wg.Add(N + 1)
+
+	registered := make([]bool, N)
+	for i := 0; i < N; i++ {
+		go func(i int) {
+			defer wg.Done()
+			err := r.Register(stubPlugin{name: "p" + strconv.Itoa(i)})
+			if err == nil {
+				registered[i] = true
+			} else if !errors.Is(err, ErrRegistryFrozen) {
+				t.Errorf("unexpected register err: %v", err)
+			}
+		}(i)
+	}
+
+	go func() {
+		defer wg.Done()
+		r.Freeze()
+	}()
+
+	wg.Wait()
+
+	if !r.Frozen() {
+		t.Fatal("registry should be frozen after Freeze() returns")
+	}
+	for i, ok := range registered {
+		if !ok {
+			continue
+		}
+		name := "p" + strconv.Itoa(i)
+		if _, found := r.Lookup(name); !found {
+			t.Errorf("Register %q reported success but Lookup says missing", name)
+		}
 	}
 }

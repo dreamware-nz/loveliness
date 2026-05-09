@@ -135,8 +135,15 @@ func (s *Server) SetDatabaseRouter(dr *router.DatabaseRouter) {
 }
 
 // Handler returns the HTTP handler with all routes registered.
-// Freezes the analytics registry — no further plugins can be registered
-// after this point. The boot-time plugin set is the runtime plugin set.
+//
+// Side effect: freezes the analytics registry on first (and every)
+// call. After Handler() returns, RegisterAnalyticsPlugin will fail
+// with analytics.ErrRegistryFrozen — the boot-time plugin set is the
+// runtime plugin set.
+//
+// Call this once at boot and serve the returned handler; calling it
+// repeatedly returns a fresh mux each time and is intended only for
+// testing.
 func (s *Server) Handler() http.Handler {
 	s.analytics.Freeze()
 
