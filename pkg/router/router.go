@@ -89,6 +89,18 @@ type Router struct {
 	// to max(8, 2*shardCount) per the #6 spec. SetScatterConcurrency
 	// is the configuration knob.
 	scatterConcurrency int
+
+	// remoteRetries caps the number of additional attempts after a
+	// transient remote-call failure. Only transport-layer faults
+	// (timeouts, EOF mid-frame, connection refused) trigger retries —
+	// protocol or query errors short-circuit immediately. Default = 2
+	// per the #6 spec; SetRemoteRetries is the knob.
+	remoteRetries int
+
+	// remoteRetryBackoff is the base delay between retries. Jittered
+	// at use-site to break thundering-herd patterns. Tests set it
+	// short to race against the scatter timeout.
+	remoteRetryBackoff time.Duration
 }
 
 // DDLHook is called when a DDL statement registers or removes a table.
@@ -207,12 +219,13 @@ func (r *Router) SetDDLHook(h DDLHook) {
 
 // SetRemoteTransport configures distributed query routing to remote shards.
 //
-// Wiring remote transport also installs a sensible scatter-concurrency
-// cap if the caller hasn't set one yet. The default — max(8,
-// 2*shardCount) — matches the #6 spec and keeps the fan-out finite when
+// Wiring remote transport also installs sensible defaults for the
+// scatter-concurrency cap (max(8, 2*shardCount)), the retry count
+// (2), and the retry backoff (25ms). These match the #6 spec and
+// keep the fan-out finite + the per-shard retry budget bounded when
 // a deployment has more shards than the connection pool can sustain.
-// Callers that want a different value can call SetScatterConcurrency
-// after this.
+// Callers that want different values can call SetScatterConcurrency,
+// SetRemoteRetries, or SetRemoteRetryBackoff after this.
 func (r *Router) SetRemoteTransport(nodeID string, remote RemoteQuerier, placement PlacementResolver) {
 	r.nodeID = nodeID
 	r.remote = remote
@@ -220,6 +233,29 @@ func (r *Router) SetRemoteTransport(nodeID string, remote RemoteQuerier, placeme
 	if r.scatterConcurrency == 0 {
 		r.scatterConcurrency = defaultScatterConcurrency(r.shardCount)
 	}
+	if r.remoteRetries == 0 {
+		r.remoteRetries = defaultRemoteRetries
+	}
+	if r.remoteRetryBackoff == 0 {
+		r.remoteRetryBackoff = defaultRemoteRetryBackoff
+	}
+}
+
+// SetRemoteRetries sets the maximum number of additional attempts
+// per transient remote-call failure. n=0 disables retries; matches
+// the legacy single-attempt behavior. n>0 enables jittered retries.
+func (r *Router) SetRemoteRetries(n int) {
+	if n < 0 {
+		n = 0
+	}
+	r.remoteRetries = n
+}
+
+// SetRemoteRetryBackoff sets the base delay between retry attempts.
+// Tests set it short (e.g. 1ms) so retries don't dominate test time;
+// production should leave it at the default 25ms.
+func (r *Router) SetRemoteRetryBackoff(d time.Duration) {
+	r.remoteRetryBackoff = d
 }
 
 // SetScatterConcurrency sets the upper bound on parallel per-shard
@@ -246,6 +282,12 @@ func defaultScatterConcurrency(shardCount int) int {
 
 // queryShardRaw queries a shard and returns the raw QueryResponse.
 // Used by scatterGather which needs raw responses for merging.
+//
+// Local shards execute synchronously — no retry, since a panic /
+// CGo crash inside the local shard is a different failure model
+// (handled by panic recovery in shard.Query). Remote shards run
+// through retryRemoteCall, which retries transient transport
+// faults up to r.remoteRetries times with jittered backoff.
 func (r *Router) queryShardRaw(shardID int, cypher string) (*shard.QueryResponse, error) {
 	// Fast path: local shard.
 	if shardID >= 0 && shardID < len(r.shards) && r.shards[shardID] != nil {
@@ -259,7 +301,16 @@ func (r *Router) queryShardRaw(shardID int, cypher string) (*shard.QueryResponse
 	if nodeID == "" {
 		return nil, fmt.Errorf("shard %d has no assigned primary", shardID)
 	}
-	return r.remote.QueryRemoteShard(nodeID, shardID, cypher)
+	// retryRemoteCall handles its own bounds checking; if retries are
+	// disabled it does exactly one attempt.
+	return retryRemoteCall(
+		context.Background(),
+		r.remoteRetries,
+		r.remoteRetryBackoff,
+		func() (*shard.QueryResponse, error) {
+			return r.remote.QueryRemoteShard(nodeID, shardID, cypher)
+		},
+	)
 }
 
 // replicateDDL sends schema changes to the DDL hook for Raft replication.
