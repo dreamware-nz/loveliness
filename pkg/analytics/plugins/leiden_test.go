@@ -2,6 +2,7 @@ package plugins
 
 import (
 	"context"
+	"math"
 	"testing"
 
 	"github.com/johnjansen/loveliness/pkg/router"
@@ -315,5 +316,81 @@ func TestLeiden_GammaSweep_RejectsBadType(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error for scalar gammas")
+	}
+}
+
+// TestLeiden_RejectsNaNGamma: NaN must error (otherwise it silently
+// produces an identity partition because NaN comparisons are false).
+func TestLeiden_RejectsNaNGamma(t *testing.T) {
+	r := &router.Result{Columns: []string{"src", "dst"}, Rows: nil}
+	if _, err := (Leiden{}).Compute(context.Background(), r, map[string]any{
+		"gamma": math.NaN(),
+	}); err == nil {
+		t.Fatal("expected error for NaN gamma")
+	}
+	if _, err := (Leiden{}).Compute(context.Background(), r, map[string]any{
+		"gammas": []any{math.NaN()},
+	}); err == nil {
+		t.Fatal("expected error for NaN in gammas")
+	}
+}
+
+// TestLeiden_RejectsInfGamma: ±Inf must error in either gamma or gammas.
+func TestLeiden_RejectsInfGamma(t *testing.T) {
+	r := &router.Result{Columns: []string{"src", "dst"}, Rows: nil}
+	if _, err := (Leiden{}).Compute(context.Background(), r, map[string]any{
+		"gamma": math.Inf(1),
+	}); err == nil {
+		t.Fatal("expected error for +Inf gamma")
+	}
+	if _, err := (Leiden{}).Compute(context.Background(), r, map[string]any{
+		"gammas": []any{float64(1.0), math.Inf(-1)},
+	}); err == nil {
+		t.Fatal("expected error for -Inf in gammas")
+	}
+}
+
+// TestLeiden_GammaSweep_SingleElement: a one-element gammas list still
+// routes to sweep mode and returns a partitions array (length 1) — this
+// keeps the response shape stable for callers iterating over partitions
+// regardless of how many γ values they passed.
+func TestLeiden_GammaSweep_SingleElement(t *testing.T) {
+	out, err := Leiden{}.Compute(context.Background(), twoCliquesPlusBridge(), map[string]any{
+		"gammas": []any{float64(1.0)},
+	})
+	if err != nil {
+		t.Fatalf("compute: %v", err)
+	}
+	got := out.(map[string]any)
+	parts, ok := got["partitions"].([]map[string]any)
+	if !ok {
+		t.Fatalf("expected partitions array, got %T (%v)", got["partitions"], got)
+	}
+	if len(parts) != 1 {
+		t.Fatalf("expected 1 partition, got %d", len(parts))
+	}
+	if parts[0]["gamma"].(float64) != 1.0 {
+		t.Errorf("partition[0].gamma = %v, want 1.0", parts[0]["gamma"])
+	}
+	// Single-element sweep must NOT also produce the flat single-mode keys.
+	if _, present := got["num_communities"]; present {
+		t.Errorf("sweep response must not carry top-level num_communities, got %v", got)
+	}
+}
+
+// TestLeiden_GammaSweep_HonorsCancelledContext: a context already
+// cancelled at entry must error out without running any Leiden work.
+func TestLeiden_GammaSweep_HonorsCancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancel
+
+	_, err := Leiden{}.Compute(ctx, twoCliquesPlusBridge(), map[string]any{
+		"gammas": []any{float64(0.5), float64(1.0), float64(2.0)},
+	})
+	if err == nil {
+		t.Fatal("expected error from pre-cancelled context")
+	}
+	if err != context.Canceled {
+		t.Errorf("expected context.Canceled, got %v", err)
 	}
 }

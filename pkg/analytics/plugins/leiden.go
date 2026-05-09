@@ -3,6 +3,8 @@ package plugins
 import (
 	"context"
 	"fmt"
+	"math"
+	"runtime"
 	"sort"
 	"sync"
 
@@ -37,7 +39,11 @@ type Leiden struct{}
 
 func (Leiden) Name() string { return "leiden" }
 
-func (Leiden) Compute(_ context.Context, result *router.Result, params map[string]any) (any, error) {
+func (Leiden) Compute(ctx context.Context, result *router.Result, params map[string]any) (any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	srcCol := stringOr(params, "src", "src")
 	dstCol := stringOr(params, "dst", "dst")
 	weightCol, _ := params["weight"].(string)
@@ -80,24 +86,54 @@ func (Leiden) Compute(_ context.Context, result *router.Result, params map[strin
 		return out, nil
 	}
 
-	// Sweep mode: run all γ values in parallel against the shared
-	// (read-only) graph. leiden.Run does not mutate g; each call
-	// constructs its own working state, so concurrent execution is safe.
+	// Sweep mode: run γ values in parallel against the shared (read-only)
+	// graph. leiden.Run does not mutate g; each call constructs its own
+	// working state, so concurrent execution is safe.
+	//
+	// Concurrency is bounded to runtime.NumCPU() so that a request with a
+	// pathologically large gammas list (e.g., 1000 entries) cannot saturate
+	// the host. Workers respect ctx between slots: a cancelled request stops
+	// admitting new γs immediately, though a γ already running completes
+	// (leiden.Run is CPU-bound and does not currently take ctx).
 	partitions := make([]map[string]any, len(gammas))
+	sem := make(chan struct{}, sweepConcurrency(len(gammas)))
 	var wg sync.WaitGroup
-	wg.Add(len(gammas))
 	for i, gamma := range gammas {
+		select {
+		case <-ctx.Done():
+			wg.Wait()
+			return nil, ctx.Err()
+		case sem <- struct{}{}:
+		}
+		wg.Add(1)
 		go func(i int, gamma float64) {
 			defer wg.Done()
+			defer func() { <-sem }()
 			partitions[i] = runOneGamma(g, gamma, seed, maxIter, nodeIDs, includeAssignments)
 		}(i, gamma)
 	}
 	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	return map[string]any{
 		"num_nodes":  len(nodeIDs),
 		"partitions": partitions,
 	}, nil
+}
+
+// sweepConcurrency caps parallel γ workers to runtime.NumCPU() but never
+// allocates more slots than there are γs to run.
+func sweepConcurrency(n int) int {
+	c := runtime.NumCPU()
+	if c < 1 {
+		c = 1
+	}
+	if n < c {
+		return n
+	}
+	return c
 }
 
 // resolveGammas picks single-vs-sweep mode and validates inputs.
@@ -119,18 +155,35 @@ func resolveGammas(params map[string]any) ([]float64, bool, error) {
 			return nil, false, fmt.Errorf("leiden: gammas must be non-empty")
 		}
 		for _, g := range list {
-			if g < 0 {
-				return nil, false, fmt.Errorf("leiden: gamma must be ≥ 0, got %v", g)
+			if err := validateGamma(g); err != nil {
+				return nil, false, err
 			}
 		}
 		return list, true, nil
 	}
 
 	gamma := float64Or(params, "gamma", 1.0)
-	if gamma < 0 {
-		return nil, false, fmt.Errorf("leiden: gamma must be ≥ 0, got %v", gamma)
+	if err := validateGamma(gamma); err != nil {
+		return nil, false, err
 	}
 	return []float64{gamma}, false, nil
+}
+
+// validateGamma rejects negative, NaN, and ±Inf γ values. NaN in particular
+// would otherwise pass `g < 0` (NaN comparisons are false) and produce a
+// silent identity partition because every ΔQ comparison in localMove would
+// evaluate to false — a wrong-answer failure with no error signal.
+func validateGamma(g float64) error {
+	if math.IsNaN(g) {
+		return fmt.Errorf("leiden: gamma must be a finite real number, got NaN")
+	}
+	if math.IsInf(g, 0) {
+		return fmt.Errorf("leiden: gamma must be a finite real number, got %v", g)
+	}
+	if g < 0 {
+		return fmt.Errorf("leiden: gamma must be ≥ 0, got %v", g)
+	}
+	return nil
 }
 
 // buildLeidenGraph turns edge-list rows into a *leiden.Graph plus the
