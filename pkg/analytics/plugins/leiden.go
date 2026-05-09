@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"sync"
 
 	"github.com/johnjansen/loveliness/pkg/analytics/leiden"
 	"github.com/johnjansen/loveliness/pkg/router"
@@ -13,18 +14,25 @@ import (
 // interpreted as an edge list. Returns per-community size histogram,
 // modularity, and (optionally) per-node community assignments.
 //
-// Params:
+// Resolution modes:
+//
+//	gamma   (float64, default 1.0) — single resolution; >1 finer, <1 coarser.
+//	gammas  ([]float64, optional)  — multi-resolution sweep. If set, the
+//	    plugin runs Leiden once per γ in parallel (one goroutine each, all
+//	    sharing the same input graph) and returns "partitions": [...] in
+//	    the same order. Mutually exclusive with `gamma`.
+//
+// Other params:
 //
 //	src    (string, default "src")     — column with source node id
 //	dst    (string, default "dst")     — column with destination node id
 //	weight (string, optional)          — column with edge weight (default 1.0)
-//	gamma  (float64, default 1.0)      — resolution; >1 finer, <1 coarser
-//	seed   (int64, default 0)          — RNG seed for determinism
-//	max_iter (int, default 32)         — outer-iteration cap
+//	seed   (int64, default 0)          — RNG seed for determinism (per γ)
+//	max_iter (int, default 32)         — outer-iteration cap (per γ)
 //	include_assignments (bool, default false)
-//	    — if true, the result includes "assignments": map[id]community.
-//	      Off by default because for large graphs this dominates the
-//	      response payload; clients that want it must opt in.
+//	    — if true, every partition's result includes "assignments":
+//	      map[id]community. Off by default because for large graphs this
+//	      dominates the response payload; clients that want it must opt in.
 type Leiden struct{}
 
 func (Leiden) Name() string { return "leiden" }
@@ -33,7 +41,6 @@ func (Leiden) Compute(_ context.Context, result *router.Result, params map[strin
 	srcCol := stringOr(params, "src", "src")
 	dstCol := stringOr(params, "dst", "dst")
 	weightCol, _ := params["weight"].(string)
-	gamma := float64Or(params, "gamma", 1.0)
 	seed := int64Or(params, "seed", 0)
 	maxIter := intOr(params, "max_iter", 0)
 	includeAssignments, _ := params["include_assignments"].(bool)
@@ -47,14 +54,90 @@ func (Leiden) Compute(_ context.Context, result *router.Result, params map[strin
 	if weightCol != "" && !columnExists(result.Columns, weightCol) {
 		return nil, fmt.Errorf("leiden: weight column %q not in result", weightCol)
 	}
-	if gamma < 0 {
-		return nil, fmt.Errorf("leiden: gamma must be ≥ 0, got %v", gamma)
+
+	gammas, sweep, err := resolveGammas(params)
+	if err != nil {
+		return nil, err
 	}
 
-	// Build the graph. Each unique node id becomes an integer index.
-	// We iterate twice over rows: first to assign indices in
-	// stable first-seen order (so the output is deterministic for a
-	// given input order); second to add edges.
+	g, nodeIDs := buildLeidenGraph(result, srcCol, dstCol, weightCol)
+
+	if !sweep {
+		// Single-resolution mode: flat result shape (unchanged).
+		gamma := gammas[0]
+		part := runOneGamma(g, gamma, seed, maxIter, nodeIDs, includeAssignments)
+		out := map[string]any{
+			"num_communities": part["num_communities"],
+			"num_nodes":       len(nodeIDs),
+			"modularity":      part["modularity"],
+			"iterations":      part["iterations"],
+			"gamma":           gamma,
+			"size_histogram":  part["size_histogram"],
+		}
+		if includeAssignments {
+			out["assignments"] = part["assignments"]
+		}
+		return out, nil
+	}
+
+	// Sweep mode: run all γ values in parallel against the shared
+	// (read-only) graph. leiden.Run does not mutate g; each call
+	// constructs its own working state, so concurrent execution is safe.
+	partitions := make([]map[string]any, len(gammas))
+	var wg sync.WaitGroup
+	wg.Add(len(gammas))
+	for i, gamma := range gammas {
+		go func(i int, gamma float64) {
+			defer wg.Done()
+			partitions[i] = runOneGamma(g, gamma, seed, maxIter, nodeIDs, includeAssignments)
+		}(i, gamma)
+	}
+	wg.Wait()
+
+	return map[string]any{
+		"num_nodes":  len(nodeIDs),
+		"partitions": partitions,
+	}, nil
+}
+
+// resolveGammas picks single-vs-sweep mode and validates inputs.
+// Returns the gamma list (length 1 in single mode), a sweep flag, and
+// any validation error.
+func resolveGammas(params map[string]any) ([]float64, bool, error) {
+	_, hasGamma := params["gamma"]
+	rawList, hasGammas := params["gammas"]
+	if hasGamma && hasGammas {
+		return nil, false, fmt.Errorf("leiden: pass either gamma or gammas, not both")
+	}
+
+	if hasGammas {
+		list, err := toFloat64Slice(rawList)
+		if err != nil {
+			return nil, false, fmt.Errorf("leiden: gammas: %w", err)
+		}
+		if len(list) == 0 {
+			return nil, false, fmt.Errorf("leiden: gammas must be non-empty")
+		}
+		for _, g := range list {
+			if g < 0 {
+				return nil, false, fmt.Errorf("leiden: gamma must be ≥ 0, got %v", g)
+			}
+		}
+		return list, true, nil
+	}
+
+	gamma := float64Or(params, "gamma", 1.0)
+	if gamma < 0 {
+		return nil, false, fmt.Errorf("leiden: gamma must be ≥ 0, got %v", gamma)
+	}
+	return []float64{gamma}, false, nil
+}
+
+// buildLeidenGraph turns edge-list rows into a *leiden.Graph plus the
+// stable id→index mapping (returned as the ordered nodeIDs slice).
+// Iterates twice over rows: first to assign indices in first-seen order
+// (so output is deterministic for a given input), second to add edges.
+func buildLeidenGraph(result *router.Result, srcCol, dstCol, weightCol string) (*leiden.Graph, []string) {
 	idIndex := map[string]int{}
 	nodeIDs := []string{}
 	indexOf := func(id string) int {
@@ -67,10 +150,8 @@ func (Leiden) Compute(_ context.Context, result *router.Result, params map[strin
 		return i
 	}
 	for _, row := range result.Rows {
-		s := keyOf(row[srcCol])
-		d := keyOf(row[dstCol])
-		indexOf(s)
-		indexOf(d)
+		indexOf(keyOf(row[srcCol]))
+		indexOf(keyOf(row[dstCol]))
 	}
 
 	g := leiden.NewGraph(len(nodeIDs))
@@ -86,10 +167,14 @@ func (Leiden) Compute(_ context.Context, result *router.Result, params map[strin
 		}
 		g.AddEdge(u, v, w)
 	}
+	return g, nodeIDs
+}
 
+// runOneGamma executes Leiden at a single γ and produces the partition
+// dict shared between the single-result and sweep paths.
+func runOneGamma(g *leiden.Graph, gamma float64, seed int64, maxIter int, nodeIDs []string, includeAssignments bool) map[string]any {
 	res := leiden.Run(g, gamma, seed, maxIter)
 
-	// Build size histogram (descending).
 	sizes := make([]int, res.NumComms)
 	for _, c := range res.Communities {
 		sizes[c]++
@@ -97,11 +182,10 @@ func (Leiden) Compute(_ context.Context, result *router.Result, params map[strin
 	sort.Sort(sort.Reverse(sort.IntSlice(sizes)))
 
 	out := map[string]any{
+		"gamma":           gamma,
 		"num_communities": res.NumComms,
-		"num_nodes":       len(nodeIDs),
 		"modularity":      res.Modularity,
 		"iterations":      res.Iterations,
-		"gamma":           gamma,
 		"size_histogram":  sizes,
 	}
 	if includeAssignments {
@@ -111,7 +195,39 @@ func (Leiden) Compute(_ context.Context, result *router.Result, params map[strin
 		}
 		out["assignments"] = assign
 	}
-	return out, nil
+	return out
+}
+
+// toFloat64Slice accepts the JSON-decoded forms a `gammas` list can
+// take ([]any with float/int entries, or []float64 directly) and
+// returns a clean []float64.
+func toFloat64Slice(raw any) ([]float64, error) {
+	switch v := raw.(type) {
+	case []float64:
+		out := make([]float64, len(v))
+		copy(out, v)
+		return out, nil
+	case []any:
+		out := make([]float64, len(v))
+		for i, x := range v {
+			switch n := x.(type) {
+			case float64:
+				out[i] = n
+			case float32:
+				out[i] = float64(n)
+			case int:
+				out[i] = float64(n)
+			case int64:
+				out[i] = float64(n)
+			case int32:
+				out[i] = float64(n)
+			default:
+				return nil, fmt.Errorf("entry %d is not a number (%T)", i, x)
+			}
+		}
+		return out, nil
+	}
+	return nil, fmt.Errorf("expected array, got %T", raw)
 }
 
 // float64Or extracts a float64 from JSON params (which arrive as

@@ -135,3 +135,185 @@ func TestLeiden_EmptyResult(t *testing.T) {
 		t.Errorf("empty graph: num_communities=%v", got["num_communities"])
 	}
 }
+
+// twoCliquesPlusBridge: 8-node graph used as a multi-resolution probe.
+// Two 4-cliques joined by a single weak edge — at low γ everything
+// merges, at γ≈1 we see the 2-clique partition, and at high γ the
+// cliques shatter.
+func twoCliquesPlusBridge() *router.Result {
+	rows := []map[string]any{}
+	// clique A on {a0..a3}
+	for _, e := range [][2]string{{"a0", "a1"}, {"a0", "a2"}, {"a0", "a3"}, {"a1", "a2"}, {"a1", "a3"}, {"a2", "a3"}} {
+		rows = append(rows, edgeRow(e[0], e[1]))
+	}
+	// clique B on {b0..b3}
+	for _, e := range [][2]string{{"b0", "b1"}, {"b0", "b2"}, {"b0", "b3"}, {"b1", "b2"}, {"b1", "b3"}, {"b2", "b3"}} {
+		rows = append(rows, edgeRow(e[0], e[1]))
+	}
+	rows = append(rows, edgeRow("a3", "b0")) // weak bridge
+	return &router.Result{Columns: []string{"src", "dst"}, Rows: rows}
+}
+
+// TestLeiden_GammaSweep_Shape: passing `gammas` returns a partitions
+// list of the right length, with one entry per γ, in order.
+func TestLeiden_GammaSweep_Shape(t *testing.T) {
+	gammas := []any{float64(0.5), float64(1.0), float64(2.0)}
+	out, err := Leiden{}.Compute(context.Background(), twoCliquesPlusBridge(), map[string]any{
+		"gammas": gammas,
+		"seed":   float64(11),
+	})
+	if err != nil {
+		t.Fatalf("compute: %v", err)
+	}
+	got := out.(map[string]any)
+	if got["num_nodes"].(int) != 8 {
+		t.Errorf("num_nodes: %v", got["num_nodes"])
+	}
+	if _, ok := got["partitions"]; !ok {
+		t.Fatalf("expected partitions key, got %v", got)
+	}
+	parts := got["partitions"].([]map[string]any)
+	if len(parts) != len(gammas) {
+		t.Fatalf("expected %d partitions, got %d", len(gammas), len(parts))
+	}
+	for i, p := range parts {
+		want := gammas[i].(float64)
+		if p["gamma"].(float64) != want {
+			t.Errorf("partition[%d]: gamma=%v, want %v", i, p["gamma"], want)
+		}
+		// Required per-partition fields.
+		for _, k := range []string{"num_communities", "modularity", "iterations", "size_histogram"} {
+			if _, ok := p[k]; !ok {
+				t.Errorf("partition[%d] missing %q (%v)", i, k, p)
+			}
+		}
+		// Sweep mode without include_assignments must omit them.
+		if _, present := p["assignments"]; present {
+			t.Errorf("partition[%d]: assignments should be omitted when not requested", i)
+		}
+	}
+}
+
+// TestLeiden_GammaSweep_ResolvesByGamma: the same graph at γ=0.1
+// (very coarse) should yield ≤ communities than at γ=5 (very fine).
+// Specifically: at γ=5 the 4-cliques shatter (≥4 communities); at
+// γ=0.1 the bridge wins and everything collapses (1 community).
+func TestLeiden_GammaSweep_ResolvesByGamma(t *testing.T) {
+	out, err := Leiden{}.Compute(context.Background(), twoCliquesPlusBridge(), map[string]any{
+		"gammas": []any{float64(0.1), float64(5.0)},
+		"seed":   float64(3),
+	})
+	if err != nil {
+		t.Fatalf("compute: %v", err)
+	}
+	parts := out.(map[string]any)["partitions"].([]map[string]any)
+	low := parts[0]["num_communities"].(int)
+	high := parts[1]["num_communities"].(int)
+	if low > high {
+		t.Errorf("low γ should yield ≤ communities than high γ, got %d vs %d", low, high)
+	}
+	if low != 1 {
+		t.Errorf("γ=0.1 should collapse to 1 community, got %d", low)
+	}
+	if high < 8 {
+		t.Errorf("γ=5 should fragment into at least 8 communities (singletons), got %d", high)
+	}
+}
+
+// TestLeiden_GammaSweep_Determinism: same gammas + seed → same per-γ
+// partitions. Locks that parallel goroutine execution doesn't introduce
+// nondeterminism (each Run owns its RNG seeded from the shared seed).
+func TestLeiden_GammaSweep_Determinism(t *testing.T) {
+	params := map[string]any{
+		"gammas":              []any{float64(0.5), float64(1.0), float64(2.0)},
+		"seed":                float64(42),
+		"include_assignments": true,
+	}
+	a, _ := Leiden{}.Compute(context.Background(), twoCliquesPlusBridge(), params)
+	b, _ := Leiden{}.Compute(context.Background(), twoCliquesPlusBridge(), params)
+	aps := a.(map[string]any)["partitions"].([]map[string]any)
+	bps := b.(map[string]any)["partitions"].([]map[string]any)
+	if len(aps) != len(bps) {
+		t.Fatalf("partition count differs: %d vs %d", len(aps), len(bps))
+	}
+	for i := range aps {
+		aa := aps[i]["assignments"].(map[string]int)
+		bb := bps[i]["assignments"].(map[string]int)
+		for k, v := range aa {
+			if bb[k] != v {
+				t.Errorf("partition[%d] non-deterministic at %q: %d vs %d", i, k, v, bb[k])
+			}
+		}
+	}
+}
+
+// TestLeiden_GammaSweep_AssignmentsPerPartition: include_assignments
+// applies to every entry in the sweep, not just one.
+func TestLeiden_GammaSweep_AssignmentsPerPartition(t *testing.T) {
+	out, err := Leiden{}.Compute(context.Background(), twoCliquesPlusBridge(), map[string]any{
+		"gammas":              []any{float64(0.5), float64(1.0)},
+		"include_assignments": true,
+	})
+	if err != nil {
+		t.Fatalf("compute: %v", err)
+	}
+	parts := out.(map[string]any)["partitions"].([]map[string]any)
+	for i, p := range parts {
+		a, ok := p["assignments"].(map[string]int)
+		if !ok {
+			t.Fatalf("partition[%d]: missing assignments map", i)
+		}
+		if len(a) != 8 {
+			t.Errorf("partition[%d]: expected 8 assignments, got %d", i, len(a))
+		}
+	}
+}
+
+// TestLeiden_GammaSweep_RejectsBoth: passing both gamma and gammas is
+// ambiguous and must error rather than silently picking one.
+func TestLeiden_GammaSweep_RejectsBoth(t *testing.T) {
+	r := &router.Result{Columns: []string{"src", "dst"}, Rows: nil}
+	_, err := Leiden{}.Compute(context.Background(), r, map[string]any{
+		"gamma":  float64(1),
+		"gammas": []any{float64(0.5), float64(1.0)},
+	})
+	if err == nil {
+		t.Fatal("expected error when both gamma and gammas are set")
+	}
+}
+
+// TestLeiden_GammaSweep_RejectsEmpty: an empty gammas list is
+// nonsensical and must error.
+func TestLeiden_GammaSweep_RejectsEmpty(t *testing.T) {
+	r := &router.Result{Columns: []string{"src", "dst"}, Rows: nil}
+	_, err := Leiden{}.Compute(context.Background(), r, map[string]any{
+		"gammas": []any{},
+	})
+	if err == nil {
+		t.Fatal("expected error for empty gammas")
+	}
+}
+
+// TestLeiden_GammaSweep_RejectsNegative: any negative γ in the list
+// invalidates the whole sweep.
+func TestLeiden_GammaSweep_RejectsNegative(t *testing.T) {
+	r := &router.Result{Columns: []string{"src", "dst"}, Rows: nil}
+	_, err := Leiden{}.Compute(context.Background(), r, map[string]any{
+		"gammas": []any{float64(0.5), float64(-1)},
+	})
+	if err == nil {
+		t.Fatal("expected error for negative gamma in sweep")
+	}
+}
+
+// TestLeiden_GammaSweep_RejectsBadType: gammas must be a list, not a
+// scalar or other shape.
+func TestLeiden_GammaSweep_RejectsBadType(t *testing.T) {
+	r := &router.Result{Columns: []string{"src", "dst"}, Rows: nil}
+	_, err := Leiden{}.Compute(context.Background(), r, map[string]any{
+		"gammas": float64(1.0),
+	})
+	if err == nil {
+		t.Fatal("expected error for scalar gammas")
+	}
+}
