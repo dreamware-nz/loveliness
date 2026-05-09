@@ -147,6 +147,26 @@ func TestArrow_ComplexValueFallsBackToJSON(t *testing.T) {
 	}
 }
 
+func TestArrow_MappingVersionMetadataAlwaysPresent(t *testing.T) {
+	// Every Arrow payload must carry the mapping version so clients
+	// can refuse a payload that is newer than they were built for —
+	// the contract is documented in docs/arrow-mapping.md.
+	res := &router.Result{
+		Columns: []string{"x"},
+		Rows:    []map[string]any{{"x": "ok"}},
+	}
+	buf, err := encodeResultAsArrow(res)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	schema, _ := readArrowFile(t, buf)
+	got, ok := schema.Metadata().GetValue("loveliness.arrow_mapping_version")
+	if !ok || got != arrowMappingVersion {
+		t.Errorf("loveliness.arrow_mapping_version = %q (ok=%v), want %q",
+			got, ok, arrowMappingVersion)
+	}
+}
+
 func TestArrow_EmptyResultStillValid(t *testing.T) {
 	res := &router.Result{Columns: []string{"x"}, Rows: nil}
 	buf, err := encodeResultAsArrow(res)

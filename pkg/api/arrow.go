@@ -188,8 +188,13 @@ func encodeResultAsArrowStream(result *router.Result) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// arrowMappingVersion is the version of the Cypher→Arrow type
+// mapping documented in docs/arrow-mapping.md. Bumped on a breaking
+// change to a documented row; new rows alone don't bump it.
+const arrowMappingVersion = "1"
+
 func schemaMetadataKeys(result *router.Result) []string {
-	keys := []string{"loveliness.partial"}
+	keys := []string{"loveliness.arrow_mapping_version", "loveliness.partial"}
 	if len(result.Errors) > 0 {
 		keys = append(keys, "loveliness.errors")
 	}
@@ -197,7 +202,7 @@ func schemaMetadataKeys(result *router.Result) []string {
 }
 
 func schemaMetadataValues(result *router.Result) []string {
-	values := []string{boolStr(result.Partial)}
+	values := []string{arrowMappingVersion, boolStr(result.Partial)}
 	if len(result.Errors) > 0 {
 		errsJSON, _ := json.Marshal(result.Errors)
 		values = append(values, string(errsJSON))
