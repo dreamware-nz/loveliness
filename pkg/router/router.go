@@ -67,6 +67,11 @@ type Router struct {
 	// replicas reproduce identical state when they replay the WAL.
 	writeRewriter WriteRewriter
 
+	// Replicator fans successful primary writes out to replica nodes.
+	// Only invoked when this node is the primary for the shard, to keep
+	// replicated writes from looping back through the same path.
+	replicator WriteReplicator
+
 	// DDL hook for replicating schema changes via Raft.
 	ddlHook DDLHook
 
@@ -105,6 +110,18 @@ type WALAppender interface {
 // live in pkg/replication to keep this package import-free.
 type WriteRewriter interface {
 	Rewrite(cypher string) string
+}
+
+// WriteReplicator fans a successful primary write out to the shard's replica
+// nodes. The implementation owns its own consistency level and ownership
+// resolution, so the router only has to hand it the (shard, cypher) pair.
+//
+// For ConsistencyOne / async modes the call should return quickly (errors
+// logged internally). For Quorum / All modes the call blocks until enough
+// acks arrive; a non-nil error from those modes is surfaced to the client
+// as a write failure. Implementations live in pkg/replication.
+type WriteReplicator interface {
+	ReplicateWrite(ctx context.Context, shardID int, cypher string) error
 }
 
 // NewRouter creates a Router over the given shards.
@@ -153,6 +170,24 @@ func (r *Router) SetWAL(w WALAppender) {
 // execution. Pass nil to disable.
 func (r *Router) SetWriteRewriter(rw WriteRewriter) {
 	r.writeRewriter = rw
+}
+
+// SetWriteReplicator installs a write replicator. After a successful primary
+// write the router calls ReplicateWrite to fan the rewritten Cypher out to
+// replica nodes. Pass nil to disable replication (single-node deployments).
+func (r *Router) SetWriteReplicator(wr WriteReplicator) {
+	r.replicator = wr
+}
+
+// isPrimaryForShard reports whether this node is the primary for the shard.
+// Used to gate write fan-out so a replica receiving a propagated write does
+// not re-replicate it. In standalone mode (no placement / nodeID) treat as
+// primary so single-node setups still WAL-append normally.
+func (r *Router) isPrimaryForShard(shardID int) bool {
+	if r.placement == nil || r.nodeID == "" {
+		return true
+	}
+	return r.placement.PrimaryForShard(shardID) == r.nodeID
 }
 
 // SetDDLHook sets a hook that replicates schema DDL changes (e.g. via Raft).
@@ -383,6 +418,8 @@ func (r *Router) queryShard(ctx context.Context, shardID int, cypher string) (*R
 		}
 	}
 
+	isWrite := isWriteQuery(cypher)
+
 	type queryResult struct {
 		resp *shard.QueryResponse
 		err  error
@@ -393,6 +430,15 @@ func (r *Router) queryShard(ctx context.Context, shardID int, cypher string) (*R
 		var err error
 		if isLocal {
 			resp, err = r.shards[shardID].Query(cypher)
+			// After a successful primary write, fan the rewritten Cypher
+			// out to replica nodes. Replicas receiving this via the remote
+			// query path are gated by isPrimaryForShard so they do not
+			// re-replicate.
+			if err == nil && isWrite && r.replicator != nil && r.isPrimaryForShard(shardID) {
+				if rerr := r.replicator.ReplicateWrite(ctx, shardID, cypher); rerr != nil {
+					err = fmt.Errorf("replication: %w", rerr)
+				}
+			}
 		} else {
 			nodeID := r.placement.PrimaryForShard(shardID)
 			if nodeID == "" {

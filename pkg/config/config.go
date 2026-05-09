@@ -79,6 +79,14 @@ type Config struct {
 	// bootstrap and surface the shortfall through observability.
 	ReplicationFactor int
 
+	// WriteConsistency controls how many replicas must acknowledge a
+	// write before the primary returns success to the client.
+	//   "one"    — primary-only ack; replicas catch up async (default).
+	//   "quorum" — primary + ⌊RF/2⌋ replicas must apply.
+	//   "all"    — every replica must apply.
+	// Anything else is parsed as "quorum" by replication.ParseConsistency.
+	WriteConsistency string
+
 	// DNS discovery configuration.
 	DiscoverMode     string // "dns" to enable DNS-based peer discovery, empty to disable
 	DiscoverAddr     string // DNS name to resolve for peer discovery (e.g., "loveliness.internal")
@@ -103,6 +111,7 @@ func DefaultConfig() Config {
 		TLSMode:              "off",
 		TLSClientAuth:        "require",
 		ReplicationFactor:    1,
+		WriteConsistency:     "one",
 	}
 }
 
@@ -219,6 +228,9 @@ func FromEnv() Config {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			c.ReplicationFactor = n
 		}
+	}
+	if v := os.Getenv("LOVELINESS_WRITE_CONSISTENCY"); v != "" {
+		c.WriteConsistency = v
 	}
 	return c
 }

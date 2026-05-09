@@ -367,3 +367,113 @@ func TestRouter_NoRewriterStillWALs(t *testing.T) {
 		t.Errorf("without rewriter, WAL keeps original cypher; got: %q", wal.entries[0].cypher)
 	}
 }
+
+// --- Write replicator tests ---
+
+// fakeReplicator records each ReplicateWrite call and can be configured to
+// return an error to simulate a sync-replication quorum failure.
+type fakeReplicator struct {
+	mu    sync.Mutex
+	calls []replicateCall
+	err   error
+}
+
+type replicateCall struct {
+	shardID int
+	cypher  string
+}
+
+func (f *fakeReplicator) ReplicateWrite(_ context.Context, shardID int, cypher string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, replicateCall{shardID: shardID, cypher: cypher})
+	return f.err
+}
+
+// fakePlacement is a minimal PlacementResolver used to simulate a multi-node
+// cluster — the router asks it to decide whether the local node is the
+// primary for a given shard.
+type fakePlacement struct {
+	primary map[int]string
+}
+
+func (f *fakePlacement) PrimaryForShard(shardID int) string { return f.primary[shardID] }
+
+func TestRouter_ReplicatorCalledAfterWrite(t *testing.T) {
+	shards := makeTestShards(3)
+	r := NewRouter(shards, 5*time.Second)
+	r.SetWAL(&fakeWAL{})
+	r.SetWriteRewriter(fakeRewriter{})
+	rep := &fakeReplicator{}
+	r.SetWriteReplicator(rep)
+
+	_, err := r.Execute(context.Background(), "CREATE (p:Person {name: 'alice'})")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep.mu.Lock()
+	defer rep.mu.Unlock()
+	if len(rep.calls) != 1 {
+		t.Fatalf("expected 1 replicator call, got %d", len(rep.calls))
+	}
+	if !strings.Contains(rep.calls[0].cypher, "CREATE") {
+		t.Errorf("replicator should receive the rewritten write cypher; got %q", rep.calls[0].cypher)
+	}
+}
+
+func TestRouter_ReplicatorNotCalledForReads(t *testing.T) {
+	shards := makeTestShards(3)
+	r := NewRouter(shards, 5*time.Second)
+	rep := &fakeReplicator{}
+	r.SetWriteReplicator(rep)
+
+	_, err := r.Execute(context.Background(), "MATCH (p:Person {name: 'alice'}) RETURN p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep.mu.Lock()
+	defer rep.mu.Unlock()
+	if len(rep.calls) != 0 {
+		t.Errorf("read queries must not invoke the replicator; got %d calls", len(rep.calls))
+	}
+}
+
+func TestRouter_ReplicatorSkippedWhenNotPrimary(t *testing.T) {
+	shards := makeTestShards(3)
+	r := NewRouter(shards, 5*time.Second)
+	r.SetWAL(&fakeWAL{})
+	rep := &fakeReplicator{}
+	r.SetWriteReplicator(rep)
+
+	// Mark every shard as primary on a different node — this node is the
+	// receiving replica, so it must apply the write but NOT re-replicate.
+	r.SetRemoteTransport("local-node", nil, &fakePlacement{
+		primary: map[int]string{0: "other-node", 1: "other-node", 2: "other-node"},
+	})
+
+	_, err := r.Execute(context.Background(), "CREATE (p:Person {name: 'alice'})")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep.mu.Lock()
+	defer rep.mu.Unlock()
+	if len(rep.calls) != 0 {
+		t.Errorf("non-primary node must not re-fan-out replicated writes; got %d calls", len(rep.calls))
+	}
+}
+
+func TestRouter_ReplicatorErrorSurfacesAsWriteFailure(t *testing.T) {
+	shards := makeTestShards(3)
+	r := NewRouter(shards, 5*time.Second)
+	r.SetWAL(&fakeWAL{})
+	rep := &fakeReplicator{err: context.DeadlineExceeded}
+	r.SetWriteReplicator(rep)
+
+	_, err := r.Execute(context.Background(), "CREATE (p:Person {name: 'alice'})")
+	if err == nil {
+		t.Fatal("expected write failure when sync replication fails")
+	}
+	if !strings.Contains(err.Error(), "replication") {
+		t.Errorf("error should mention replication; got %v", err)
+	}
+}

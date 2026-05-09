@@ -247,6 +247,26 @@ func main() {
 	r.SetWAL(wal)
 	r.SetWriteRewriter(replication.DefaultRewriter())
 
+	// Wire write replication. The router calls ReplicateWrite after a
+	// successful primary write; the replicator looks up live ownership
+	// from Raft state and fans the rewritten Cypher out to replicas
+	// according to the configured consistency level.
+	consistency := replication.ParseConsistency(cfg.WriteConsistency)
+	resolver := replication.ShardResolverFunc(func(shardID int) replication.ShardOwnership {
+		a := c.GetShardMap().Assignments[shardID]
+		return replication.ShardOwnership{
+			ShardID:  shardID,
+			Primary:  a.Primary,
+			Replicas: a.Replicas,
+		}
+	})
+	r.SetWriteReplicator(replication.NewRouterReplicator(
+		replication.NewReplicator(transportClient, queryTimeout),
+		resolver,
+		consistency,
+	))
+	slog.Info("write replication wired", "consistency", consistency.String())
+
 	// Initialize backup store (S3 if configured, otherwise local).
 	backupMgr := backup.NewManager(cfg.DataDir, cfg.NodeID)
 	dr := &api.DRExtension{
