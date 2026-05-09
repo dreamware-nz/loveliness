@@ -33,6 +33,35 @@ func TestCypher_AcceptArrowFile_ReturnsArrowBuffer(t *testing.T) {
 	r.Close()
 }
 
+func TestCypher_AcceptArrowStream_ReturnsStreamBuffer(t *testing.T) {
+	srv := setupTestServer()
+	req := httptest.NewRequest("POST", "/cypher",
+		bytes.NewBufferString("MATCH (p:Person) RETURN p"))
+	req.Header.Set("Accept", contentTypeArrowStream)
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Content-Type"); got != contentTypeArrowStream {
+		t.Errorf("expected Content-Type %q, got %q", contentTypeArrowStream, got)
+	}
+	// Stream payload must NOT carry the "ARROW1" file-format magic;
+	// guards against the dispatch silently downgrading to the file
+	// encoder under the stream content type.
+	if bytes.HasPrefix(w.Body.Bytes(), []byte("ARROW1")) {
+		t.Fatal("stream Accept returned file-format payload (ARROW1 magic present)")
+	}
+	r, err := ipc.NewReader(bytes.NewReader(w.Body.Bytes()),
+		ipc.WithAllocator(memory.NewGoAllocator()))
+	if err != nil {
+		t.Fatalf("response is not a valid Arrow stream: %v", err)
+	}
+	r.Release()
+}
+
 func TestCypher_AcceptJSON_StaysJSON(t *testing.T) {
 	srv := setupTestServer()
 	req := httptest.NewRequest("POST", "/cypher",

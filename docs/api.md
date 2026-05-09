@@ -60,10 +60,14 @@ material throughput win on result sets above ~10k rows.
 | Accept value | Response Content-Type | Format |
 |---|---|---|
 | `application/json` *(default)* | `application/json` | JSON |
-| `application/vnd.apache.arrow.stream` | `application/vnd.apache.arrow.stream` | Arrow IPC stream |
-| `application/vnd.apache.arrow.file` | `application/vnd.apache.arrow.file` | Arrow IPC file |
+| `application/vnd.apache.arrow.stream` | `application/vnd.apache.arrow.stream` | Arrow IPC stream (schema → batches → EOS) |
+| `application/vnd.apache.arrow.file` | `application/vnd.apache.arrow.file` | Arrow IPC file (random-access, `ARROW1` magic) |
 | `*/*` or `application/*` | `application/json` | JSON (fallback) |
 | anything else (concrete) | — | `406 Not Acceptable` |
+
+Stream and file are **not** byte-interchangeable. Use `pyarrow.ipc.open_stream` /
+`ipc.NewReader` / DuckDB-WASM `read_arrow` for the stream variant, and
+`pyarrow.ipc.open_file` / `ipc.NewFileReader` for the file variant.
 
 Quality values (`q=0.9`) are honored; ties broken by header order.
 

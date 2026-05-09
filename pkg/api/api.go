@@ -264,15 +264,14 @@ func (s *Server) handleCypher(w http.ResponseWriter, r *http.Request) {
 
 // writeNegotiated picks the response format based on the request's
 // Accept header. JSON stays the canonical default; clients can opt
-// into Arrow with `Accept: application/vnd.apache.arrow.file` (the
-// streaming variant is a follow-up). When the client explicitly
-// asks for an unsupported type we honor the contract and return
-// 406 instead of silently downgrading.
+// into Arrow IPC stream or file via the documented content types.
+// When the client explicitly asks for an unsupported type we honor
+// the contract and return 406 instead of silently downgrading.
 func writeNegotiated(w http.ResponseWriter, r *http.Request, result *router.Result) {
 	chosen, unacceptable := negotiateResponse(r.Header.Get("Accept"))
 	if unacceptable {
 		writeError(w, http.StatusNotAcceptable, "NOT_ACCEPTABLE",
-			"server can produce application/json or application/vnd.apache.arrow.file", 0)
+			"server can produce application/json, application/vnd.apache.arrow.stream, or application/vnd.apache.arrow.file", 0)
 		return
 	}
 	switch chosen {
@@ -286,12 +285,7 @@ func writeNegotiated(w http.ResponseWriter, r *http.Request, result *router.Resu
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(buf)
 	case contentTypeArrowStream:
-		// Streaming Arrow is a follow-up slice; for now route stream
-		// requests to the buffered file writer so DuckDB-WASM and the
-		// other Arrow consumers still get a valid IPC payload. The
-		// content-type stays "stream" so clients that switched on it
-		// can read back without code changes once true streaming lands.
-		buf, err := encodeResultAsArrow(result)
+		buf, err := encodeResultAsArrowStream(result)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "ARROW_ENCODE_ERROR", err.Error(), 0)
 			return
