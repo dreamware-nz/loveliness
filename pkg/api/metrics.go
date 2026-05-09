@@ -70,6 +70,11 @@ type replicaLagPair struct {
 func writeMetrics(w io.Writer, s *Server) {
 	writeRuntimeMetrics(w)
 
+	emitHelp(w, "loveliness_uptime_seconds",
+		"Seconds since this server process started.", "gauge")
+	fprintf(w, "loveliness_uptime_seconds %s\n",
+		formatGaugeFloat(time.Since(s.startTime).Seconds()))
+
 	emitHelp(w, "loveliness_local_shards", "Number of shards opened on this node.", "gauge")
 	fprintf(w, "loveliness_local_shards %d\n", len(s.shards))
 

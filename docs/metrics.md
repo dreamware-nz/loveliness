@@ -20,6 +20,7 @@ explicitly here, not by collector defaults.
 
 | Metric | Type | Labels | Cardinality bound |
 |---|---|---|---|
+| `loveliness_uptime_seconds` | gauge | — | 1 |
 | `loveliness_local_shards` | gauge | — | 1 |
 | `loveliness_shard_healthy` | gauge | `shard_id` | ≤ 256 |
 | `loveliness_raft_state` | gauge | `node_id`, `state` | 1 × 5 = **5** |

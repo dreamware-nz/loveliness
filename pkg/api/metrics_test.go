@@ -199,6 +199,36 @@ func TestRaftState_AlwaysEmitsAllStates(t *testing.T) {
 	}
 }
 
+func TestUptimeMetric_NonNegativeAndPresent(t *testing.T) {
+	srv := setupTestServer()
+	// Sleep so uptime is meaningfully > 0; mostly we want to confirm
+	// the series exists and is non-negative.
+	time.Sleep(2 * time.Millisecond)
+
+	req := httptest.NewRequest("GET", "/metrics", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("metrics endpoint returned %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	mustContain := []string{
+		"# HELP loveliness_uptime_seconds",
+		"# TYPE loveliness_uptime_seconds gauge",
+		"loveliness_uptime_seconds ",
+	}
+	for _, s := range mustContain {
+		if !strings.Contains(body, s) {
+			t.Errorf("missing %q in /metrics body:\n%s", s, body)
+		}
+	}
+	// loveliness_uptime_seconds 0 is the broken case (means we read
+	// startTime as zero).
+	if strings.Contains(body, "loveliness_uptime_seconds 0\n") {
+		t.Errorf("uptime should be > 0 after sleep, got body:\n%s", body)
+	}
+}
+
 func TestShardHealthMetric_AllHealthy(t *testing.T) {
 	srv := setupTestServer()
 	var buf bytes.Buffer
