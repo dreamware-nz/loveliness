@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/johnjansen/loveliness/pkg/shard"
 )
 
 // handleMetrics serves Prometheus text-format metrics. We hand-roll the
@@ -70,6 +72,8 @@ func writeMetrics(w io.Writer, s *Server) {
 
 	emitHelp(w, "loveliness_local_shards", "Number of shards opened on this node.", "gauge")
 	fprintf(w, "loveliness_local_shards %d\n", len(s.shards))
+
+	writeShardHealthMetric(w, s)
 
 	if s.cluster != nil {
 		writeRaftStateMetric(w, s.cluster)
@@ -175,6 +179,29 @@ func writeQueryCounterMetrics(w io.Writer, samples []queryCounterSample) {
 	for _, s := range samples {
 		fprintf(w, "loveliness_query_total{query_type=%q,status=%q} %d\n",
 			s.QueryType, s.Status, s.Count)
+	}
+}
+
+// writeShardHealthMetric emits loveliness_shard_healthy{shard_id} as a
+// 0/1 gauge per local shard. Lets dashboards and alerts surface a single
+// shard going unhealthy (CGo panic, marked offline) without scraping
+// /health and parsing JSON.
+func writeShardHealthMetric(w io.Writer, s *Server) {
+	if len(s.shards) == 0 {
+		return
+	}
+	emitHelp(w, "loveliness_shard_healthy",
+		"Per-shard health on this node: 1 healthy, 0 unhealthy.", "gauge")
+	sortedShards := append([]*shard.Shard(nil), s.shards...)
+	sort.Slice(sortedShards, func(i, j int) bool {
+		return sortedShards[i].ID < sortedShards[j].ID
+	})
+	for _, sh := range sortedShards {
+		v := 0
+		if sh.IsHealthy() {
+			v = 1
+		}
+		fprintf(w, "loveliness_shard_healthy{shard_id=\"%d\"} %d\n", sh.ID, v)
 	}
 }
 
