@@ -193,6 +193,14 @@ func (r *Router) Pipeline() *PipelineExecutor {
 
 // Execute parses a Cypher query, resolves target shards, and executes.
 func (r *Router) Execute(ctx context.Context, cypher string) (*Result, error) {
+	// Defensive gate: reject query shapes that crash the LadybugDB
+	// native layer. CGo segfaults bypass Go's recover(), so the only
+	// safe response is to refuse the query before it ever reaches the
+	// shard. See pkg/router/unsafe.go and GitHub issue #1.
+	if qe := rejectIfUnsafe(cypher); qe != nil {
+		return nil, qe
+	}
+
 	parsed, err := ParseWithSchema(cypher, r.schema)
 	if err != nil {
 		return nil, &QueryError{Code: "CYPHER_PARSE_ERROR", Message: err.Error()}
