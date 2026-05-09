@@ -114,6 +114,40 @@ Output: `bench/results/<timestamp>/` with JSON results, SVG charts, and `compari
 - 15 of 16 benchmark queries use identical Cypher. Only `shortest_path` requires syntax translation (Loveliness `* SHORTEST 1..6` vs Neo4j `shortestPath()`).
 - CI runs the full comparison on each release and opens a PR with updated results.
 
+## /cypher Output Format: JSON vs Apache Arrow
+
+`cmd/arrow-bench` measures the wire-size and round-trip cost of
+`/cypher` when the client opts into Arrow IPC stream output via
+`Accept: application/vnd.apache.arrow.stream`. Run it against a
+loaded server:
+
+```bash
+go run ./cmd/arrow-bench \
+  -endpoint http://localhost:8080 \
+  -query "MATCH (p:Person) RETURN p LIMIT 25000" \
+  -iters 5
+```
+
+Output is JSON so the result diffs cleanly across runs and branches:
+
+```json
+{
+  "endpoint": "http://localhost:8080",
+  "query": "MATCH (p:Person) RETURN p LIMIT 25000",
+  "iters": 5,
+  "rows": 25000,
+  "json":  {"bytes": 4193280, "median_ms": 142.3, "min_ms": 138.1, "max_ms": 151.0},
+  "arrow": {"bytes":  524288, "median_ms":  78.5, "min_ms":  74.2, "max_ms":  82.9},
+  "ratio": {"bytes": 0.125, "median_ms": 0.55}
+}
+```
+
+The motivating data point from #27: at 25K-node fetches the
+cosmograph spike measured 750–1500 ms of client-side data prep
+shuttling JSON into DuckDB-WASM. Arrow ingests directly with no
+parse step, so the ratio reported here is a lower bound on the
+end-to-end speedup once the client-side parse cost is added.
+
 ## Inter-Node Transport: TCP+MessagePack vs HTTP+JSON
 
 Internal cluster communication uses a binary TCP transport with MessagePack serialization instead of HTTP+JSON. Micro-benchmarks on 1000-row result sets:
