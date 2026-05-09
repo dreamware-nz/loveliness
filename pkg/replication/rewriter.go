@@ -114,7 +114,7 @@ func walkAndRewrite(s string, rw *Rewriter) string {
 			}
 			if s[i+1] == '*' {
 				j := i + 2
-				for j+1 < len(s) && !(s[j] == '*' && s[j+1] == '/') {
+				for j+1 < len(s) && (s[j] != '*' || s[j+1] != '/') {
 					j++
 				}
 				if j+1 < len(s) {
