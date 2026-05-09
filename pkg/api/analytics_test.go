@@ -327,14 +327,14 @@ func TestAnalyticsList(t *testing.T) {
 		t.Fatal(err)
 	}
 	plugins := got["plugins"]
-	if len(plugins) != 3 {
-		t.Errorf("expected 3 built-in plugins, got %v", plugins)
+	if len(plugins) != 4 {
+		t.Errorf("expected 4 built-in plugins, got %v", plugins)
 	}
 	have := map[string]bool{}
 	for _, n := range plugins {
 		have[n] = true
 	}
-	for _, want := range []string{"count_by_label", "connected_components", "leiden"} {
+	for _, want := range []string{"count_by_label", "connected_components", "leiden", "resolution_plateau"} {
 		if !have[want] {
 			t.Errorf("missing built-in plugin %q: %v", want, plugins)
 		}

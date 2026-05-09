@@ -103,6 +103,7 @@ func defaultAnalyticsRegistry() *analytics.Registry {
 		plugins.CountByLabel{},
 		plugins.ConnectedComponents{},
 		plugins.Leiden{},
+		plugins.ResolutionPlateau{},
 	} {
 		if err := reg.Register(p); err != nil {
 			panic(fmt.Sprintf("analytics: register %q: %v", p.Name(), err))
