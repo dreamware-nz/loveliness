@@ -61,6 +61,16 @@ type ShardResolver interface {
 	GetShardOwner(shardID int) ShardOwnership
 }
 
+// ShardResolverFunc adapts a plain function to the ShardResolver interface
+// so callers can plug in a closure over their cluster state without a
+// dedicated adapter type.
+type ShardResolverFunc func(shardID int) ShardOwnership
+
+// GetShardOwner satisfies ShardResolver.
+func (f ShardResolverFunc) GetShardOwner(shardID int) ShardOwnership {
+	return f(shardID)
+}
+
 // Replicator handles write fan-out to replica shards after primary write.
 type Replicator struct {
 	client  *transport.Client
