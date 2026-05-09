@@ -2,8 +2,10 @@ package plugins
 
 import (
 	"context"
+	"errors"
 	"math"
 	"testing"
+	"time"
 
 	"github.com/johnjansen/loveliness/pkg/router"
 )
@@ -335,18 +337,27 @@ func TestLeiden_RejectsNaNGamma(t *testing.T) {
 	}
 }
 
-// TestLeiden_RejectsInfGamma: ±Inf must error in either gamma or gammas.
+// TestLeiden_RejectsInfGamma: both ±Inf must error in either path.
+// Covered as a table to ensure both signs hit both single and sweep
+// modes (validateGamma is shared, but the test's job is to lock that
+// in).
 func TestLeiden_RejectsInfGamma(t *testing.T) {
 	r := &router.Result{Columns: []string{"src", "dst"}, Rows: nil}
-	if _, err := (Leiden{}).Compute(context.Background(), r, map[string]any{
-		"gamma": math.Inf(1),
-	}); err == nil {
-		t.Fatal("expected error for +Inf gamma")
+	cases := []struct {
+		name   string
+		params map[string]any
+	}{
+		{"single +Inf", map[string]any{"gamma": math.Inf(1)}},
+		{"single -Inf", map[string]any{"gamma": math.Inf(-1)}},
+		{"sweep +Inf", map[string]any{"gammas": []any{float64(1.0), math.Inf(1)}}},
+		{"sweep -Inf", map[string]any{"gammas": []any{math.Inf(-1)}}},
 	}
-	if _, err := (Leiden{}).Compute(context.Background(), r, map[string]any{
-		"gammas": []any{float64(1.0), math.Inf(-1)},
-	}); err == nil {
-		t.Fatal("expected error for -Inf in gammas")
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if _, err := (Leiden{}).Compute(context.Background(), r, c.params); err == nil {
+				t.Fatalf("expected error for %s", c.name)
+			}
+		})
 	}
 }
 
@@ -380,6 +391,7 @@ func TestLeiden_GammaSweep_SingleElement(t *testing.T) {
 
 // TestLeiden_GammaSweep_HonorsCancelledContext: a context already
 // cancelled at entry must error out without running any Leiden work.
+// Exercises the entry-guard ctx check.
 func TestLeiden_GammaSweep_HonorsCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // pre-cancel
@@ -390,7 +402,48 @@ func TestLeiden_GammaSweep_HonorsCancelledContext(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error from pre-cancelled context")
 	}
-	if err != context.Canceled {
+	if !errors.Is(err, context.Canceled) {
 		t.Errorf("expected context.Canceled, got %v", err)
+	}
+}
+
+// TestLeiden_GammaSweep_CancelMidSweep: cancelling ctx while a sweep is
+// in flight must (a) eventually return ctx.Err() and (b) not leak
+// goroutines or race on partitions[i] writes. The wg.Wait() drain in
+// the cancellation branch is what we're really exercising — combined
+// with -race it locks the goroutine-cleanup contract.
+//
+// We use a deeply parallel sweep (32 γ values) on a non-trivial graph
+// and cancel after a short delay. Because sweepConcurrency caps to
+// NumCPU(), most γs are queued behind the semaphore — cancellation
+// short-circuits those, and any in-flight workers finish naturally
+// before wg.Wait returns.
+func TestLeiden_GammaSweep_CancelMidSweep(t *testing.T) {
+	r := twoCliquesPlusBridge()
+	gammas := make([]any, 32)
+	for i := range gammas {
+		gammas[i] = float64(0.5 + 0.1*float64(i))
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		// Cancel almost immediately; the exact moment doesn't matter —
+		// we just need ctx to fire while the sweep is mid-loop.
+		time.Sleep(1 * time.Millisecond)
+		cancel()
+	}()
+
+	_, err := Leiden{}.Compute(ctx, r, map[string]any{
+		"gammas": gammas,
+		"seed":   float64(1),
+	})
+
+	// Either: cancellation hit mid-loop and we got context.Canceled,
+	// or all 32 γs finished before cancel fired (ultra-fast machine)
+	// and we got a normal result. Both are valid; the test's job is to
+	// exercise the cancellation path race-free, not to force it to
+	// always win.
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Errorf("expected nil or context.Canceled, got %v", err)
 	}
 }
