@@ -110,12 +110,12 @@ func defaultAnalyticsRegistry() *analytics.Registry {
 	return reg
 }
 
-// RegisterAnalyticsPlugin registers an additional plugin. The registry
-// is concurrency-safe so this is technically callable at any time, but
-// callers should register before the server begins accepting requests
-// — otherwise there is a window in which clients can hit /analytics or
-// POST /db/{name}/query and not see the plugin. Returns an error on
-// duplicate Name().
+// RegisterAnalyticsPlugin registers an additional plugin. Registration
+// is boot-only: callers MUST register before Handler() is called.
+// Handler() freezes the registry so the runtime plugin set is stable —
+// every request sees the same set, with no race window between
+// registration and serving. After Handler(), this returns
+// analytics.ErrRegistryFrozen. Also returns an error on duplicate Name().
 func (s *Server) RegisterAnalyticsPlugin(p analytics.Plugin) error {
 	return s.analytics.Register(p)
 }
@@ -135,7 +135,18 @@ func (s *Server) SetDatabaseRouter(dr *router.DatabaseRouter) {
 }
 
 // Handler returns the HTTP handler with all routes registered.
+//
+// Side effect: freezes the analytics registry on first (and every)
+// call. After Handler() returns, RegisterAnalyticsPlugin will fail
+// with analytics.ErrRegistryFrozen — the boot-time plugin set is the
+// runtime plugin set.
+//
+// Call this once at boot and serve the returned handler; calling it
+// repeatedly returns a fresh mux each time and is intended only for
+// testing.
 func (s *Server) Handler() http.Handler {
+	s.analytics.Freeze()
+
 	// Protected routes — require auth when enabled.
 	protected := http.NewServeMux()
 	protected.HandleFunc("POST /cypher", s.handleCypherLegacy)
@@ -739,8 +750,7 @@ type queryResponse struct {
 
 // handleQuery is the JSON-envelope sibling of handleCypherScoped: cypher
 // runs through the same dbRouter, then any requested analytics plugins
-// post-process the Result. The wire format is the design coming out of
-// spike/analytics-plugin-poc; see issue #62 for the promotion checklist.
+// post-process the Result.
 func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	dbName := r.PathValue("name")
 	if dbName == "" {

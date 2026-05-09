@@ -5,6 +5,7 @@ package analytics
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -30,17 +31,29 @@ type Request struct {
 }
 
 // Registry holds the set of plugins known to a server. Concurrent-safe
-// for reads; registration is expected to happen once at boot.
+// for reads; registration is boot-only — once Freeze() is called (the
+// server does this in Handler()), further Register calls fail. This
+// keeps the runtime contract simple: every request sees the same set
+// of plugins, and there is no window where a request can race with
+// registration. Out-of-tree dynamic-load is explicitly out of scope —
+// see issue #71.
 type Registry struct {
 	mu      sync.RWMutex
 	plugins map[string]Plugin
+	frozen  bool
 }
 
 func NewRegistry() *Registry { return &Registry{plugins: map[string]Plugin{}} }
 
+// ErrRegistryFrozen is returned by Register after Freeze() has run.
+var ErrRegistryFrozen = errors.New("analytics: registry is frozen; register plugins before serving")
+
 func (r *Registry) Register(p Plugin) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.frozen {
+		return ErrRegistryFrozen
+	}
 	name := p.Name()
 	if name == "" {
 		return fmt.Errorf("analytics: plugin has empty Name()")
@@ -50,6 +63,22 @@ func (r *Registry) Register(p Plugin) error {
 	}
 	r.plugins[name] = p
 	return nil
+}
+
+// Freeze closes the registry to further Register calls. Idempotent —
+// safe to call multiple times. The server invokes this from Handler()
+// so the boot-time plugin set is the runtime plugin set.
+func (r *Registry) Freeze() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.frozen = true
+}
+
+// Frozen reports whether the registry has been frozen.
+func (r *Registry) Frozen() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.frozen
 }
 
 func (r *Registry) Lookup(name string) (Plugin, bool) {
