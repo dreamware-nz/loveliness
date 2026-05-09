@@ -527,6 +527,20 @@ func main() {
 		go autoJoin(cfg)
 	}
 
+	// Leader-only failure detector + auto-promotion. Pings every other
+	// alive peer, marks consistently-failing peers down via Raft, then
+	// asks the rebalancer to promote a replica wherever the primary
+	// just died. No-ops on followers; safe to run on every node.
+	var fdCancel context.CancelFunc
+	if cfg.FailureDetectorEnabled {
+		fdInterval := time.Duration(cfg.FailureDetectorIntervalMs) * time.Millisecond
+		fd := cluster.NewFailureDetector(c, fdInterval, cfg.FailureDetectorThreshold)
+		var fdCtx context.Context
+		fdCtx, fdCancel = context.WithCancel(context.Background())
+		go fd.Run(fdCtx)
+		slog.Info("failure detector started", "interval", fdInterval, "threshold", cfg.FailureDetectorThreshold)
+	}
+
 	// Wait for shutdown signal.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -534,6 +548,9 @@ func main() {
 	slog.Info("shutting down", "signal", sig.String())
 
 	// Graceful shutdown: stop workers, drain HTTP, close WAL, raft, shards.
+	if fdCancel != nil {
+		fdCancel()
+	}
 	if disc != nil {
 		disc.Stop()
 	}

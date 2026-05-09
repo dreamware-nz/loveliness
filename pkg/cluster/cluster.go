@@ -172,6 +172,14 @@ func (c *Cluster) PromoteReplica(shardID int, newPrimary string) error {
 	return c.Apply(Command{Type: CmdPromoteReplica, Payload: payload})
 }
 
+// MarkNodeDown flips a node's Alive flag to false in the shard map. Used
+// by the failure detector when a peer fails repeated liveness pings; the
+// rebalancer then sees a dead node and plans replica promotion.
+func (c *Cluster) MarkNodeDown(nodeID string) error {
+	payload, _ := json.Marshal(RemoveNodePayload{NodeID: nodeID})
+	return c.Apply(Command{Type: CmdRemoveNode, Payload: payload})
+}
+
 // RegisterTable replicates a schema registration (table name → shard key) via Raft.
 func (c *Cluster) RegisterTable(name, shardKey string) error {
 	payload, _ := json.Marshal(RegisterTablePayload{Name: name, ShardKey: shardKey})

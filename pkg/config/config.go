@@ -87,6 +87,19 @@ type Config struct {
 	// Anything else is parsed as "quorum" by replication.ParseConsistency.
 	WriteConsistency string
 
+	// FailureDetectorEnabled controls whether the leader-only failure
+	// detector pings peers and auto-promotes replicas on dead primaries.
+	// Disable for tests or maintenance windows where flapping liveness
+	// would cause unwanted shard moves.
+	FailureDetectorEnabled bool
+
+	// FailureDetectorIntervalMs is the gap between liveness pings.
+	FailureDetectorIntervalMs int
+
+	// FailureDetectorThreshold is the consecutive failed-ping count that
+	// trips a peer to Alive=false in the shard map.
+	FailureDetectorThreshold int
+
 	// DNS discovery configuration.
 	DiscoverMode     string // "dns" to enable DNS-based peer discovery, empty to disable
 	DiscoverAddr     string // DNS name to resolve for peer discovery (e.g., "loveliness.internal")
@@ -112,6 +125,10 @@ func DefaultConfig() Config {
 		TLSClientAuth:        "require",
 		ReplicationFactor:    1,
 		WriteConsistency:     "one",
+
+		FailureDetectorEnabled:    true,
+		FailureDetectorIntervalMs: 2000,
+		FailureDetectorThreshold:  3,
 	}
 }
 
@@ -231,6 +248,19 @@ func FromEnv() Config {
 	}
 	if v := os.Getenv("LOVELINESS_WRITE_CONSISTENCY"); v != "" {
 		c.WriteConsistency = v
+	}
+	if v := os.Getenv("LOVELINESS_FAILURE_DETECTOR_ENABLED"); v != "" {
+		c.FailureDetectorEnabled = v != "false" && v != "0"
+	}
+	if v := os.Getenv("LOVELINESS_FAILURE_DETECTOR_INTERVAL_MS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.FailureDetectorIntervalMs = n
+		}
+	}
+	if v := os.Getenv("LOVELINESS_FAILURE_DETECTOR_THRESHOLD"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.FailureDetectorThreshold = n
+		}
 	}
 	return c
 }
