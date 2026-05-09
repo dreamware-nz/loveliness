@@ -101,6 +101,14 @@ type Router struct {
 	// at use-site to break thundering-herd patterns. Tests set it
 	// short to race against the scatter timeout.
 	remoteRetryBackoff time.Duration
+
+	// metrics owns the per-router observability primitives — remote
+	// RTT histogram, remote error counter, bloom-skip counter. Every
+	// remote RPC site reports through this. Eagerly initialised in
+	// the constructors so call sites don't need a nil check, but
+	// every method on *RouterMetrics is also nil-safe for callers
+	// that bypass the constructors (rare; mostly tests).
+	metrics *RouterMetrics
 }
 
 // DDLHook is called when a DDL statement registers or removes a table.
@@ -152,6 +160,7 @@ func NewRouter(shards []*shard.Shard, timeout time.Duration) *Router {
 		shards:     shards,
 		shardCount: len(shards),
 		timeout:    timeout,
+		metrics:    NewRouterMetrics(),
 	}
 }
 
@@ -164,6 +173,7 @@ func NewRouterWithSchema(shards []*shard.Shard, timeout time.Duration, reg *sche
 		timeout:    timeout,
 		schema:     reg,
 		bloomIndex: NewShardBloomIndex(),
+		metrics:    NewRouterMetrics(),
 	}
 	r.resolver = NewResolver(shards, reg, r)
 	r.edgeCut = NewEdgeCutReplicator(shards, r)
@@ -175,6 +185,13 @@ func NewRouterWithSchema(shards []*shard.Shard, timeout time.Duration, reg *sche
 // BloomIndex returns the Bloom filter index for external use (e.g., bulk load populates it).
 func (r *Router) BloomIndex() *ShardBloomIndex {
 	return r.bloomIndex
+}
+
+// Metrics returns the router's observability primitives. The pkg/api
+// metrics writer reads snapshots from here. Safe to call before any
+// remote RPC has happened — the snapshot will simply be empty.
+func (r *Router) Metrics() *RouterMetrics {
+	return r.metrics
 }
 
 // EdgeCut returns the edge-cut replicator.
@@ -302,13 +319,19 @@ func (r *Router) queryShardRaw(shardID int, cypher string) (*shard.QueryResponse
 		return nil, fmt.Errorf("shard %d has no assigned primary", shardID)
 	}
 	// retryRemoteCall handles its own bounds checking; if retries are
-	// disabled it does exactly one attempt.
+	// disabled it does exactly one attempt. Per-attempt RTT and
+	// classified-error counts are observed inside the closure so a
+	// flapping peer's failed retries are visible in /metrics, not
+	// hidden by the eventual success of the outer call.
 	return retryRemoteCall(
 		context.Background(),
 		r.remoteRetries,
 		r.remoteRetryBackoff,
 		func() (*shard.QueryResponse, error) {
-			return r.remote.QueryRemoteShard(nodeID, shardID, cypher)
+			start := time.Now()
+			resp, err := r.remote.QueryRemoteShard(nodeID, shardID, cypher)
+			r.metrics.observeRemote(shardID, time.Since(start), err)
+			return resp, err
 		},
 	)
 }
@@ -537,7 +560,9 @@ func (r *Router) queryShard(ctx context.Context, shardID int, cypher string) (*R
 			if nodeID == "" {
 				err = fmt.Errorf("shard %d has no assigned primary", shardID)
 			} else {
+				start := time.Now()
 				resp, err = r.remote.QueryRemoteShard(nodeID, shardID, cypher)
+				r.metrics.observeRemote(shardID, time.Since(start), err)
 			}
 		}
 		ch <- queryResult{resp, err}

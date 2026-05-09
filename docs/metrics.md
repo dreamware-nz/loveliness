@@ -32,6 +32,9 @@ explicitly here, not by collector defaults.
 | `loveliness_replication_lag_entries` | gauge | `shard_id`, `replica_id` | ≤ 256 × RF |
 | `loveliness_replication_lag_bytes` | gauge | `shard_id`, `replica_id` | ≤ 256 × RF |
 | `loveliness_replication_lag_seconds` | gauge | `shard_id`, `replica_id` | ≤ 256 × RF |
+| `loveliness_router_remote_rtt_seconds` | histogram | `shard_id` | ≤ 256 × (14 buckets + `_sum` + `_count` + `+Inf`) ≈ **4 352** |
+| `loveliness_router_remote_errors_total` | counter | `code` | ≤ 7 (closed set) |
+| `loveliness_router_bloom_skip_total` | counter | `shard_id` | ≤ 256 |
 | `loveliness_go_goroutines` | gauge | — | 1 |
 | `loveliness_go_memstats_alloc_bytes` | gauge | — | 1 |
 | `loveliness_go_memstats_sys_bytes` | gauge | — | 1 |
@@ -50,11 +53,14 @@ query_duration       ≈ 256
 bulk_load_rows_total ≤ 200
 wal_head_sequence    ≤ 256
 replication_lag × 3  ≤ 256 × 3 × 3 = 2304
+router_remote_rtt    ≤ 256 × 17 ≈ 4 352
+router_remote_errors ≤ 7
+router_bloom_skip    ≤ 256
 ─────────────────────
-total                ≲ 3 100
+total                ≲ 7 700
 ```
 
-That leaves ~7 000 of headroom under the 10 000 budget for additional
+That leaves ~2 300 of headroom under the 10 000 budget for additional
 per-shard gauges (e.g. RSS, vertex/edge count) when those land.
 
 ## Label values
@@ -91,6 +97,15 @@ plan. Bounded by `RF × shard_count`.
 Catalogued node/edge table name. Cardinality is bounded by the schema —
 production deployments typically have ≤ ~200 tables.
 
+### `code` (router remote error, closed set ≤ 7)
+
+`timeout` · `canceled` · `conn_refused` · `conn_reset` · `broken_pipe` ·
+`eof` · `other`. Computed by `classifyRemoteError` in
+`pkg/router/metrics.go` from the unwrap chain of the transport error
+(`errors.Is`, `errors.As` on `*net.OpError`). The `other` bucket
+collapses every protocol/query error into a single label so a flood of
+unique error strings can't blow up the scrape.
+
 ## Histogram buckets
 
 `loveliness_query_duration_seconds` uses these upper bounds (seconds):
@@ -103,6 +118,18 @@ production deployments typically have ≤ ~200 tables.
 Aligned with the Loveliness latency targets — most reads sit in the
 first six buckets, most writes in the next three; the long tail covers
 slow scans without burning a bucket on every order of magnitude.
+
+`loveliness_router_remote_rtt_seconds` uses these upper bounds (seconds):
+
+```
+0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01,
+0.025,   0.05,   0.1,   0.25,   0.5,   1.0, 2.5, 5.0
+```
+
+The lower end (250 µs) covers in-process loopback (single-host
+multi-shard); the upper end (5 s) brackets the worst-case scatter
+timeout. Widened compared to the query histogram because cross-node
+latency has a longer tail than local execution.
 
 ## Adding a new metric
 

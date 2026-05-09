@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/johnjansen/loveliness/pkg/router"
 	"github.com/johnjansen/loveliness/pkg/shard"
 )
 
@@ -96,6 +97,10 @@ func writeMetrics(w io.Writer, s *Server) {
 		writeBulkLoadMetrics(w, s.bulkLoadCounters.Snapshot())
 	}
 
+	if s.router != nil {
+		writeRouterMetrics(w, s.router.Metrics().Snapshot())
+	}
+
 	if s.dr == nil || s.dr.WAL == nil {
 		return
 	}
@@ -119,6 +124,51 @@ func writeMetrics(w io.Writer, s *Server) {
 	}
 
 	writeWALMetrics(w, s.dr.WAL, shardIDs, s.dr.ReplicaState, pairs)
+}
+
+// writeRouterMetrics emits the three series owned by the router's
+// observability primitives:
+//
+//	loveliness_router_remote_rtt_seconds{shard_id}    histogram
+//	loveliness_router_remote_errors_total{code}       counter
+//	loveliness_router_bloom_skip_total{shard_id}      counter
+//
+// Each section guards on a non-empty snapshot so series only appear
+// once they've been observed at least once — matching the lazy-
+// creation semantics the rest of /metrics already uses.
+func writeRouterMetrics(w io.Writer, snap router.RouterMetricsSnapshot) {
+	if len(snap.RTT) > 0 {
+		emitHelp(w, "loveliness_router_remote_rtt_seconds",
+			"Per-shard remote RPC round-trip latency in seconds. Includes failed attempts so slow failures are visible.", "histogram")
+		for _, h := range snap.RTT {
+			for _, p := range h.Buckets {
+				fprintf(w,
+					"loveliness_router_remote_rtt_seconds_bucket{shard_id=\"%d\",le=%q} %d\n",
+					h.ShardID, formatBucketBound(p.UpperBound), p.Count)
+			}
+			fprintf(w, "loveliness_router_remote_rtt_seconds_sum{shard_id=\"%d\"} %s\n",
+				h.ShardID, formatGaugeFloat(h.Sum))
+			fprintf(w, "loveliness_router_remote_rtt_seconds_count{shard_id=\"%d\"} %d\n",
+				h.ShardID, h.Count)
+		}
+	}
+
+	if len(snap.Errors) > 0 {
+		emitHelp(w, "loveliness_router_remote_errors_total",
+			"Cumulative remote RPC failures, classified by transport-layer code (timeout, conn_refused, eof, …).", "counter")
+		for _, s := range snap.Errors {
+			fprintf(w, "loveliness_router_remote_errors_total{code=%q} %d\n", s.Code, s.Count)
+		}
+	}
+
+	if len(snap.BloomSkips) > 0 {
+		emitHelp(w, "loveliness_router_bloom_skip_total",
+			"Cumulative remote RPCs avoided because the per-shard Bloom filter ruled out the lookup key.", "counter")
+		for _, s := range snap.BloomSkips {
+			fprintf(w, "loveliness_router_bloom_skip_total{shard_id=\"%d\"} %d\n",
+				s.ShardID, s.Count)
+		}
+	}
 }
 
 // writeQueryHistogramMetrics emits loveliness_query_duration_seconds in
