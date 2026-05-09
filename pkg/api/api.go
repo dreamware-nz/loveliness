@@ -720,12 +720,15 @@ type queryRequest struct {
 	Analytics []analytics.Request `json:"analytics,omitempty"`
 }
 
-// queryResponse mirrors the cypher result, with an extra analytics block.
-// `analytics_errors` is per-plugin so one bad plugin can't poison the
-// rest of the response — clients should always consult both maps.
+// queryResponse embeds the full cypher result (columns, rows, partial,
+// errors, stats — see router.Result) and adds the analytics block on
+// top. analytics_errors is per-plugin so one bad plugin can't poison
+// the rest of the response — clients should always consult both maps.
+//
+// Embedding *router.Result keeps this endpoint a strict superset of
+// /db/{name}/cypher: nothing the cypher endpoint returns is dropped here.
 type queryResponse struct {
-	Columns         []string          `json:"columns"`
-	Rows            []map[string]any  `json:"rows"`
+	*router.Result
 	Analytics       map[string]any    `json:"analytics,omitempty"`
 	AnalyticsErrors map[string]string `json:"analytics_errors,omitempty"`
 }
@@ -790,7 +793,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := queryResponse{Columns: result.Columns, Rows: result.Rows}
+	resp := queryResponse{Result: result}
 	if len(req.Analytics) > 0 {
 		out, errs := s.analytics.Run(ctx, result, req.Analytics)
 		if len(out) > 0 {

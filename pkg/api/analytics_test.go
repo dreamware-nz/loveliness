@@ -72,6 +72,82 @@ func TestQuery_NoAnalyticsIsCypherSuperset(t *testing.T) {
 	}
 }
 
+func TestQuery_CountByLabelHappyPath(t *testing.T) {
+	srv := setupAnalyticsServer(t)
+	body := `{
+		"cypher": "MATCH (n) RETURN n",
+		"analytics": [{"name": "count_by_label", "params": {"column": "label"}}]
+	}`
+	w, resp := postQuery(t, srv, body)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if len(resp.AnalyticsErrors) != 0 {
+		t.Fatalf("unexpected analytics errors: %v", resp.AnalyticsErrors)
+	}
+	got, ok := resp.Analytics["count_by_label"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing count_by_label in analytics: %+v", resp.Analytics)
+	}
+	counts, _ := got["counts"].(map[string]any)
+	// Two shards each seed 2 Users + 1 Post → 4 Users, 2 Posts.
+	if counts["User"].(float64) != 4 {
+		t.Errorf("User count: want 4, got %v", counts["User"])
+	}
+	if counts["Post"].(float64) != 2 {
+		t.Errorf("Post count: want 2, got %v", counts["Post"])
+	}
+	if got["total"].(float64) != 6 {
+		t.Errorf("total: want 6, got %v", got["total"])
+	}
+}
+
+func TestQuery_MultiplePluginsAtOnce(t *testing.T) {
+	// Both plugins requested; only count_by_label can run on this shape.
+	// connected_components needs src/dst columns it won't find — should
+	// surface in analytics_errors while count_by_label still succeeds.
+	srv := setupAnalyticsServer(t)
+	body := `{
+		"cypher": "MATCH (n) RETURN n",
+		"analytics": [
+			{"name": "count_by_label", "params": {"column": "label"}},
+			{"name": "connected_components"}
+		]
+	}`
+	w, resp := postQuery(t, srv, body)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if _, ok := resp.Analytics["count_by_label"]; !ok {
+		t.Errorf("count_by_label should have succeeded: %+v", resp.Analytics)
+	}
+	if _, ok := resp.AnalyticsErrors["connected_components"]; !ok {
+		t.Errorf("connected_components should have failed (no src column): %+v", resp.AnalyticsErrors)
+	}
+}
+
+func TestQuery_PreservesPartialAndStats(t *testing.T) {
+	// queryResponse must be a strict superset of router.Result. We can't
+	// easily induce a partial result in a unit test, but we can at least
+	// assert the embedded fields are reachable on the decoded response,
+	// proving the wire shape carries them.
+	srv := setupAnalyticsServer(t)
+	w, resp := postQuery(t, srv, `{"cypher":"MATCH (n) RETURN n"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if resp.Result == nil {
+		t.Fatalf("expected embedded *router.Result on response")
+	}
+	if len(resp.Columns) == 0 {
+		t.Errorf("expected promoted Columns from embedded Result")
+	}
+	// Partial/Errors are omitempty zero values; the field is reachable
+	// even when absent from the wire.
+	_ = resp.Partial
+	_ = resp.Errors
+}
+
 func TestQuery_UnknownPluginIsolated(t *testing.T) {
 	srv := setupAnalyticsServer(t)
 	body := `{"cypher":"MATCH (n) RETURN n","analytics":[{"name":"nope"}]}`
