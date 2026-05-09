@@ -34,8 +34,10 @@ type WAL struct {
 }
 
 type walFile struct {
-	f   *os.File
-	seq uint64 // last sequence written to this file
+	f      *os.File
+	seq    uint64    // last sequence written to this file
+	headTS time.Time // timestamp of the most recent entry written to this file
+	bytes  int64     // total bytes written to this file (length-prefix + payload)
 }
 
 // NewWAL creates or opens a WAL in the given directory.
@@ -74,14 +76,58 @@ func (w *WAL) Append(shardID int, cypher string) (uint64, error) {
 		return 0, err
 	}
 
-	if err := writeEntry(wf.f, &entry); err != nil {
+	written, err := writeEntry(wf.f, &entry)
+	if err != nil {
 		return 0, fmt.Errorf("WAL write shard %d: %w", shardID, err)
 	}
 	if err := wf.f.Sync(); err != nil {
 		return 0, fmt.Errorf("WAL sync shard %d: %w", shardID, err)
 	}
 	wf.seq = w.sequence
+	wf.headTS = entry.Timestamp
+	wf.bytes += int64(written)
 	return w.sequence, nil
+}
+
+// HeadTimestamp returns the timestamp of the most recent entry written to
+// the given shard's WAL. Zero time if the shard has no entries.
+func (w *WAL) HeadTimestamp(shardID int) time.Time {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if wf, ok := w.files[shardID]; ok {
+		return wf.headTS
+	}
+	return time.Time{}
+}
+
+// LagBytes returns the total on-disk byte size of WAL entries with
+// sequence > afterSeq for the given shard. Returns 0 if the shard has no
+// WAL file or every entry has been applied.
+func (w *WAL) LagBytes(shardID int, afterSeq uint64) int64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	path := w.shardPath(shardID)
+	f, err := os.Open(path)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+
+	var lag int64
+	for {
+		size, entry, err := readEntryWithSize(f)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return lag
+		}
+		if entry.Sequence > afterSeq {
+			lag += size
+		}
+	}
+	return lag
 }
 
 // ReadFrom returns all WAL entries for a shard with sequence > afterSeq.
@@ -179,7 +225,7 @@ func (w *WAL) Truncate(shardID int, upToSeq uint64) error {
 		return err
 	}
 	for i := range keep {
-		if err := writeEntry(tmp, &keep[i]); err != nil {
+		if _, err := writeEntry(tmp, &keep[i]); err != nil {
 			tmp.Close()
 			os.Remove(tmpPath)
 			return err
@@ -229,8 +275,47 @@ func (w *WAL) getOrCreateFile(shardID int) (*walFile, error) {
 		return nil, err
 	}
 	wf := &walFile{f: f}
+	// Prime cached state from the existing file so HeadTimestamp / lag
+	// accounting stay consistent across reopens (e.g. after Truncate).
+	if scanned, err := scanShardFile(path); err == nil {
+		wf.seq = scanned.seq
+		wf.headTS = scanned.headTS
+		wf.bytes = scanned.bytes
+	}
 	w.files[shardID] = wf
 	return wf, nil
+}
+
+// shardScanResult holds per-shard state recovered from disk.
+type shardScanResult struct {
+	seq    uint64
+	headTS time.Time
+	bytes  int64
+}
+
+// scanShardFile walks a shard's WAL file and returns the highest sequence,
+// the timestamp of the most recent entry, and total bytes.
+func scanShardFile(path string) (shardScanResult, error) {
+	var out shardScanResult
+	f, err := os.Open(path)
+	if err != nil {
+		return out, err
+	}
+	defer f.Close()
+	for {
+		size, entry, err := readEntryWithSize(f)
+		if err == io.EOF {
+			return out, nil
+		}
+		if err != nil {
+			return out, err
+		}
+		out.bytes += size
+		if entry.Sequence > out.seq {
+			out.seq = entry.Sequence
+			out.headTS = entry.Timestamp
+		}
+	}
 }
 
 // recover scans all existing WAL files to find the highest sequence number.
@@ -240,56 +325,59 @@ func (w *WAL) recover() error {
 		return err
 	}
 	for _, path := range entries {
-		f, err := os.Open(path)
+		scanned, err := scanShardFile(path)
 		if err != nil {
 			continue
 		}
-		for {
-			entry, err := readEntry(f)
-			if err != nil {
-				break
-			}
-			if entry.Sequence > w.sequence {
-				w.sequence = entry.Sequence
-			}
+		if scanned.seq > w.sequence {
+			w.sequence = scanned.seq
 		}
-		f.Close()
 	}
 	return nil
 }
 
-// writeEntry writes a length-prefixed JSON entry to a file.
-func writeEntry(f *os.File, entry *WALEntry) error {
+// writeEntry writes a length-prefixed JSON entry to a file. Returns the
+// number of bytes written (length prefix + payload).
+func writeEntry(f *os.File, entry *WALEntry) (int, error) {
 	data, err := json.Marshal(entry)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	var lenBuf [4]byte
 	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(data)))
 	if _, err := f.Write(lenBuf[:]); err != nil {
-		return err
+		return 0, err
 	}
-	_, err = f.Write(data)
-	return err
+	if _, err := f.Write(data); err != nil {
+		return 4, err
+	}
+	return 4 + len(data), nil
 }
 
 // readEntry reads a length-prefixed JSON entry from a reader.
 func readEntry(r io.Reader) (*WALEntry, error) {
+	_, entry, err := readEntryWithSize(r)
+	return entry, err
+}
+
+// readEntryWithSize reads the next entry and also returns its on-disk byte
+// size (length prefix + JSON payload). Used by lag-byte accounting.
+func readEntryWithSize(r io.Reader) (int64, *WALEntry, error) {
 	var lenBuf [4]byte
 	if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
-		return nil, err
+		return 0, nil, err
 	}
 	size := binary.BigEndian.Uint32(lenBuf[:])
 	if size > 10<<20 { // 10MB sanity limit
-		return nil, fmt.Errorf("WAL entry too large: %d bytes", size)
+		return 4, nil, fmt.Errorf("WAL entry too large: %d bytes", size)
 	}
 	data := make([]byte, size)
 	if _, err := io.ReadFull(r, data); err != nil {
-		return nil, err
+		return 4, nil, err
 	}
 	var entry WALEntry
 	if err := json.Unmarshal(data, &entry); err != nil {
-		return nil, err
+		return int64(4 + size), nil, err
 	}
-	return &entry, nil
+	return int64(4 + size), &entry, nil
 }
