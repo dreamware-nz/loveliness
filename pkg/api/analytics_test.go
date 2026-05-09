@@ -2,12 +2,15 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/johnjansen/loveliness/pkg/analytics"
 	"github.com/johnjansen/loveliness/pkg/catalog"
 	"github.com/johnjansen/loveliness/pkg/router"
 	"github.com/johnjansen/loveliness/pkg/shard"
@@ -263,6 +266,28 @@ func TestQuery_WithoutDBRouter(t *testing.T) {
 	if w.Code != http.StatusServiceUnavailable {
 		t.Errorf("expected 503, got %d", w.Code)
 	}
+}
+
+// stubFreezePlugin is a minimal Plugin used to drive RegisterAnalyticsPlugin.
+type stubFreezePlugin struct{ name string }
+
+func (s stubFreezePlugin) Name() string { return s.name }
+func (s stubFreezePlugin) Compute(_ context.Context, _ *router.Result, _ map[string]any) (any, error) {
+	return nil, nil
+}
+
+func TestRegisterAnalyticsPlugin_FrozenAfterHandler(t *testing.T) {
+	srv := setupAnalyticsServer(t)
+	if err := srv.RegisterAnalyticsPlugin(stubFreezePlugin{name: "early"}); err != nil {
+		t.Fatalf("pre-Handler register: %v", err)
+	}
+	_ = srv.Handler() // freezes the registry
+	err := srv.RegisterAnalyticsPlugin(stubFreezePlugin{name: "late"})
+	if !errors.Is(err, analytics.ErrRegistryFrozen) {
+		t.Errorf("expected ErrRegistryFrozen after Handler(), got %v", err)
+	}
+	// Calling Handler() again must remain safe (idempotent freeze).
+	_ = srv.Handler()
 }
 
 func TestAnalyticsList(t *testing.T) {

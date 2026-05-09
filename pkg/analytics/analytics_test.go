@@ -109,3 +109,38 @@ func (s stubPluginFunc) Name() string { return s.name }
 func (s stubPluginFunc) Compute(_ context.Context, _ *router.Result, _ map[string]any) (any, error) {
 	return s.fn()
 }
+
+func TestRegistry_FreezeBlocksRegister(t *testing.T) {
+	r := NewRegistry()
+	if err := r.Register(stubPlugin{name: "before"}); err != nil {
+		t.Fatalf("pre-freeze register: %v", err)
+	}
+	r.Freeze()
+	if !r.Frozen() {
+		t.Fatal("Frozen() should report true after Freeze()")
+	}
+	err := r.Register(stubPlugin{name: "after"})
+	if !errors.Is(err, ErrRegistryFrozen) {
+		t.Errorf("expected ErrRegistryFrozen, got %v", err)
+	}
+	// Pre-freeze plugin still resolvable.
+	if _, ok := r.Lookup("before"); !ok {
+		t.Error("pre-freeze plugin should still be looked up")
+	}
+	if _, ok := r.Lookup("after"); ok {
+		t.Error("post-freeze plugin should not be registered")
+	}
+}
+
+func TestRegistry_FreezeIdempotent(t *testing.T) {
+	r := NewRegistry()
+	r.Freeze()
+	r.Freeze()
+	r.Freeze()
+	if !r.Frozen() {
+		t.Fatal("Frozen() should report true")
+	}
+	if err := r.Register(stubPlugin{name: "x"}); !errors.Is(err, ErrRegistryFrozen) {
+		t.Errorf("expected ErrRegistryFrozen, got %v", err)
+	}
+}
