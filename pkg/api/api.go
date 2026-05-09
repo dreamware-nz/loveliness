@@ -9,7 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"strconv"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -334,14 +334,26 @@ func (s *Server) replicateSchemaDDL(cypher string) {
 // gate honest: ready returns 503 iff this snapshot says the node is
 // degraded or not-yet-ready, rather than re-deriving the same checks.
 type healthSnapshot struct {
-	Status         string            `json:"status"` // "ok" | "degraded"
-	NodeID         string            `json:"node_id,omitempty"`
-	Mode           string            `json:"mode,omitempty"` // "standalone" when no cluster
-	Role           string            `json:"role,omitempty"`
-	LeaderID       string            `json:"leader_id,omitempty"`
-	UptimeSeconds  float64           `json:"uptime_seconds"`
-	PlacementEpoch uint64            `json:"placement_epoch,omitempty"`
-	Shards         map[string]string `json:"shards,omitempty"`
+	Status         string        `json:"status"` // "ok" | "degraded"
+	NodeID         string        `json:"node_id,omitempty"`
+	Mode           string        `json:"mode,omitempty"` // "standalone" when no cluster
+	Role           string        `json:"role,omitempty"`
+	LeaderID       string        `json:"leader_id,omitempty"`
+	UptimeSeconds  float64       `json:"uptime_seconds"`
+	PlacementEpoch uint64        `json:"placement_epoch,omitempty"`
+	Shards         []shardStatus `json:"shards,omitempty"`
+}
+
+// shardStatus is the per-shard entry on /health. Sorted by ID so the
+// array is deterministic across scrapes — important for diffing health
+// JSON in incident reviews.
+type shardStatus struct {
+	ID                  int     `json:"id"`
+	Status              string  `json:"status"`           // "healthy" | "unhealthy"
+	Reason              string  `json:"reason,omitempty"` // populated when status != healthy
+	WALSequence         uint64  `json:"wal_sequence,omitempty"`
+	ReplicationLagSecs  float64 `json:"replication_lag_seconds,omitempty"`
+	ReplicationLagBytes int64   `json:"replication_lag_bytes,omitempty"`
 }
 
 // snapshotHealth gathers the current node's health into a structured form.
@@ -363,22 +375,66 @@ func (s *Server) snapshotHealth() healthSnapshot {
 	}
 
 	if len(s.shards) > 0 {
-		snap.Shards = make(map[string]string, len(s.shards))
+		snap.Shards = make([]shardStatus, 0, len(s.shards))
 		allHealthy := true
 		for _, sh := range s.shards {
-			if sh.IsHealthy() {
-				snap.Shards[strconv.Itoa(sh.ID)] = "healthy"
-			} else {
-				snap.Shards[strconv.Itoa(sh.ID)] = "unhealthy"
+			st := shardStatus{ID: sh.ID, Status: "healthy"}
+			if !sh.IsHealthy() {
+				st.Status = "unhealthy"
+				st.Reason = "shard_marked_unhealthy"
 				allHealthy = false
 			}
+			s.fillShardReplicationLag(&st)
+			snap.Shards = append(snap.Shards, st)
 		}
+		sort.Slice(snap.Shards, func(i, j int) bool {
+			return snap.Shards[i].ID < snap.Shards[j].ID
+		})
 		if !allHealthy {
 			snap.Status = "degraded"
 		}
 	}
 
 	return snap
+}
+
+// fillShardReplicationLag populates the WAL- and replica-derived fields
+// on a shardStatus entry. Quiet no-op when the node isn't running with
+// DR/replication enabled — keeps the JSON shape stable across single-node
+// and clustered deployments.
+func (s *Server) fillShardReplicationLag(st *shardStatus) {
+	if s.dr == nil || s.dr.WAL == nil {
+		return
+	}
+	st.WALSequence = s.dr.WAL.ShardSequence(st.ID)
+
+	if s.dr.ReplicaState == nil || s.cluster == nil {
+		return
+	}
+	sm := s.cluster.GetShardMap()
+	assignment, ok := sm.Assignments[st.ID]
+	if !ok {
+		return
+	}
+	headTS := s.dr.WAL.HeadTimestamp(st.ID)
+	var maxLagSecs float64
+	var maxLagBytes int64
+	for _, replica := range assignment.Replicas {
+		if replica == "" {
+			continue
+		}
+		pos := s.dr.ReplicaState.GetPosition(st.ID, replica)
+		applied := s.dr.ReplicaState.GetTimestamp(st.ID, replica)
+		secs := computeLagSeconds(headTS, applied, pos)
+		if secs > maxLagSecs {
+			maxLagSecs = secs
+		}
+		if b := s.dr.WAL.LagBytes(st.ID, pos); b > maxLagBytes {
+			maxLagBytes = b
+		}
+	}
+	st.ReplicationLagSecs = maxLagSecs
+	st.ReplicationLagBytes = maxLagBytes
 }
 
 // maxShardEpoch returns the highest per-shard placement epoch in the map,
