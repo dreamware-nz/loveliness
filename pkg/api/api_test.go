@@ -126,16 +126,20 @@ func TestHealth_Standalone(t *testing.T) {
 	if resp["status"] != "ok" {
 		t.Errorf("expected status ok, got %v", resp["status"])
 	}
-	shards, ok := resp["shards"].(map[string]any)
+	shards, ok := resp["shards"].([]any)
 	if !ok {
-		t.Fatal("expected shards in health response")
+		t.Fatal("expected shards array in health response")
 	}
 	if len(shards) != 3 {
 		t.Errorf("expected 3 shards, got %d", len(shards))
 	}
-	for id, status := range shards {
-		if status != "healthy" {
-			t.Errorf("shard %s expected healthy, got %v", id, status)
+	for _, raw := range shards {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			t.Fatalf("expected shard entry to be object, got %T", raw)
+		}
+		if entry["status"] != "healthy" {
+			t.Errorf("shard %v expected healthy, got %v", entry["id"], entry["status"])
 		}
 	}
 }
