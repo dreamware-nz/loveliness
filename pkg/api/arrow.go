@@ -94,15 +94,10 @@ func mergeKinds(a, b arrowColumnKind) arrowColumnKind {
 	return arrowKindJSON
 }
 
-// encodeResultAsArrow serializes a router.Result as an Arrow IPC
-// "file" payload (random-access, length-prefixed). This is the
-// buffered variant from the spec — streaming is a follow-up.
-//
-// Errors and Partial flags ride along as schema-level metadata so
-// clients can surface them without needing a separate channel.
-func encodeResultAsArrow(result *router.Result) ([]byte, error) {
-	mem := memory.NewGoAllocator()
-
+// buildArrowRecord turns the router.Result into a schema and a single
+// record batch, shared by the file and stream encoders. Caller owns
+// the returned record and must Release() it.
+func buildArrowRecord(result *router.Result, mem memory.Allocator) (*arrow.Schema, arrow.RecordBatch, error) {
 	cols := result.Columns
 	rows := result.Rows
 
@@ -129,12 +124,27 @@ func encodeResultAsArrow(result *router.Result) ([]byte, error) {
 	for _, row := range rows {
 		for i, c := range cols {
 			if err := appendCell(b.Field(i), kinds[i], row[c]); err != nil {
-				return nil, fmt.Errorf("column %q: %w", c, err)
+				return nil, nil, fmt.Errorf("column %q: %w", c, err)
 			}
 		}
 	}
 
-	rec := b.NewRecordBatch()
+	return schema, b.NewRecordBatch(), nil
+}
+
+// encodeResultAsArrow serializes a router.Result as an Arrow IPC
+// "file" payload (random-access, length-prefixed) — the buffered
+// variant. Use this for `application/vnd.apache.arrow.file`.
+//
+// Errors and Partial flags ride along as schema-level metadata so
+// clients can surface them without needing a separate channel.
+func encodeResultAsArrow(result *router.Result) ([]byte, error) {
+	mem := memory.NewGoAllocator()
+
+	schema, rec, err := buildArrowRecord(result, mem)
+	if err != nil {
+		return nil, err
+	}
 	defer rec.Release()
 
 	var buf bytes.Buffer
@@ -148,6 +158,32 @@ func encodeResultAsArrow(result *router.Result) ([]byte, error) {
 	}
 	if err := w.Close(); err != nil {
 		return nil, fmt.Errorf("arrow close: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
+// encodeResultAsArrowStream serializes a router.Result as an Arrow
+// IPC "stream" payload — schema message + record batches +
+// end-of-stream marker, no random-access footer. Use this for
+// `application/vnd.apache.arrow.stream`. Stream format is what
+// DuckDB-WASM's `read_arrow` and pyarrow's `open_stream` expect.
+func encodeResultAsArrowStream(result *router.Result) ([]byte, error) {
+	mem := memory.NewGoAllocator()
+
+	schema, rec, err := buildArrowRecord(result, mem)
+	if err != nil {
+		return nil, err
+	}
+	defer rec.Release()
+
+	var buf bytes.Buffer
+	w := ipc.NewWriter(&buf, ipc.WithSchema(schema), ipc.WithAllocator(mem))
+	if err := w.Write(rec); err != nil {
+		_ = w.Close()
+		return nil, fmt.Errorf("arrow stream write: %w", err)
+	}
+	if err := w.Close(); err != nil {
+		return nil, fmt.Errorf("arrow stream close: %w", err)
 	}
 	return buf.Bytes(), nil
 }
