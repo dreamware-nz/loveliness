@@ -5,10 +5,18 @@ import (
 	"sort"
 )
 
+// rebalancerCluster is the surface Rebalancer needs from a cluster.
+// Pulled out as an interface so Execute can be unit-tested without a
+// live Raft FSM.
+type rebalancerCluster interface {
+	GetShardMap() ShardMap
+	AssignShard(shardID int, primary string, replicas []string) error
+}
+
 // Rebalancer computes shard migrations when nodes join or leave the cluster.
 // Runs on the leader. Produces a list of moves to equalize shard distribution.
 type Rebalancer struct {
-	cluster *Cluster
+	cluster rebalancerCluster
 }
 
 // NewRebalancer creates a rebalancer for the given cluster.
@@ -272,6 +280,10 @@ func (r *Rebalancer) Execute(moves []Move) error {
 		switch m.Role {
 		case "primary":
 			a.Primary = m.ToNode
+			// Promotion: the replica we just promoted must not also
+			// stay in the replicas list, and the dead old primary
+			// (FromNode) shouldn't sneak in either. Drop both.
+			a.Replicas = filterReplicas(a.Replicas, m.ToNode, m.FromNode)
 		case "replica":
 			idx := m.ReplicaIdx
 			if idx < 0 {
@@ -294,4 +306,26 @@ func (r *Rebalancer) Execute(moves []Move) error {
 		)
 	}
 	return nil
+}
+
+// filterReplicas returns replicas with any node in `drop` removed,
+// preserving order. Empty slots are dropped too — they're never useful
+// post-promotion and only confuse downstream consumers.
+func filterReplicas(replicas []string, drop ...string) []string {
+	if len(replicas) == 0 {
+		return replicas
+	}
+	bad := make(map[string]struct{}, len(drop)+1)
+	bad[""] = struct{}{}
+	for _, d := range drop {
+		bad[d] = struct{}{}
+	}
+	out := replicas[:0:0]
+	for _, r := range replicas {
+		if _, skip := bad[r]; skip {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
 }
