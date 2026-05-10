@@ -23,6 +23,20 @@ import (
 //	    plugin runs Leiden once per γ in parallel (one goroutine each, all
 //	    sharing the same input graph) and returns "partitions": [...] in
 //	    the same order. Mutually exclusive with `gamma`.
+//	hierarchical (bool, default false)
+//	    — if true, runs Leiden iteratively on coarsened graphs to produce
+//	      a multi-level hierarchy. Returns a "levels": [...] array instead
+//	      of the flat result. Each level has its own gamma, modularity,
+//	      size_histogram, and (if include_assignments) assignments.
+//
+// γ schedule for hierarchical mode (three mutually exclusive options):
+//
+//	gamma_schedule ([]float64, optional) — explicit γ per level (coarse→fine).
+//	    Length is capped to `depth`; if shorter, last value is padded.
+//	gamma (float64, default 1.0) — single γ applied to all levels.
+//	    Auto-discover — when neither gamma_schedule nor gamma is set,
+//	    the plugin runs resolution_plateau internally and picks one
+//	    representative γ per plateau as a level.
 //
 // Other params:
 //
@@ -35,6 +49,8 @@ import (
 //	    — if true, every partition's result includes "assignments":
 //	      map[id]community. Off by default because for large graphs this
 //	      dominates the response payload; clients that want it must opt in.
+//	depth  (int, default 3)            — for hierarchical mode: max levels
+//	    to recurse. Stops early if a level has only one community.
 type Leiden struct{}
 
 func (Leiden) Name() string { return "leiden" }
@@ -50,6 +66,8 @@ func (Leiden) Compute(ctx context.Context, result *router.Result, params map[str
 	seed := int64Or(params, "seed", 0)
 	maxIter := intOr(params, "max_iter", 0)
 	includeAssignments, _ := params["include_assignments"].(bool)
+	hierarchical, _ := params["hierarchical"].(bool)
+	depth := intOr(params, "depth", 3)
 
 	if !columnExists(result.Columns, srcCol) {
 		return nil, fmt.Errorf("leiden: src column %q not in result", srcCol)
@@ -61,12 +79,26 @@ func (Leiden) Compute(ctx context.Context, result *router.Result, params map[str
 		return nil, fmt.Errorf("leiden: weight column %q not in result", weightCol)
 	}
 
+	g, nodeIDs := buildLeidenGraph(result, srcCol, dstCol, weightCol)
+
+	if hierarchical {
+		// Hierarchical mode: resolve γ schedule (needs graph for auto-discover).
+		// Check gammas incompatibility first (before building graph for auto-discover).
+		if _, hasGammas := params["gammas"]; hasGammas {
+			return nil, fmt.Errorf("leiden: hierarchical mode is incompatible with gammas sweep")
+		}
+		schedule, err := resolveHierarchicalSchedule(g, params, depth)
+		if err != nil {
+			return nil, err
+		}
+		return runHierarchical(g, schedule, seed, maxIter, depth, nodeIDs, includeAssignments)
+	}
+
+	// Non-hierarchical: resolve gammas for single/sweep mode.
 	gammas, sweep, err := resolveGammas(params)
 	if err != nil {
 		return nil, err
 	}
-
-	g, nodeIDs := buildLeidenGraph(result, srcCol, dstCol, weightCol)
 
 	if !sweep {
 		// Single-resolution mode: flat result shape (unchanged).
@@ -123,6 +155,109 @@ func (Leiden) Compute(ctx context.Context, result *router.Result, params map[str
 	}, nil
 }
 
+// runHierarchical runs Leiden iteratively on coarsened graphs to produce
+// a multi-level hierarchy. Each level is computed by running Leiden at γ
+// on the graph from the previous level, then coarsening the result.
+// schedule contains one γ per level (length ≤ depth).
+func runHierarchical(g *leiden.Graph, schedule []float64, seed int64, maxIter, depth int, nodeIDs []string, includeAssignments bool) (any, error) {
+	var levels []map[string]any
+	currentG := g
+	currentIDs := nodeIDs
+
+	for level := 0; level < depth; level++ {
+		// Check for early termination: if current graph has one node, stop.
+		if currentG.N <= 1 {
+			break
+		}
+
+		// Pick γ for this level: use schedule[level] if available, else pad with last value.
+		gamma := schedule[len(schedule)-1]
+		if level < len(schedule) {
+			gamma = schedule[level]
+		}
+
+		res := leiden.Run(currentG, gamma, seed, maxIter)
+		if res.NumComms == 1 {
+			// Single community — no further coarsening is meaningful.
+			break
+		}
+
+		part := map[string]any{
+			"gamma":           gamma,
+			"num_communities": res.NumComms,
+			"modularity":      res.Modularity,
+			"iterations":      res.Iterations,
+			"depth":           level + 1,
+		}
+
+		// Size histogram.
+		sizes := make([]int, res.NumComms)
+		for _, c := range res.Communities {
+			sizes[c]++
+		}
+		sort.Sort(sort.Reverse(sort.IntSlice(sizes)))
+		part["size_histogram"] = sizes
+
+		// Assignments (opt-in).
+		if includeAssignments {
+			assign := make(map[string]int, len(currentIDs))
+			for i, id := range currentIDs {
+				assign[id] = res.Communities[i]
+			}
+			part["assignments"] = assign
+		}
+
+		levels = append(levels, part)
+
+		// Coarsen for the next level.
+		nextG, mapping := leiden.Coarsen(currentG, res.Communities)
+		// Map current-level node IDs through the coarsening. members[0]
+		// indexes into currentG (not the original graph), so we look up
+		// currentIDs — using nodeIDs would be wrong on level > 0.
+		var nextIDs []string
+		for _, members := range mapping {
+			nextIDs = append(nextIDs, currentIDs[members[0]])
+		}
+
+		currentG = nextG
+		currentIDs = nextIDs
+	}
+
+	if len(levels) == 0 {
+		// No levels produced (graph had ≤1 node or all communities trivial).
+		// Fall back to a single-level result using the first γ in the schedule.
+		fallbackGamma := schedule[0]
+		res := leiden.Run(g, fallbackGamma, seed, maxIter)
+		sizes := make([]int, res.NumComms)
+		for _, c := range res.Communities {
+			sizes[c]++
+		}
+		sort.Sort(sort.Reverse(sort.IntSlice(sizes)))
+		part := map[string]any{
+			"gamma":           fallbackGamma,
+			"num_communities": res.NumComms,
+			"modularity":      res.Modularity,
+			"iterations":      res.Iterations,
+			"depth":           1,
+			"size_histogram":  sizes,
+		}
+		if includeAssignments {
+			assign := make(map[string]int, len(nodeIDs))
+			for i, id := range nodeIDs {
+				assign[id] = res.Communities[i]
+			}
+			part["assignments"] = assign
+		}
+		levels = append(levels, part)
+	}
+
+	return map[string]any{
+		"num_nodes": len(nodeIDs),
+		"depth":     len(levels),
+		"levels":    levels,
+	}, nil
+}
+
 // sweepConcurrency caps parallel γ workers to runtime.NumCPU() but never
 // allocates more slots than there are γs to run.
 func sweepConcurrency(n int) int {
@@ -167,6 +302,225 @@ func resolveGammas(params map[string]any) ([]float64, bool, error) {
 		return nil, false, err
 	}
 	return []float64{gamma}, false, nil
+}
+
+// resolveHierarchicalSchedule picks the γ schedule for hierarchical mode.
+// Three mutually exclusive options (priority order):
+// 1. gamma_schedule (explicit list, one γ per level)
+// 2. gamma (single value applied to all levels)
+// 3. auto-discover via resolution_plateau (no gamma params provided)
+// The returned slice has length ≤ depth; shorter slices are padded with
+// the last value at call site.
+func resolveHierarchicalSchedule(g *leiden.Graph, params map[string]any, depth int) ([]float64, error) {
+	// Priority 1: explicit gamma_schedule.
+	rawSchedule, hasSchedule := params["gamma_schedule"]
+	if hasSchedule {
+		schedule, err := toFloat64Slice(rawSchedule)
+		if err != nil {
+			return nil, fmt.Errorf("leiden: gamma_schedule: %w", err)
+		}
+		if len(schedule) == 0 {
+			return nil, fmt.Errorf("leiden: gamma_schedule must be non-empty")
+		}
+		for _, g := range schedule {
+			if err := validateGamma(g); err != nil {
+				return nil, fmt.Errorf("leiden: gamma_schedule: %w", err)
+			}
+		}
+		// Cap to depth.
+		if len(schedule) > depth {
+			schedule = schedule[:depth]
+		}
+		return schedule, nil
+	}
+
+	// Priority 2: single gamma.
+	_, hasGamma := params["gamma"]
+	if hasGamma {
+		gamma := float64Or(params, "gamma", 1.0)
+		if err := validateGamma(gamma); err != nil {
+			return nil, err
+		}
+		// Return a single-element schedule; the loop pads it.
+		return []float64{gamma}, nil
+	}
+
+	// Priority 3: auto-discover via resolution_plateau.
+	return autoDiscoverGammaSchedule(g, params, depth)
+}
+
+// autoDiscoverGammaSchedule runs a γ sweep and detects plateaus to pick
+// one representative γ per plateau as a level.
+func autoDiscoverGammaSchedule(g *leiden.Graph, params map[string]any, maxDepth int) ([]float64, error) {
+	// Defaults for the internal sweep.
+	gammaMin := float64Or(params, "gamma_min", 0.1)
+	gammaMax := float64Or(params, "gamma_max", 5.0)
+	gammaSteps := intOr(params, "gamma_steps", 21)
+	nmiThreshold := float64Or(params, "nmi_threshold", 0.95)
+
+	if gammaMax <= gammaMin {
+		return nil, fmt.Errorf("leiden: gamma_max (%v) must be > gamma_min (%v)", gammaMax, gammaMin)
+	}
+	if gammaSteps < 2 {
+		gammaSteps = 21
+	}
+
+	// Generate linearly spaced γ values.
+	gammas := make([]float64, gammaSteps)
+	step := (gammaMax - gammaMin) / float64(gammaSteps-1)
+	for i := 0; i < gammaSteps; i++ {
+		gammas[i] = gammaMin + float64(i)*step
+	}
+
+	// Run Leiden at each γ in parallel, bounded to NumCPU workers.
+	results := make([]gammaResult, gammaSteps)
+	sem := make(chan struct{}, sweepConcurrency(gammaSteps))
+	var wg sync.WaitGroup
+	for i, gv := range gammas {
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(idx int, gammaVal float64) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			res := leiden.Run(g, gammaVal, 0, 0)
+			results[idx] = gammaResult{gamma: gammaVal, communities: res.Communities}
+		}(i, gv)
+	}
+	wg.Wait()
+
+	// Detect plateaus via NMI between adjacent partitions.
+	plateaus := detectPlateaus(results, nmiThreshold)
+
+	// Pick one representative γ per plateau (midpoint of the γ range).
+	schedule := make([]float64, len(plateaus))
+	for i, p := range plateaus {
+		schedule[i] = (p.gammaMin + p.gammaMax) / 2
+	}
+
+	// Cap to maxDepth.
+	if len(schedule) > maxDepth {
+		schedule = schedule[:maxDepth]
+	}
+
+	return schedule, nil
+}
+
+// gammaResult holds Leiden output for a single γ during auto-discovery.
+type gammaResult struct {
+	gamma       float64
+	communities []int
+}
+
+// plateau represents a contiguous range of γ values with stable partitions.
+type plateau struct {
+	gammaMin float64
+	gammaMax float64
+}
+
+// detectPlateaus groups consecutive γ results whose adjacent NMI ≥ threshold.
+func detectPlateaus(results []gammaResult, threshold float64) []plateau {
+	if len(results) == 0 {
+		return nil
+	}
+
+	var plateaus []plateau
+	start := 0
+	for i := 1; i < len(results); i++ {
+		nmi := computeNMI(results[i-1].communities, results[i].communities)
+		if nmi < threshold {
+			// End of current plateau.
+			plateaus = append(plateaus, plateau{
+				gammaMin: results[start].gamma,
+				gammaMax: results[i-1].gamma,
+			})
+			start = i
+		}
+	}
+	// Last plateau.
+	plateaus = append(plateaus, plateau{
+		gammaMin: results[start].gamma,
+		gammaMax: results[len(results)-1].gamma,
+	})
+
+	return plateaus
+}
+
+// computeNMI computes symmetric, arithmetic-mean normalized mutual information
+// between two partitions. Clamped to [0,1].
+func computeNMI(a, b []int) float64 {
+	n := len(a)
+	if n == 0 {
+		return 1.0
+	}
+
+	// Build contingency table sized by the true number of distinct labels.
+	// Note: densify assigns labels in order of first appearance, so the
+	// last element is not necessarily the highest label.
+	clusterA, ka := densify(a)
+	clusterB, kb := densify(b)
+
+	contingency := make([][]int, ka)
+	for i := range contingency {
+		contingency[i] = make([]int, kb)
+	}
+	for i := 0; i < n; i++ {
+		contingency[clusterA[i]][clusterB[i]]++
+	}
+
+	// Row sums, column sums, total.
+	rowSum := make([]int, ka)
+	colSum := make([]int, kb)
+	total := 0
+	for i := 0; i < ka; i++ {
+		for j := 0; j < kb; j++ {
+			rowSum[i] += contingency[i][j]
+			colSum[j] += contingency[i][j]
+			total += contingency[i][j]
+		}
+	}
+
+	// H(A), H(B), MI(A,B).
+	hA := 0.0
+	for _, s := range rowSum {
+		if s > 0 {
+			p := float64(s) / float64(total)
+			hA -= p * math.Log2(p)
+		}
+	}
+	hB := 0.0
+	for _, s := range colSum {
+		if s > 0 {
+			p := float64(s) / float64(total)
+			hB -= p * math.Log2(p)
+		}
+	}
+
+	mi := 0.0
+	for i := 0; i < ka; i++ {
+		for j := 0; j < kb; j++ {
+			if contingency[i][j] > 0 {
+				p := float64(contingency[i][j]) / float64(total)
+				pA := float64(rowSum[i]) / float64(total)
+				pB := float64(colSum[j]) / float64(total)
+				mi += p * math.Log2(p/(pA*pB))
+			}
+		}
+	}
+
+	// Symmetric normalization: MI / ((H(A) + H(B)) / 2).
+	denom := (hA + hB) / 2.0
+	if denom == 0 {
+		// Both partitions are trivial (all nodes in one cluster).
+		return 1.0
+	}
+	nmi := mi / denom
+	if nmi < 0 {
+		nmi = 0
+	}
+	if nmi > 1 {
+		nmi = 1
+	}
+	return nmi
 }
 
 // validateGamma rejects negative, NaN, and ±Inf γ values. NaN in particular
@@ -337,4 +691,23 @@ func floatOf(v any) float64 {
 		return float64(x)
 	}
 	return 0
+}
+
+// densify rewrites a partition so labels are 0..k-1 in order of first
+// appearance. Returns the remapped slice and k. Stable for deterministic
+// output.
+func densify(p []int) ([]int, int) {
+	remap := map[int]int{}
+	out := make([]int, len(p))
+	next := 0
+	for i, c := range p {
+		nc, ok := remap[c]
+		if !ok {
+			nc = next
+			next++
+			remap[c] = nc
+		}
+		out[i] = nc
+	}
+	return out, next
 }
