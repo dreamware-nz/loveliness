@@ -58,7 +58,7 @@ Content-Type: application/json
 
 ```
 GET /analytics
-→ { "plugins": ["count_by_label", "connected_components", "leiden", "resolution_plateau"] }
+→ { "plugins": ["connected_components", "count_by_label", "leiden", "resolution_plateau"] }
 ```
 
 Plugin set is frozen at boot. Names returned here are the names you pass
@@ -102,7 +102,7 @@ community structure. Two modes: single γ (one partition) or γ sweep
 | `weight`              | string   | —       | Edge-weight column. Absent → every edge weighs 1.0                  |
 | `gamma`               | float    | `1.0`   | Resolution. >1 → finer (more, smaller communities); <1 → coarser   |
 | `seed`                | int64    | `0`     | RNG seed. Same seed + same graph + same γ → same partition         |
-| `max_iter`            | int      | `32`    | Outer-iteration cap                                                 |
+| `max_iter`            | int      | `32`    | Outer-iteration cap. `0` (or omitted) means "use the default of 32" |
 | `include_assignments` | bool     | `false` | If true, response carries per-node `id → community` map             |
 
 NaN, ±Inf, and negative γ are rejected with HTTP 200 + an entry in
@@ -234,7 +234,7 @@ NMI ≥ threshold into plateaus, and returns the plateau list.
 | `gamma_steps`         | int      | `21`    | Linear-spaced points across `[gamma_min, gamma_max]`. Must be ≥ 2     |
 | `nmi_threshold`       | float    | `0.95`  | Adjacent partitions with NMI ≥ this are part of the same plateau      |
 | `seed`                | int64    | `0`     | RNG seed (per γ)                                                      |
-| `max_iter`            | int      | `32`    | Outer-iteration cap (per γ)                                           |
+| `max_iter`            | int      | `32`    | Outer-iteration cap (per γ). `0` (or omitted) means "use the default of 32" |
 | `include_partitions`  | bool     | `false` | Surface every per-γ partition summary (default hidden)                |
 | `include_assignments` | bool     | `false` | Attach `representative_partition` (id→community) to every plateau     |
 
