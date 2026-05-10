@@ -371,7 +371,6 @@ func TestLeiden_Hierarchical_GammaScheduleShort(t *testing.T) {
 // triggers auto-discover (produces ≥1 level). Uses minimal steps to
 // avoid slow parallel Leiden sweeps in tests.
 func TestLeiden_Hierarchical_AutoDiscover(t *testing.T) {
-	t.Skip("auto-discover runs a parallel γ sweep that's slow for small graphs in CI")
 	rows := []map[string]any{
 		{"src": "a", "dst": "b"}, {"src": "b", "dst": "c"}, {"src": "c", "dst": "a"},
 		{"src": "d", "dst": "e"}, {"src": "e", "dst": "f"}, {"src": "f", "dst": "d"},

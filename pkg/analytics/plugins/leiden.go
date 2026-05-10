@@ -211,13 +211,12 @@ func runHierarchical(g *leiden.Graph, schedule []float64, seed int64, maxIter, d
 
 		// Coarsen for the next level.
 		nextG, mapping := leiden.Coarsen(currentG, res.Communities)
-		// Map original node IDs through the coarsening.
+		// Map current-level node IDs through the coarsening. members[0]
+		// indexes into currentG (not the original graph), so we look up
+		// currentIDs — using nodeIDs would be wrong on level > 0.
 		var nextIDs []string
 		for _, members := range mapping {
-			// Use the first member's ID as the super-node ID label.
-			// For hierarchical mode, we keep the full mapping via the
-			// assignments above; the IDs here are just for bookkeeping.
-			nextIDs = append(nextIDs, nodeIDs[members[0]])
+			nextIDs = append(nextIDs, currentIDs[members[0]])
 		}
 
 		currentG = nextG
@@ -373,11 +372,12 @@ func autoDiscoverGammaSchedule(g *leiden.Graph, params map[string]any, maxDepth 
 		gammas[i] = gammaMin + float64(i)*step
 	}
 
-	// Run Leiden at each γ sequentially (bounded to NumCPU workers).
+	// Run Leiden at each γ in parallel, bounded to NumCPU workers.
 	results := make([]gammaResult, gammaSteps)
 	sem := make(chan struct{}, sweepConcurrency(gammaSteps))
 	var wg sync.WaitGroup
 	for i, gv := range gammas {
+		sem <- struct{}{}
 		wg.Add(1)
 		go func(idx int, gammaVal float64) {
 			defer wg.Done()
@@ -453,11 +453,11 @@ func computeNMI(a, b []int) float64 {
 		return 1.0
 	}
 
-	// Build contingency table.
-	clusterA := densify(a)
-	clusterB := densify(b)
-	ka := clusterA[len(clusterA)-1] + 1
-	kb := clusterB[len(clusterB)-1] + 1
+	// Build contingency table sized by the true number of distinct labels.
+	// Note: densify assigns labels in order of first appearance, so the
+	// last element is not necessarily the highest label.
+	clusterA, ka := densify(a)
+	clusterB, kb := densify(b)
 
 	contingency := make([][]int, ka)
 	for i := range contingency {
@@ -694,8 +694,9 @@ func floatOf(v any) float64 {
 }
 
 // densify rewrites a partition so labels are 0..k-1 in order of first
-// appearance. Stable for deterministic output.
-func densify(p []int) []int {
+// appearance. Returns the remapped slice and k. Stable for deterministic
+// output.
+func densify(p []int) ([]int, int) {
 	remap := map[int]int{}
 	out := make([]int, len(p))
 	next := 0
@@ -708,5 +709,5 @@ func densify(p []int) []int {
 		}
 		out[i] = nc
 	}
-	return out
+	return out, next
 }
