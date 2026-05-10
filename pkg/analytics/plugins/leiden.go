@@ -162,7 +162,7 @@ func (Leiden) Compute(ctx context.Context, result *router.Result, params map[str
 func runHierarchical(g *leiden.Graph, schedule []float64, seed int64, maxIter, depth int, nodeIDs []string, includeAssignments bool) (any, error) {
 	var levels []map[string]any
 	currentG := g
-	var currentIDs []string = nodeIDs
+	currentIDs := nodeIDs
 
 	for level := 0; level < depth; level++ {
 		// Check for early termination: if current graph has one node, stop.
