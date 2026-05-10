@@ -9,6 +9,11 @@ All endpoints are on the HTTP port (default `:8080`).
 
 `POST /cypher` — send raw Cypher as the request body, get JSON results back.
 
+For Cypher + post-execution analytics (community detection, plateau
+discovery, etc.) in a single round-trip, see
+[Analytics Plugins](analytics.md) — `POST /db/{name}/query` is a
+strict superset of `/db/{name}/cypher`.
+
 ## Schema
 
 LadybugDB requires schema before inserting data. The `PRIMARY KEY` becomes the **shard key**.
