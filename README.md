@@ -329,6 +329,9 @@ Without these vars, all listeners run plaintext (dev default). Details: [docs/co
 | [Fly.io Deploy](deploy/fly/) | One-command cloud deployment with DNS auto-discovery |
 | [Kubernetes](docs/kubernetes.md) | StatefulSet deployment, scaling, backup to S3 |
 | [Project Structure](docs/project-structure.md) | Package layout and file descriptions |
+| [Arrow Type Mapping](docs/arrow-mapping.md) | Cypher → Arrow IPC type mapping reference |
+| [Disaster Recovery](docs/disaster-recovery.md) | Backup, restore, manifest integrity, S3 |
+| [Metrics](docs/metrics.md) | Prometheus metrics catalogue and label budget |
 | [Contributing](CONTRIBUTING.md) | Development setup, PR guidelines |
 
 ## License
