@@ -182,6 +182,102 @@ saturate the host. ctx cancellation is honored between γs; an in-flight
 order you supplied `gammas`. Add `include_assignments: true` to attach
 the id→community map to every entry.
 
+### Hierarchical mode
+
+Pass `hierarchical: true` to run Leiden iteratively on coarsened graphs,
+producing a multi-level hierarchy of communities:
+
+```json
+{
+  "cypher": "MATCH (a)-[:KNOWS]->(b) RETURN a.name AS src, b.name AS dst",
+  "analytics": [
+    {
+      "name": "leiden",
+      "params": {
+        "hierarchical": true,
+        "gamma": 1.0,
+        "depth": 3,
+        "seed": 7,
+        "include_assignments": true
+      }
+    }
+  ]
+}
+```
+
+**Params:**
+
+| Name                  | Type    | Default | Notes                                                         |
+|-----------------------|---------|---------|---------------------------------------------------------------|
+| `src`                 | string  | `"src"` | Source-id column name                                         |
+| `dst`                 | string  | `"dst"` | Destination-id column name                                    |
+| `weight`              | string  | —       | Edge-weight column. Absent → every edge weighs 1.0            |
+| `gamma`               | float   | `1.0`   | Resolution applied to all levels                              |
+| `hierarchical`        | bool    | `false` | Enable hierarchical mode                                      |
+| `depth`               | int     | `3`     | Max levels to recurse. Stops early if a level has 1 community |
+| `seed`                | int64   | `0`     | RNG seed (shared across all levels)                          |
+| `max_iter`            | int     | `32`    | Outer-iteration cap (per level). `0` → default of 32         |
+| `include_assignments` | bool    | `false` | Per-node `id → community` on every level                      |
+
+`hierarchical` is incompatible with `gammas` sweep (they are mutually
+exclusive). `gamma` and `seed` apply to every level.
+
+**Response:**
+
+```json
+{
+  "num_nodes": 8,
+  "depth": 3,
+  "levels": [
+    {
+      "gamma": 1.0,
+      "num_communities": 2,
+      "modularity": 0.41,
+      "iterations": 3,
+      "depth": 1,
+      "size_histogram": [4, 4],
+      "assignments": {
+        "Alice": 0, "Bob": 0, "Carol": 0, "Dave": 0,
+        "Erin": 1, "Frank": 1, "Greta": 1, "Heidi": 1
+      }
+    },
+    {
+      "gamma": 1.0,
+      "num_communities": 5,
+      "modularity": 0.52,
+      "iterations": 4,
+      "depth": 2,
+      "size_histogram": [3, 2, 1, 1, 1],
+      "assignments": {
+        "Alice": 0, "Bob": 0, "Carol": 1, "Dave": 0,
+        "Erin": 2, "Frank": 3, "Greta": 4, "Heidi": 3
+      }
+    },
+    {
+      "gamma": 1.0,
+      "num_communities": 8,
+      "modularity": 0.0,
+      "iterations": 1,
+      "depth": 3,
+      "size_histogram": [1, 1, 1, 1, 1, 1, 1, 1],
+      "assignments": {
+        "Alice": 0, "Bob": 1, "Carol": 2, "Dave": 3,
+        "Erin": 4, "Frank": 5, "Greta": 6, "Heidi": 7
+      }
+    ]
+  ]
+}
+```
+
+Each level is a coarsened version of the previous: communities from level
+N become super-nodes at level N+1, and Leiden runs on the aggregated
+graph. The hierarchy captures multi-scale community structure — coarse
+clusters at top levels, finer subdivisions deeper down.
+
+If a level collapses to one community, the recursion stops early and
+only completed levels are returned. If no levels are produced (empty or
+single-node graph), a single fallback level is added.
+
 ---
 
 ## `resolution_plateau` — auto-discover stable resolutions

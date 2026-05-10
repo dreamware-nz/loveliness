@@ -23,6 +23,11 @@ import (
 //	    plugin runs Leiden once per γ in parallel (one goroutine each, all
 //	    sharing the same input graph) and returns "partitions": [...] in
 //	    the same order. Mutually exclusive with `gamma`.
+//	hierarchical (bool, default false)
+//	    — if true, runs Leiden iteratively on coarsened graphs to produce
+//	      a multi-level hierarchy. Returns a "levels": [...] array instead
+//	      of the flat result. Each level has its own gamma, modularity,
+//	      size_histogram, and (if include_assignments) assignments.
 //
 // Other params:
 //
@@ -35,6 +40,8 @@ import (
 //	    — if true, every partition's result includes "assignments":
 //	      map[id]community. Off by default because for large graphs this
 //	      dominates the response payload; clients that want it must opt in.
+//	depth  (int, default 3)            — for hierarchical mode: how many
+//	    levels to recurse. Stops early if a level has only one community.
 type Leiden struct{}
 
 func (Leiden) Name() string { return "leiden" }
@@ -50,6 +57,8 @@ func (Leiden) Compute(ctx context.Context, result *router.Result, params map[str
 	seed := int64Or(params, "seed", 0)
 	maxIter := intOr(params, "max_iter", 0)
 	includeAssignments, _ := params["include_assignments"].(bool)
+	hierarchical, _ := params["hierarchical"].(bool)
+	depth := intOr(params, "depth", 3)
 
 	if !columnExists(result.Columns, srcCol) {
 		return nil, fmt.Errorf("leiden: src column %q not in result", srcCol)
@@ -67,6 +76,15 @@ func (Leiden) Compute(ctx context.Context, result *router.Result, params map[str
 	}
 
 	g, nodeIDs := buildLeidenGraph(result, srcCol, dstCol, weightCol)
+
+	if hierarchical {
+		// Hierarchical mode: the gamma param applies to all levels.
+		if sweep {
+			return nil, fmt.Errorf("leiden: hierarchical mode is incompatible with gammas sweep")
+		}
+		gamma := gammas[0]
+		return runHierarchical(g, gamma, seed, maxIter, depth, nodeIDs, includeAssignments)
+	}
 
 	if !sweep {
 		// Single-resolution mode: flat result shape (unchanged).
@@ -120,6 +138,102 @@ func (Leiden) Compute(ctx context.Context, result *router.Result, params map[str
 	return map[string]any{
 		"num_nodes":  len(nodeIDs),
 		"partitions": partitions,
+	}, nil
+}
+
+// runHierarchical runs Leiden iteratively on coarsened graphs to produce
+// a multi-level hierarchy. Each level is computed by running Leiden at γ
+// on the graph from the previous level, then coarsening the result.
+func runHierarchical(g *leiden.Graph, gamma float64, seed int64, maxIter, depth int, nodeIDs []string, includeAssignments bool) (any, error) {
+	var levels []map[string]any
+	currentG := g
+	var currentIDs []string = nodeIDs
+
+	for level := 0; level < depth; level++ {
+		// Check for early termination: if current graph has one node, stop.
+		if currentG.N <= 1 {
+			break
+		}
+
+		res := leiden.Run(currentG, gamma, seed, maxIter)
+		if res.NumComms == 1 {
+			// Single community — no further coarsening is meaningful.
+			break
+		}
+
+		part := map[string]any{
+			"gamma":           gamma,
+			"num_communities": res.NumComms,
+			"modularity":      res.Modularity,
+			"iterations":      res.Iterations,
+			"depth":           level + 1,
+		}
+
+		// Size histogram.
+		sizes := make([]int, res.NumComms)
+		for _, c := range res.Communities {
+			sizes[c]++
+		}
+		sort.Sort(sort.Reverse(sort.IntSlice(sizes)))
+		part["size_histogram"] = sizes
+
+		// Assignments (opt-in).
+		if includeAssignments {
+			assign := make(map[string]int, len(currentIDs))
+			for i, id := range currentIDs {
+				assign[id] = res.Communities[i]
+			}
+			part["assignments"] = assign
+		}
+
+		levels = append(levels, part)
+
+		// Coarsen for the next level.
+		nextG, mapping := leiden.Coarsen(currentG, res.Communities)
+		// Map original node IDs through the coarsening.
+		var nextIDs []string
+		for _, members := range mapping {
+			// Use the first member's ID as the super-node ID label.
+			// For hierarchical mode, we keep the full mapping via the
+			// assignments above; the IDs here are just for bookkeeping.
+			nextIDs = append(nextIDs, nodeIDs[members[0]])
+		}
+
+		currentG = nextG
+		currentIDs = nextIDs
+	}
+
+	if len(levels) == 0 {
+		// No levels produced (graph had ≤1 node or all communities trivial).
+		// Fall back to a single-level result.
+		res := leiden.Run(g, gamma, seed, maxIter)
+		sizes := make([]int, res.NumComms)
+		for _, c := range res.Communities {
+			sizes[c]++
+		}
+		sort.Sort(sort.Reverse(sort.IntSlice(sizes)))
+		part := map[string]any{
+			"gamma":           gamma,
+			"num_communities": res.NumComms,
+			"modularity":      res.Modularity,
+			"iterations":      res.Iterations,
+			"depth":           1,
+			"size_histogram":  sizes,
+		}
+		if includeAssignments {
+			assign := make(map[string]int, len(nodeIDs))
+			for i, id := range nodeIDs {
+				assign[id] = res.Communities[i]
+			}
+			part["assignments"] = assign
+		}
+		levels = append(levels, part)
+	}
+
+	return map[string]any{
+		"num_nodes": len(nodeIDs),
+		"depth":     len(levels),
+		"levels":    levels,
 	}, nil
 }
 

@@ -250,3 +250,116 @@ func TestModularity_TwoDisjointTriangles(t *testing.T) {
 		t.Errorf("expected Q=0.5, got %v", q)
 	}
 }
+
+// TestCoarsen_TwoDisjointTriangles: two disjoint triangles should
+// coarsen into two super-nodes with one self-loop each and no cross edge.
+func TestCoarsen_TwoDisjointTriangles(t *testing.T) {
+	g := NewGraph(6)
+	addUndirectedEdges(g, [][2]int{{0, 1}, {1, 2}, {2, 0}, {3, 4}, {4, 5}, {5, 3}})
+	comm := []int{0, 0, 0, 1, 1, 1}
+	agg, mapping := Coarsen(g, comm)
+	if agg.N != 2 {
+		t.Fatalf("expected 2 super-nodes, got %d", agg.N)
+	}
+	if len(mapping) != 2 {
+		t.Fatalf("expected 2 mapping entries, got %d", len(mapping))
+	}
+	if len(mapping[0]) != 3 || len(mapping[1]) != 3 {
+		t.Errorf("expected 3 nodes per community, got %v", mapping)
+	}
+	// Each super-node should have one self-loop (weight 6 = 2 × 3 edges × 1.0).
+	for i := 0; i < 2; i++ {
+		if len(agg.Adj[i]) != 1 || agg.Adj[i][0].To != i {
+			t.Errorf("super-node %d: expected self-loop, got Adj=%v", i, agg.Adj[i])
+		}
+	}
+	if math.Abs(agg.TotalWeight-g.TotalWeight) > 1e-9 {
+		t.Errorf("TotalWeight changed: %v → %v", g.TotalWeight, agg.TotalWeight)
+	}
+}
+
+// TestCoarsen_BridgeBetweenCliques: two cliques connected by a bridge
+// edge should coarsen into two super-nodes with one cross edge between them.
+func TestCoarsen_BridgeBetweenCliques(t *testing.T) {
+	g := NewGraph(6)
+	addUndirectedEdges(g, [][2]int{{0, 1}, {1, 2}, {2, 0}, {3, 4}, {4, 5}, {5, 3}, {2, 3}})
+	comm := []int{0, 0, 0, 1, 1, 1}
+	agg, _ := Coarsen(g, comm)
+	if agg.N != 2 {
+		t.Fatalf("expected 2 super-nodes, got %d", agg.N)
+	}
+	// Each super-node should have a self-loop (weight 6) and one cross-edge (weight 1).
+	for i := 0; i < 2; i++ {
+		opp := 1 - i
+		foundSelf := false
+		foundCross := false
+		for _, e := range agg.Adj[i] {
+			if e.To == i {
+				foundSelf = true
+			}
+			if e.To == opp {
+				foundCross = true
+			}
+		}
+		if !foundSelf {
+			t.Errorf("super-node %d: expected self-loop, got Adj=%v", i, agg.Adj[i])
+		}
+		if !foundCross {
+			t.Errorf("super-node %d: expected cross-edge to %d, got Adj=%v", i, opp, agg.Adj[i])
+		}
+	}
+	if math.Abs(agg.TotalWeight-g.TotalWeight) > 1e-9 {
+		t.Errorf("TotalWeight changed: %v → %v", g.TotalWeight, agg.TotalWeight)
+	}
+}
+
+// TestCoarsen_EmptyGraph: zero nodes should produce zero super-nodes.
+func TestCoarsen_EmptyGraph(t *testing.T) {
+	g := NewGraph(0)
+	comm := []int{}
+	agg, mapping := Coarsen(g, comm)
+	if agg.N != 0 {
+		t.Errorf("expected 0 super-nodes, got %d", agg.N)
+	}
+	if len(mapping) != 0 {
+		t.Errorf("expected empty mapping, got %v", mapping)
+	}
+}
+
+// TestCoarsen_SingleCommunity: all nodes in one community should
+// produce one super-node with a self-loop.
+func TestCoarsen_SingleCommunity(t *testing.T) {
+	g := NewGraph(4)
+	addUndirectedEdges(g, [][2]int{{0, 1}, {1, 2}, {2, 3}, {3, 0}})
+	comm := []int{0, 0, 0, 0}
+	agg, mapping := Coarsen(g, comm)
+	if agg.N != 1 {
+		t.Fatalf("expected 1 super-node, got %d", agg.N)
+	}
+	if len(mapping) != 1 || len(mapping[0]) != 4 {
+		t.Errorf("expected 4 nodes in the single community, got %v", mapping)
+	}
+	if math.Abs(agg.TotalWeight-g.TotalWeight) > 1e-9 {
+		t.Errorf("TotalWeight changed: %v → %v", g.TotalWeight, agg.TotalWeight)
+	}
+}
+
+// TestCoarsen_DisconnectedGraph: a disconnected graph should coarsen
+// correctly — each connected component is processed independently.
+func TestCoarsen_DisconnectedGraph(t *testing.T) {
+	g := NewGraph(4)
+	addUndirectedEdges(g, [][2]int{{0, 1}, {2, 3}})
+	// Each node is its own community (identity partition).
+	comm := []int{0, 1, 2, 3}
+	agg, mapping := Coarsen(g, comm)
+	if agg.N != 4 {
+		t.Fatalf("expected 4 super-nodes (one per node), got %d", agg.N)
+	}
+	if len(mapping) != 4 {
+		t.Fatalf("expected 4 mapping entries, got %d", len(mapping))
+	}
+	// TotalWeight must be preserved.
+	if math.Abs(agg.TotalWeight-g.TotalWeight) > 1e-9 {
+		t.Errorf("TotalWeight changed: %v → %v", g.TotalWeight, agg.TotalWeight)
+	}
+}

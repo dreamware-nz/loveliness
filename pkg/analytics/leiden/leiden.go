@@ -50,6 +50,86 @@ type Graph struct {
 	TotalWeight float64   // sum over nodes of NodeWeight[i]
 }
 
+// Coarsen collapses each community in `comm` into a single super-node,
+// returning a new graph where nodes are communities and edges are the
+// sum of cross-community edges from the original graph.
+//
+// Self-loops (intra-community edges) are aggregated into the super-node's
+// self-loop weight. Cross-community edges become edges between the
+// corresponding super-nodes.
+//
+// The returned mapping maps each super-node index to the list of original
+// node indices it represents.
+func Coarsen(g *Graph, comm []int) (*Graph, [][]int) {
+	// Gather members of each community in deterministic order.
+	type pair struct{ label, node int }
+	pairs := make([]pair, 0, g.N)
+	for u, c := range comm {
+		pairs = append(pairs, pair{c, u})
+	}
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i].label != pairs[j].label {
+			return pairs[i].label < pairs[j].label
+		}
+		return pairs[i].node < pairs[j].node
+	})
+
+	labelToNew := map[int]int{}
+	mapping := [][]int{}
+	for _, p := range pairs {
+		idx, ok := labelToNew[p.label]
+		if !ok {
+			idx = len(mapping)
+			labelToNew[p.label] = idx
+			mapping = append(mapping, nil)
+		}
+		mapping[idx] = append(mapping[idx], p.node)
+	}
+
+	newG := NewGraph(len(mapping))
+
+	type key struct{ a, b int }
+	cross := map[key]float64{} // canonical a<=b: sum of original cross edge weights, each counted ONCE
+	self := map[int]float64{}  // super-node a: aggregated self-loop weight
+
+	for u := 0; u < g.N; u++ {
+		nu := labelToNew[comm[u]]
+		for _, e := range g.Adj[u] {
+			nv := labelToNew[comm[e.To]]
+			if e.To == u {
+				// Original self-loop: appears once in Adj[u].
+				self[nu] += e.Weight
+				continue
+			}
+			if nu == nv {
+				// Within-community non-self edge u-v (u≠v). Both
+				// directions contribute; sum = 2w, which is the
+				// self-loop weight needed to preserve 2m.
+				self[nu] += e.Weight
+				continue
+			}
+			// Cross-community non-self edge. Both directions; halve
+			// at the end for canonical single-counting.
+			a, b := nu, nv
+			if a > b {
+				a, b = b, a
+			}
+			cross[key{a, b}] += e.Weight
+		}
+	}
+
+	for k, w := range cross {
+		newG.AddEdge(k.a, k.b, w/2)
+	}
+	for a, w := range self {
+		if w > 0 {
+			newG.AddEdge(a, a, w)
+		}
+	}
+
+	return newG, mapping
+}
+
 // NewGraph allocates an empty graph with n nodes.
 func NewGraph(n int) *Graph {
 	return &Graph{
