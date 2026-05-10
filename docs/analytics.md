@@ -219,8 +219,18 @@ producing a multi-level hierarchy of communities:
 | `max_iter`            | int     | `32`    | Outer-iteration cap (per level). `0` → default of 32         |
 | `include_assignments` | bool    | `false` | Per-node `id → community` on every level                      |
 
+**γ schedule (three mutually exclusive options):**
+
+| Param               | Type      | Default | Notes                                                         |
+|---------------------|-----------|---------|---------------------------------------------------------------|
+| `gamma_schedule`    | []float   | —       | Explicit γ per level (coarse→fine). Capped to `depth`        |
+| `gamma`             | float     | `1.0`   | Single γ applied to all levels                                |
+| (none)              | —         | —       | Auto-discover: runs plateau detection, picks one γ per plateau |
+
+`gamma_schedule` and `gamma` are mutually exclusive. If neither is set, the plugin auto-discovers γ values via internal plateau detection.
+
 `hierarchical` is incompatible with `gammas` sweep (they are mutually
-exclusive). `gamma` and `seed` apply to every level.
+exclusive). `seed` applies to all levels.
 
 **Response:**
 

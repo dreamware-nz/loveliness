@@ -5,11 +5,15 @@ The current `leiden` plugin returns only a flat partition — one community assi
 ## What Changes
 
 - Add a `hierarchical` mode to the `leiden` plugin that produces nested community structure
-- The plugin runs Leiden iteratively: after each run, aggregates nodes in the same community into super-nodes, and re-runs at a finer γ on the aggregated graph
-- Returns a tree of communities where each level has its own modularity, size histogram, and assignments
-- Exposes a `depth` param (default 3) to control how many levels to recurse
+- The plugin runs Leiden iteratively: after each run, aggregates nodes in the same community into super-nodes, and re-runs at the next γ on the aggregated graph
+- Returns a flat `levels` array where each level has its own γ, modularity, size histogram, and (optionally) assignments
+- γ schedule is controlled via three mutually exclusive options:
+  - `gamma_schedule`: explicit list of γ values, one per level (coarse → fine)
+  - `gamma`: single value applied to all levels (backward-compatible)
+  - auto-discover: when neither is provided, run `resolution_plateau` to find stable γ ranges and pick one representative per level
+- Exposes a `depth` param (default 3) to control max levels when using auto-discover or `gamma`
 - Each level's assignments map node IDs to community indices at that level
-- Top-level partition uses the current single-gamma or sweep path (unchanged)
+- Early termination if a level collapses to one community
 
 ## Capabilities
 

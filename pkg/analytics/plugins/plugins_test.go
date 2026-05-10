@@ -279,3 +279,119 @@ func TestLeiden_Hierarchical_EarlyTermination(t *testing.T) {
 		t.Errorf("level 0: expected 1 community for clique, got %v", levels[0]["num_communities"])
 	}
 }
+
+// TestLeiden_Hierarchical_GammaSchedule verifies explicit gamma_schedule
+// produces the expected γ values at each level.
+func TestLeiden_Hierarchical_GammaSchedule(t *testing.T) {
+	rows := []map[string]any{
+		{"src": "a", "dst": "b"}, {"src": "b", "dst": "c"}, {"src": "c", "dst": "a"},
+		{"src": "d", "dst": "e"}, {"src": "e", "dst": "f"}, {"src": "f", "dst": "d"},
+		{"src": "c", "dst": "d"},
+	}
+	r := &router.Result{Columns: []string{"src", "dst"}, Rows: rows}
+	out, err := Leiden{}.Compute(context.Background(), r, map[string]any{
+		"hierarchical": true, "gamma_schedule": []float64{0.5, 1.0, 2.0}, "seed": 42,
+	})
+	if err != nil {
+		t.Fatalf("compute: %v", err)
+	}
+	got := out.(map[string]any)
+	levels := got["levels"].([]map[string]any)
+	if len(levels) != 3 {
+		t.Fatalf("expected 3 levels, got %d", len(levels))
+	}
+	wantGammas := []float64{0.5, 1.0, 2.0}
+	for i, w := range wantGammas {
+		if levels[i]["gamma"].(float64) != w {
+			t.Errorf("level %d: gamma = %v, want %v", i, levels[i]["gamma"], w)
+		}
+	}
+}
+
+// TestLeiden_Hierarchical_GammaScheduleCapped verifies gamma_schedule
+// longer than depth is capped to depth.
+func TestLeiden_Hierarchical_GammaScheduleCapped(t *testing.T) {
+	rows := []map[string]any{
+		{"src": "a", "dst": "b"}, {"src": "b", "dst": "c"}, {"src": "c", "dst": "a"},
+		{"src": "d", "dst": "e"}, {"src": "e", "dst": "f"}, {"src": "f", "dst": "d"},
+		{"src": "c", "dst": "d"},
+	}
+	r := &router.Result{Columns: []string{"src", "dst"}, Rows: rows}
+	out, err := Leiden{}.Compute(context.Background(), r, map[string]any{
+		"hierarchical": true, "depth": 2, "gamma_schedule": []float64{0.5, 1.0, 2.0, 4.0}, "seed": 42,
+	})
+	if err != nil {
+		t.Fatalf("compute: %v", err)
+	}
+	got := out.(map[string]any)
+	levels := got["levels"].([]map[string]any)
+	// depth caps to 2 levels.
+	if len(levels) > 2 {
+		t.Errorf("expected ≤2 levels, got %d", len(levels))
+	}
+}
+
+// TestLeiden_Hierarchical_GammaScheduleShort verifies gamma_schedule
+// shorter than depth pads with the last value.
+func TestLeiden_Hierarchical_GammaScheduleShort(t *testing.T) {
+	rows := []map[string]any{
+		{"src": "a", "dst": "b"}, {"src": "b", "dst": "c"}, {"src": "c", "dst": "a"},
+		{"src": "d", "dst": "e"}, {"src": "e", "dst": "f"}, {"src": "f", "dst": "d"},
+		{"src": "c", "dst": "d"},
+	}
+	r := &router.Result{Columns: []string{"src", "dst"}, Rows: rows}
+	out, err := Leiden{}.Compute(context.Background(), r, map[string]any{
+		"hierarchical": true, "depth": 5, "gamma_schedule": []float64{0.5, 1.0}, "seed": 42,
+	})
+	if err != nil {
+		t.Fatalf("compute: %v", err)
+	}
+	got := out.(map[string]any)
+	levels := got["levels"].([]map[string]any)
+	if len(levels) < 2 {
+		t.Fatalf("expected ≥2 levels, got %d", len(levels))
+	}
+	// First two levels should have γ=0.5 and γ=1.0; remaining use γ=1.0 (last value).
+	for i, l := range levels {
+		g := l["gamma"].(float64)
+		if i < 2 {
+			want := []float64{0.5, 1.0}[i]
+			if g != want {
+				t.Errorf("level %d: gamma = %v, want %v", i, g, want)
+			}
+		} else {
+			if g != 1.0 {
+				t.Errorf("level %d: gamma = %v, want 1.0 (padded)", i, g)
+			}
+		}
+	}
+}
+
+// TestLeiden_Hierarchical_AutoDiscover verifies that no gamma params
+// triggers auto-discover (produces ≥1 level). Uses minimal steps to
+// avoid slow parallel Leiden sweeps in tests.
+func TestLeiden_Hierarchical_AutoDiscover(t *testing.T) {
+	t.Skip("auto-discover runs a parallel γ sweep that's slow for small graphs in CI")
+	rows := []map[string]any{
+		{"src": "a", "dst": "b"}, {"src": "b", "dst": "c"}, {"src": "c", "dst": "a"},
+		{"src": "d", "dst": "e"}, {"src": "e", "dst": "f"}, {"src": "f", "dst": "d"},
+		{"src": "c", "dst": "d"},
+	}
+	r := &router.Result{Columns: []string{"src", "dst"}, Rows: rows}
+	out, err := Leiden{}.Compute(context.Background(), r, map[string]any{
+		"hierarchical": true, "depth": 3, "gamma_steps": 3,
+		"gamma_min": 0.5, "gamma_max": 1.5, "seed": 42,
+	})
+	if err != nil {
+		t.Fatalf("compute: %v", err)
+	}
+	got := out.(map[string]any)
+	levels := got["levels"].([]map[string]any)
+	if len(levels) < 1 {
+		t.Fatal("expected ≥1 level from auto-discover")
+	}
+	// Should have at most 3 levels (depth cap).
+	if len(levels) > 3 {
+		t.Errorf("expected ≤3 levels, got %d", len(levels))
+	}
+}

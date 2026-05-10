@@ -29,10 +29,14 @@ Use a configurable `depth` param rather than auto-stopping when a level has only
 
 **Rationale:** Simple, predictable API. Adaptive stopping can be added later if needed.
 
-### 3. γ schedule: use the same γ at each level
-The same γ value applies to all levels. Finer γ values could be specified per-level but that complicates the API. A future enhancement could add a `gamma_schedule` param.
+### 3. γ schedule: explicit `gamma_schedule` + auto-discover fallback
+The plugin accepts either:
+- **`gamma_schedule`** (explicit): a list of γ values, one per level, in ascending resolution order (coarse → fine). E.g., `[0.5, 1.0, 2.0]` produces 3 levels at those γs.
+- **Auto-discover (default)**: when neither `gamma` nor `gamma_schedule` is provided, the plugin runs `resolution_plateau` internally to find stable γ ranges and picks one representative γ per level from those plateaus.
 
-**Rationale:** Keeps the API simple. The depth param already lets users control granularity — deeper = more levels = effectively finer resolution.
+If `gamma` is provided alone (single value), it applies to all levels (backward-compatible with the current behavior).
+
+**Rationale:** Option C gives users full control (`gamma_schedule`) while keeping the simple case (`depth: 3` alone) working via auto-discover. The `gamma`-alone path preserves backward compatibility with the existing API.
 
 ### 4. Response shape: flat `levels` array with per-level assignments
 Each level contains: the γ used, modularity, number of communities, size histogram, and (if `include_assignments` is true) a map of node ID → community index.
