@@ -253,3 +253,26 @@ Loveliness passes all Cypher through to LadybugDB — the router only classifies
 | **Writes** | `CREATE`, `MERGE`, `SET`, `DELETE`, `DETACH DELETE`, `REMOVE` | Shard key required; routes to owning shard |
 | **Schema DDL** | `CREATE NODE TABLE`, `CREATE REL TABLE`, `DROP TABLE`, `ALTER` | Broadcast to all shards |
 | **Bulk** | `COPY FROM` | Via `/bulk/nodes` or `/bulk/edges` endpoints |
+
+## Cross-node transport gaps
+
+The current TCP+msgpack transport is "good loopback" but has ten known gaps before it's a production-grade cross-node transport. The full analysis lives in [`spike/cross-node-transport/FINDINGS.md`](../spike/cross-node-transport/FINDINGS.md); a prior-art survey of four distributed graph and SQL systems is in [`SURVEY.md`](../spike/cross-node-transport/SURVEY.md).
+
+Categorisation, recorded so we don't re-discover the same gaps next time someone polishes the router:
+
+| # | Gap | Category | Follow-up | Rationale |
+|---|---|---|---|---|
+| 1 | `TCPServer.handleConn` waits on idle deadline at shutdown | must-fix-pre-prod | [#83](https://github.com/dreamware-nz/loveliness/issues/83) | A rolling restart of an N-node cluster takes ≥ N minutes of wallclock; mechanical fix (`SetReadDeadline(now)` when `stopCh` fires). |
+| 2 | TCPPool size vs scatter cap uncoordinated | should-fix-soon | [#88](https://github.com/dreamware-nz/loveliness/issues/88) | Not a correctness bug; a throughput bug under fan-out. Parked behind the v2-frame decision (#89) because streaming changes whether multiplexing or pool growth is the right answer. |
+| 3 | No deadline propagation to remote shard | must-fix-pre-prod | [#84](https://github.com/dreamware-nz/loveliness/issues/84) | A slow shard keeps running after the caller times out — wastes CPU and (for writes) can race late completions. Survey is unanimous on propagating deadlines on the wire. |
+| 4 | No whole-query retry budget | must-fix-pre-prod | [#85](https://github.com/dreamware-nz/loveliness/issues/85) | Per-shard retries × shard count is multiplicative; a 32-shard query with 2 retries each is 96 RPCs. Co-designed with #84 — retries after the deadline must not happen. |
+| 5 | No streaming / chunked responses | frame-v2 dependent | [#89](https://github.com/dreamware-nz/loveliness/issues/89) | Universal in prior art. Cannot be retrofitted onto the v1 single-envelope reader without flag day; bundled with item 6 in a v2-frame design issue. |
+| 6 | No cancel / partial-result signalling | frame-v2 dependent | [#89](https://github.com/dreamware-nz/loveliness/issues/89) | Same shape as item 5. Requires a server-side control opcode v1 never reserved. Ships with item 5 in the v2 frame. |
+| 7 | No per-RPC correlation ID | should-fix-soon | [#86](https://github.com/dreamware-nz/loveliness/issues/86) | The only v1-additive change in the list: a `request_id` field that old peers ignore. ~50 lines for a large debugging win. |
+| 8 | mTLS not exercised in tests | won't-fix-in-transport | [#90](https://github.com/dreamware-nz/loveliness/issues/90) | Real gap, but it's a CI/test/docs gap — not a transport design gap. Filed as a `testing`-labelled follow-up. |
+| 9 | No admission control / QoS | won't-fix-in-transport | [#91](https://github.com/dreamware-nz/loveliness/issues/91) | Belongs at the router/policy layer, not the transport. Filed as a roadmap issue for the router. |
+| 10 | Pool eviction is reactive only | should-fix-soon | [#87](https://github.com/dreamware-nz/loveliness/issues/87) | `MsgPing/MsgPong` exists in the wire format but no keepalive loop uses it. Single-file work; catches half-dead connections. |
+
+**Frame-format decision:** item 7 ships as a v1-additive field. Items 5 and 6 require a v2 frame and ship together; the v2 frame is its own design issue with rolling-upgrade negotiation as a section. The v1 frame is otherwise stable.
+
+When a must-fix lands, edit the relevant row to read `done in #N` rather than recreating decision records elsewhere.
