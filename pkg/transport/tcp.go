@@ -162,6 +162,18 @@ func (s *TCPServer) handleConn(conn net.Conn) {
 		}
 
 		_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		// Re-check stopCh AFTER setting the deadline. Without this, a
+		// concurrent Stop() that pokes the deadline to now between the
+		// previous select and this SetReadDeadline would have its poke
+		// overridden by the 60s future we just set, and ReadFrame would
+		// then block for 60s. Closing this race requires either Close()-on-Stop
+		// (loses graceful response semantics) or this re-check.
+		select {
+		case <-s.stopCh:
+			return
+		default:
+		}
+
 		msgType, payload, err := ReadFrame(reader)
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {

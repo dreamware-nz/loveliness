@@ -347,3 +347,46 @@ func TestTCPServerStop_AcceptRaceWithStop(t *testing.T) {
 		t.Errorf("Stop() under accept race took %v, expected < 2s", elapsed)
 	}
 }
+
+// TestTCPServerStop_StressTeardownRace stresses the preemption race between
+// the handler's stopCh-check and SetReadDeadline(60s). With GOMAXPROCS > 1
+// the scheduler can in principle preempt between those two lines, allowing
+// Stop()'s SetReadDeadline(now) to be overridden by the handler's 60s deadline.
+// The second stopCh-check after SetReadDeadline closes this race; without it,
+// over enough iterations this test would eventually see a multi-second Stop().
+//
+// We can't deterministically trigger the race, so we iterate. Each iteration
+// must individually complete its Stop() in < 1s.
+func TestTCPServerStop_StressTeardownRace(t *testing.T) {
+	if testing.Short() {
+		t.Skip("stress test skipped in -short mode")
+	}
+	const iterations = 20
+	for i := 0; i < iterations; i++ {
+		srv, addr := setupTCPServer(t)
+
+		// Two idle client conns increase the chance the scheduler is busy
+		// when Stop() fires, raising the odds of catching the race.
+		conns := make([]net.Conn, 4)
+		for j := range conns {
+			c, err := net.Dial("tcp", addr)
+			if err != nil {
+				t.Fatalf("iter %d: dial: %v", i, err)
+			}
+			conns[j] = c
+		}
+		time.Sleep(10 * time.Millisecond)
+
+		start := time.Now()
+		srv.Stop()
+		elapsed := time.Since(start)
+
+		for _, c := range conns {
+			c.Close()
+		}
+
+		if elapsed > time.Second {
+			t.Fatalf("iter %d: Stop() took %v, expected < 1s — race may not be plugged", i, elapsed)
+		}
+	}
+}
