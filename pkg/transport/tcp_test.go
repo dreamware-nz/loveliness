@@ -3,6 +3,7 @@ package transport
 import (
 	"bytes"
 	"fmt"
+	"net"
 	"sync"
 	"testing"
 	"time"
@@ -233,5 +234,116 @@ func TestPingPong(t *testing.T) {
 	}
 	if msgType != MsgPing {
 		t.Errorf("expected MsgPing, got %d", msgType)
+	}
+}
+
+// TestTCPServerStop_FastTeardown_IdleConn covers the #83 fix: an idle client
+// connection must not pin Stop() to the 60s read deadline. Before the fix this
+// test would block ~60s; after the fix it returns within 1s.
+func TestTCPServerStop_FastTeardown_IdleConn(t *testing.T) {
+	srv, addr := setupTCPServer(t)
+
+	// Open a client connection but send nothing, so the server's handleConn
+	// is parked in ReadFrame against the 60s idle deadline.
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	// Give the server a moment to register the conn.
+	time.Sleep(50 * time.Millisecond)
+
+	start := time.Now()
+	done := make(chan struct{})
+	go func() {
+		srv.Stop()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		elapsed := time.Since(start)
+		if elapsed > time.Second {
+			t.Errorf("Stop() took %v, expected < 1s (idle-conn teardown)", elapsed)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop() did not return within 5s — teardown is blocked")
+	}
+}
+
+// TestTCPServerStop_FastTeardown_PartialFrame covers the in-flight read case:
+// a client that sent a header but no body parks the server inside ReadFrame
+// reading the payload. Stop() must still wake it within 1s.
+func TestTCPServerStop_FastTeardown_PartialFrame(t *testing.T) {
+	srv, addr := setupTCPServer(t)
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	// Send a frame header claiming a 1024-byte payload but never deliver the
+	// body. ReadFrame on the server side will block reading the payload.
+	// Frame format: [length u32 BE][msgType u8][payload...].
+	header := []byte{0x00, 0x00, 0x04, 0x00, byte(MsgQuery)}
+	if _, err := conn.Write(header); err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	start := time.Now()
+	done := make(chan struct{})
+	go func() {
+		srv.Stop()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		elapsed := time.Since(start)
+		if elapsed > time.Second {
+			t.Errorf("Stop() took %v, expected < 1s (partial-frame teardown)", elapsed)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop() did not return within 5s — teardown is blocked on partial read")
+	}
+}
+
+// TestTCPServerStop_Idempotent verifies Stop() can be called multiple times
+// without panicking on close-of-closed-channel or double-deregister.
+func TestTCPServerStop_Idempotent(t *testing.T) {
+	srv, _ := setupTCPServer(t)
+	srv.Stop()
+	srv.Stop() // must not panic
+}
+
+// TestTCPServerStop_AcceptRaceWithStop covers the race where a connection is
+// accepted as Stop() is firing. The conn must either be tracked (and woken)
+// or rejected immediately, never leaked.
+func TestTCPServerStop_AcceptRaceWithStop(t *testing.T) {
+	srv, addr := setupTCPServer(t)
+
+	// Fire a burst of dials concurrent with Stop(). At least some should land
+	// before/during the Stop().
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c, err := net.Dial("tcp", addr)
+			if err == nil {
+				defer c.Close()
+			}
+		}()
+	}
+
+	start := time.Now()
+	srv.Stop()
+	wg.Wait()
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("Stop() under accept race took %v, expected < 2s", elapsed)
 	}
 }

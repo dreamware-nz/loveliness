@@ -24,6 +24,10 @@ type TCPServer struct {
 	tlsConfig *tls.Config
 	wg        sync.WaitGroup
 	stopCh    chan struct{}
+
+	mu      sync.Mutex
+	conns   map[net.Conn]struct{}
+	stopped bool
 }
 
 // NewTCPServer creates a TCP transport server.
@@ -31,6 +35,7 @@ func NewTCPServer(shards ShardQuerier) *TCPServer {
 	return &TCPServer{
 		shards: shards,
 		stopCh: make(chan struct{}),
+		conns:  make(map[net.Conn]struct{}),
 	}
 }
 
@@ -67,13 +72,53 @@ func (s *TCPServer) Addr() net.Addr {
 	return s.listener.Addr()
 }
 
-// Stop shuts down the TCP server gracefully.
+// Stop shuts down the TCP server gracefully. All live connections have their
+// read deadlines pulled to now so in-flight handlers wake immediately rather
+// than waiting up to 60s for the idle-read deadline to fire.
 func (s *TCPServer) Stop() {
+	s.mu.Lock()
+	if s.stopped {
+		s.mu.Unlock()
+		s.wg.Wait()
+		return
+	}
+	s.stopped = true
 	close(s.stopCh)
+	live := make([]net.Conn, 0, len(s.conns))
+	for c := range s.conns {
+		live = append(live, c)
+	}
+	s.mu.Unlock()
+
 	if s.listener != nil {
 		s.listener.Close()
 	}
+	now := time.Now()
+	for _, c := range live {
+		// Ignore errors: conn may already be closed, which is fine.
+		_ = c.SetReadDeadline(now)
+	}
 	s.wg.Wait()
+}
+
+// registerConn adds a connection to the live set. Returns false if the server
+// has already stopped, in which case the caller must close the conn and exit.
+func (s *TCPServer) registerConn(c net.Conn) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stopped {
+		return false
+	}
+	s.conns[c] = struct{}{}
+	return true
+}
+
+// deregisterConn removes a connection from the live set. Safe to call multiple
+// times.
+func (s *TCPServer) deregisterConn(c net.Conn) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.conns, c)
 }
 
 func (s *TCPServer) acceptLoop() {
@@ -89,6 +134,13 @@ func (s *TCPServer) acceptLoop() {
 				continue
 			}
 		}
+		// Register before spawning the handler so a concurrent Stop() that
+		// races accept either tracks this conn (and pokes it) or sees stopped
+		// and we close immediately.
+		if !s.registerConn(conn) {
+			conn.Close()
+			continue
+		}
 		s.wg.Add(1)
 		go s.handleConn(conn)
 	}
@@ -97,6 +149,7 @@ func (s *TCPServer) acceptLoop() {
 func (s *TCPServer) handleConn(conn net.Conn) {
 	defer s.wg.Done()
 	defer conn.Close()
+	defer s.deregisterConn(conn)
 
 	reader := bufio.NewReaderSize(conn, 64*1024)
 	writer := bufio.NewWriterSize(conn, 64*1024)
@@ -112,7 +165,10 @@ func (s *TCPServer) handleConn(conn net.Conn) {
 		msgType, payload, err := ReadFrame(reader)
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				continue // idle timeout, keep connection alive
+				// Idle timeout — keep the connection alive, unless Stop() has
+				// pulled the deadline to now, in which case the next loop
+				// iteration sees stopCh closed and exits.
+				continue
 			}
 			return // connection closed or broken
 		}
