@@ -16,16 +16,18 @@ import (
 // path. Hand-rolled to match pkg/api/query_metrics.go and avoid
 // dragging the prometheus client_golang dependency into this package.
 //
-// Three series are exposed:
+// Four series are exposed:
 //
 //	loveliness_router_remote_rtt_seconds{shard_id}     histogram
 //	loveliness_router_remote_errors_total{code}        counter
 //	loveliness_router_bloom_skip_total{shard_id}       counter
+//	loveliness_router_retries_total{outcome}           counter (#85)
 //
 // All are populated lazily — a series only materialises after the
 // first observation, matching client_golang's create-on-first-use
 // semantics. The shard_id label is bounded by shardCount; the code
-// label is bounded by the closed set in classifyRemoteError.
+// label is bounded by the closed set in classifyRemoteError; the
+// outcome label is bounded by the closed set in retryOutcome.
 
 // remoteRTTBuckets are the histogram bucket upper bounds in seconds
 // for per-shard RPC round-trip times. The lower end (250µs) covers
@@ -45,6 +47,7 @@ type RouterMetrics struct {
 	rtt        *remoteRTTHistogram
 	errors     *remoteErrorCounters
 	bloomSkips *bloomSkipCounters
+	retries    *retryOutcomeCounters
 }
 
 // NewRouterMetrics constructs an empty metrics container. Buckets and
@@ -54,6 +57,7 @@ func NewRouterMetrics() *RouterMetrics {
 		rtt:        newRemoteRTTHistogram(),
 		errors:     newRemoteErrorCounters(),
 		bloomSkips: newBloomSkipCounters(),
+		retries:    newRetryOutcomeCounters(),
 	}
 }
 
@@ -100,6 +104,7 @@ func (m *RouterMetrics) Snapshot() RouterMetricsSnapshot {
 		RTT:        m.rtt.Snapshot(),
 		Errors:     m.errors.Snapshot(),
 		BloomSkips: m.bloomSkips.Snapshot(),
+		Retries:    m.retries.Snapshot(),
 	}
 }
 
@@ -110,6 +115,25 @@ type RouterMetricsSnapshot struct {
 	RTT        []RemoteRTTSnapshot
 	Errors     []RemoteErrorSample
 	BloomSkips []BloomSkipSample
+	Retries    []RetryOutcomeSample
+}
+
+// IncRetryOutcome records a per-query retry outcome (#85). One bump
+// per scatter that retried (or attempted to). The closed set of
+// labels keeps cardinality bounded:
+//
+//	"success_after_retry" — caller saw success, at least one shard
+//	                        retried at least once.
+//	"budget_exhausted"    — retry budget hit zero before success.
+//	"deadline_exceeded"   — propagated deadline fired before success.
+//
+// Outcomes are mutually exclusive per query; the router picks the
+// first matching label.
+func (m *RouterMetrics) IncRetryOutcome(outcome string) {
+	if m == nil {
+		return
+	}
+	m.retries.Inc(outcome)
 }
 
 // remote RTT histogram

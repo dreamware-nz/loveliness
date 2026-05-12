@@ -95,6 +95,14 @@ func isRetryableRemoteError(err error) bool {
 // fn should not internally retry; this is the only retry layer for
 // remote calls. Layered retries silently amplify load on a flapping
 // peer.
+//
+// Whole-query retry budget (#85): if a *retryBudget is attached to
+// ctx (see withRetryBudget), each attempt — successful or failed —
+// consumes one slot. When the budget is exhausted, the function
+// returns a budgetExhaustedError instead of issuing another RPC.
+// Combined with #84's deadline propagation (ctx.Done short-circuits
+// the loop), this enforces the "no retries after deadline" co-design
+// rule from the gap survey.
 func retryRemoteCall(
 	ctx context.Context,
 	maxRetries int,
@@ -104,10 +112,21 @@ func retryRemoteCall(
 	if maxRetries < 0 {
 		maxRetries = 0
 	}
+	budget := retryBudgetFromCtx(ctx)
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
+		}
+		// Reserve a slot before issuing the RPC. If the whole-query
+		// budget is exhausted, surface the dedicated error so the
+		// caller can attribute the failure (and the metric label) to
+		// budget rather than deadline or per-shard error.
+		if !budget.reserve() {
+			if lastErr != nil {
+				return nil, &budgetExhaustedError{attempts: budget.attemptCount()}
+			}
+			return nil, &budgetExhaustedError{attempts: budget.attemptCount()}
 		}
 		resp, err := fn()
 		if err == nil {
