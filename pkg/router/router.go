@@ -102,6 +102,21 @@ type Router struct {
 	// short to race against the scatter timeout.
 	remoteRetryBackoff time.Duration
 
+	// maxAttemptsPerQuery caps the total number of remote RPCs
+	// issued for one scatter query (success + failure across all
+	// shards). Bounds amplification on a flapping peer per #85;
+	// applied via a *retryBudget attached to the scatter ctx. 0 =
+	// no cap (legacy behaviour). Default = 8 once a remote
+	// transport is wired; SetRetryBudget is the knob.
+	maxAttemptsPerQuery int
+
+	// maxRetryWallclock is an optional second cap on total scatter
+	// wallclock spent in retries; 0 = use only the inherited ctx
+	// deadline. The acceptance for #85 lists this as informational;
+	// the ctx deadline (set by scatterGather from r.timeout) is the
+	// normative bound.
+	maxRetryWallclock time.Duration
+
 	// metrics owns the per-router observability primitives — remote
 	// RTT histogram, remote error counter, bloom-skip counter. Every
 	// remote RPC site reports through this. Eagerly initialised in
@@ -279,6 +294,26 @@ func (r *Router) SetRemoteTransport(nodeID string, remote RemoteQuerier, placeme
 	if r.remoteRetryBackoff == 0 {
 		r.remoteRetryBackoff = defaultRemoteRetryBackoff
 	}
+	if r.maxAttemptsPerQuery == 0 {
+		// Default whole-query budget per #85: max(8, 2*shardCount).
+		// The 2× factor matches the scatter-concurrency floor so
+		// that even at full fan-out the budget allows one retry per
+		// shard on average; the 8 floor protects small clusters.
+		r.maxAttemptsPerQuery = defaultRetryBudget(r.shardCount)
+	}
+}
+
+// defaultRetryBudget returns max(8, 2*shardCount). Mirrors the
+// shape of defaultScatterConcurrency so a flapping peer doesn't
+// blow through the budget faster than the scatter would dispatch
+// requests anyway.
+func defaultRetryBudget(shardCount int) int {
+	const floor = 8
+	v := 2 * shardCount
+	if v < floor {
+		v = floor
+	}
+	return v
 }
 
 // SetRemoteRetries sets the maximum number of additional attempts
@@ -296,6 +331,25 @@ func (r *Router) SetRemoteRetries(n int) {
 // production should leave it at the default 25ms.
 func (r *Router) SetRemoteRetryBackoff(d time.Duration) {
 	r.remoteRetryBackoff = d
+}
+
+// SetRetryBudget configures the whole-query retry budget (#85).
+// maxAttempts caps the total per-query RPC count across all shards;
+// 0 disables the cap (legacy unbounded behaviour). maxWallclock is
+// the optional secondary cap; 0 means rely on the ctx deadline only.
+//
+// The intended production value is max(8, 2 * shardCount) for
+// maxAttempts and 0 for maxWallclock — let the ctx deadline (driven
+// by Router.timeout) own the wallclock cap.
+func (r *Router) SetRetryBudget(maxAttempts int, maxWallclock time.Duration) {
+	if maxAttempts < 0 {
+		maxAttempts = 0
+	}
+	if maxWallclock < 0 {
+		maxWallclock = 0
+	}
+	r.maxAttemptsPerQuery = maxAttempts
+	r.maxRetryWallclock = maxWallclock
 }
 
 // SetScatterConcurrency sets the upper bound on parallel per-shard
@@ -660,6 +714,14 @@ func (r *Router) scatterGather(ctx context.Context, parsed *ParsedQuery) (*Resul
 	scatterCtx, scatterCancel := context.WithTimeout(ctx, r.timeout)
 	defer scatterCancel()
 
+	// Whole-query retry budget (#85): one budget per scatter,
+	// attached to the ctx so every per-shard retryRemoteCall consults
+	// the same accounting. Co-designed with #84 — the ctx deadline
+	// is the normative wallclock cap; maxAttemptsPerQuery caps the
+	// total RPC count.
+	budget := newRetryBudget(r.maxAttemptsPerQuery, r.maxRetryWallclock)
+	scatterCtx = withRetryBudget(scatterCtx, budget)
+
 	// Phase A: Parse query modifiers for aggregate pushdown.
 	mods := parseQueryModifiers(parsed.Raw)
 	shardQuery := parsed.Raw
@@ -710,10 +772,12 @@ func (r *Router) scatterGather(ctx context.Context, parsed *ParsedQuery) (*Resul
 		case <-ctx.Done():
 			merged.Partial = true
 			merged.Errors = append(errors, ShardError{ShardID: -1, Error: "context cancelled"})
+			r.metrics.IncRetryOutcome(RetryOutcomeDeadlineExceeded)
 			return merged, nil
 		case <-timer.C:
 			merged.Partial = true
 			merged.Errors = append(errors, ShardError{ShardID: -1, Error: "scatter-gather timed out"})
+			r.metrics.IncRetryOutcome(RetryOutcomeDeadlineExceeded)
 			return merged, nil
 		case res, ok := <-results:
 			if !ok {
@@ -739,6 +803,16 @@ done:
 		merged.Partial = true
 		merged.Errors = errors
 	}
+
+	// Per-query retry outcome (#85): one of three labels per scatter
+	// that did any retrying. Order matters — budget exhaustion is
+	// more specific than "shard failed for some other reason", and
+	// success-after-retry is what callers care about for noisy peers.
+	outcome := classifyRetryOutcome(errors, budget.attemptCount(), int64(r.shardCount))
+	if outcome != "" {
+		r.metrics.IncRetryOutcome(outcome)
+	}
+
 	// Deduplicate rows: remove reference nodes (PK-only stubs) when the
 	// real node with full properties also appears in the results.
 	merged.Rows = deduplicateRows(merged.Rows, merged.Columns)

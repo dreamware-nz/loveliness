@@ -126,12 +126,13 @@ func writeMetrics(w io.Writer, s *Server) {
 	writeWALMetrics(w, s.dr.WAL, shardIDs, s.dr.ReplicaState, pairs)
 }
 
-// writeRouterMetrics emits the three series owned by the router's
+// writeRouterMetrics emits the series owned by the router's
 // observability primitives:
 //
 //	loveliness_router_remote_rtt_seconds{shard_id}    histogram
 //	loveliness_router_remote_errors_total{code}       counter
 //	loveliness_router_bloom_skip_total{shard_id}      counter
+//	loveliness_router_retries_total{outcome}          counter (#85)
 //
 // Each section guards on a non-empty snapshot so series only appear
 // once they've been observed at least once — matching the lazy-
@@ -167,6 +168,14 @@ func writeRouterMetrics(w io.Writer, snap router.RouterMetricsSnapshot) {
 		for _, s := range snap.BloomSkips {
 			fprintf(w, "loveliness_router_bloom_skip_total{shard_id=\"%d\"} %d\n",
 				s.ShardID, s.Count)
+		}
+	}
+
+	if len(snap.Retries) > 0 {
+		emitHelp(w, "loveliness_router_retries_total",
+			"Per-query scatter retry outcomes: success_after_retry, budget_exhausted, or deadline_exceeded. One bump per query that retried (or attempted to).", "counter")
+		for _, s := range snap.Retries {
+			fprintf(w, "loveliness_router_retries_total{outcome=%q} %d\n", s.Outcome, s.Count)
 		}
 	}
 }
