@@ -122,6 +122,29 @@ type RemoteQuerier interface {
 	QueryRemoteShard(nodeID string, shardID int, cypher string) (*shard.QueryResponse, error)
 }
 
+// CtxRemoteQuerier is the context-aware extension of RemoteQuerier
+// added for #84. Implementations that satisfy this interface receive
+// the caller's context (with its deadline) so the deadline can be
+// encoded into the wire frame and honored by the remote shard. The
+// router prefers this variant via a type assertion and falls back to
+// the non-ctx method for any RemoteQuerier that doesn't implement it
+// — which keeps test mocks and other older implementations working
+// without modification.
+type CtxRemoteQuerier interface {
+	RemoteQuerier
+	QueryRemoteShardCtx(ctx context.Context, nodeID string, shardID int, cypher string) (*shard.QueryResponse, error)
+}
+
+// callRemote dispatches to the context-aware variant when available,
+// falling back to the legacy method. Centralises the type-assertion
+// so every router call site routes through one place.
+func callRemote(ctx context.Context, rq RemoteQuerier, nodeID string, shardID int, cypher string) (*shard.QueryResponse, error) {
+	if ctxQ, ok := rq.(CtxRemoteQuerier); ok {
+		return ctxQ.QueryRemoteShardCtx(ctx, nodeID, shardID, cypher)
+	}
+	return rq.QueryRemoteShard(nodeID, shardID, cypher)
+}
+
 // PlacementResolver maps shard IDs to the node that owns them.
 type PlacementResolver interface {
 	PrimaryForShard(shardID int) string
@@ -305,7 +328,13 @@ func defaultScatterConcurrency(shardCount int) int {
 // (handled by panic recovery in shard.Query). Remote shards run
 // through retryRemoteCall, which retries transient transport
 // faults up to r.remoteRetries times with jittered backoff.
-func (r *Router) queryShardRaw(shardID int, cypher string) (*shard.QueryResponse, error) {
+//
+// The context carries the caller's deadline; #84 (deadline
+// propagation) requires it to reach the remote shard so the
+// remote can short-circuit work the caller has already given up on.
+// retryRemoteCall consults ctx.Done before each retry, which also
+// satisfies #85's "no retries after the deadline" co-design rule.
+func (r *Router) queryShardRaw(ctx context.Context, shardID int, cypher string) (*shard.QueryResponse, error) {
 	// Fast path: local shard.
 	if shardID >= 0 && shardID < len(r.shards) && r.shards[shardID] != nil {
 		return r.shards[shardID].Query(cypher)
@@ -324,12 +353,12 @@ func (r *Router) queryShardRaw(shardID int, cypher string) (*shard.QueryResponse
 	// flapping peer's failed retries are visible in /metrics, not
 	// hidden by the eventual success of the outer call.
 	return retryRemoteCall(
-		context.Background(),
+		ctx,
 		r.remoteRetries,
 		r.remoteRetryBackoff,
 		func() (*shard.QueryResponse, error) {
 			start := time.Now()
-			resp, err := r.remote.QueryRemoteShard(nodeID, shardID, cypher)
+			resp, err := callRemote(ctx, r.remote, nodeID, shardID, cypher)
 			r.metrics.observeRemote(shardID, time.Since(start), err)
 			return resp, err
 		},
@@ -583,8 +612,14 @@ func (r *Router) queryShard(ctx context.Context, shardID int, cypher string) (*R
 			if nodeID == "" {
 				err = fmt.Errorf("shard %d has no assigned primary", shardID)
 			} else {
+				// Derive a per-shard deadline from the router timeout
+				// so the deadline rides the wire (#84). Reuses the
+				// caller's ctx as the parent so any caller-supplied
+				// deadline still wins when tighter.
+				rctx, rcancel := context.WithTimeout(ctx, r.timeout)
 				start := time.Now()
-				resp, err = r.remote.QueryRemoteShard(nodeID, shardID, cypher)
+				resp, err = callRemote(rctx, r.remote, nodeID, shardID, cypher)
+				rcancel()
 				r.metrics.observeRemote(shardID, time.Since(start), err)
 			}
 		}
@@ -618,6 +653,13 @@ func (r *Router) scatterGather(ctx context.Context, parsed *ParsedQuery) (*Resul
 		err     error
 	}
 
+	// Per-scatter deadline derived from the router timeout. Threaded
+	// into queryShardRaw so each per-shard remote call carries the
+	// deadline on the wire (#84). If the inbound ctx already has a
+	// tighter deadline, WithTimeout preserves it.
+	scatterCtx, scatterCancel := context.WithTimeout(ctx, r.timeout)
+	defer scatterCancel()
+
 	// Phase A: Parse query modifiers for aggregate pushdown.
 	mods := parseQueryModifiers(parsed.Raw)
 	shardQuery := parsed.Raw
@@ -644,7 +686,7 @@ func (r *Router) scatterGather(ctx context.Context, parsed *ParsedQuery) (*Resul
 				sem <- struct{}{}
 				defer func() { <-sem }()
 			}
-			resp, err := r.queryShardRaw(shardID, shardQuery)
+			resp, err := r.queryShardRaw(scatterCtx, shardID, shardQuery)
 			results <- shardResult{shardID: shardID, resp: resp, err: err}
 		}(i)
 	}

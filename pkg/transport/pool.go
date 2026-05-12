@@ -68,7 +68,24 @@ func (p *TCPPool) RemovePeer(nodeID string) {
 }
 
 // QueryRemoteTCP sends a query to a remote shard over msgpack/TCP.
+//
+// Equivalent to QueryRemoteTCPCtx with context.Background(); kept for
+// legacy callers. New code should plumb a context all the way through
+// so the caller's deadline rides the wire to the remote shard (#84).
 func (p *TCPPool) QueryRemoteTCP(nodeID string, shardID int, cypher string) (*QueryResponse, error) {
+	return p.QueryRemoteTCPCtx(context.Background(), nodeID, shardID, cypher)
+}
+
+// QueryRemoteTCPCtx is the context-aware variant. The context's
+// deadline (when set) is encoded into the wire QueryRequest as
+// DeadlineNanos so the remote server can honor the same wallclock,
+// and the per-RPC read/write deadlines are clamped to the context's
+// deadline when it's tighter than p.timeout.
+//
+// Co-designed with #85: the per-RPC retry layer must consult the
+// same deadline before scheduling another attempt; this method only
+// owns the single-attempt path.
+func (p *TCPPool) QueryRemoteTCPCtx(ctx context.Context, nodeID string, shardID int, cypher string) (*QueryResponse, error) {
 	ce, err := p.getConn(nodeID)
 	if err != nil {
 		return nil, err
@@ -78,9 +95,18 @@ func (p *TCPPool) QueryRemoteTCP(nodeID string, shardID int, cypher string) (*Qu
 	defer ce.mu.Unlock()
 
 	req := QueryRequest{ShardID: shardID, Cypher: cypher}
+	if dl, ok := ctx.Deadline(); ok {
+		req.DeadlineNanos = uint64(dl.UnixNano())
+	}
+
+	// Per-RPC wire deadline: the tighter of pool timeout and ctx deadline.
+	wireDeadline := time.Now().Add(p.timeout)
+	if dl, ok := ctx.Deadline(); ok && dl.Before(wireDeadline) {
+		wireDeadline = dl
+	}
 
 	// Write request.
-	ce.conn.SetWriteDeadline(time.Now().Add(p.timeout))
+	ce.conn.SetWriteDeadline(wireDeadline)
 	if err := WriteFrame(ce.writer, MsgQuery, req); err != nil {
 		p.evict(nodeID, ce)
 		return nil, fmt.Errorf("write to %s: %w", nodeID, err)
@@ -91,7 +117,7 @@ func (p *TCPPool) QueryRemoteTCP(nodeID string, shardID int, cypher string) (*Qu
 	}
 
 	// Read response.
-	ce.conn.SetReadDeadline(time.Now().Add(p.timeout))
+	ce.conn.SetReadDeadline(wireDeadline)
 	msgType, payload, err := ReadFrame(ce.reader)
 	if err != nil {
 		p.evict(nodeID, ce)

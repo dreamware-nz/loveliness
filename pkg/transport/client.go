@@ -2,6 +2,7 @@ package transport
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -12,9 +13,19 @@ import (
 )
 
 // QueryRequest is the payload for internal shard queries between nodes.
+//
+// DeadlineNanos carries the caller's absolute deadline as a Unix
+// nanosecond timestamp. Zero means "no deadline" — that's the legacy
+// behaviour and what an old (pre-#84) client emits. New servers honor
+// the field when non-zero (see TCPServer.handleConn); old servers
+// simply ignore the unknown field thanks to msgpack tolerance, so the
+// addition is v1-additive and does not require a frame version bump.
+// Co-designed with #85 (whole-query retry budget): retries scheduled
+// after the propagated deadline must not be issued.
 type QueryRequest struct {
-	ShardID int    `json:"shard_id" msgpack:"shard_id"`
-	Cypher  string `json:"cypher" msgpack:"cypher"`
+	ShardID        int    `json:"shard_id" msgpack:"shard_id"`
+	Cypher         string `json:"cypher" msgpack:"cypher"`
+	DeadlineNanos  uint64 `json:"deadline_nanos,omitempty" msgpack:"deadline_nanos,omitempty"`
 }
 
 // QueryResponse is the result of an internal shard query.
@@ -87,14 +98,30 @@ func (c *Client) RemovePeer(nodeID string) {
 
 // QueryRemote sends a Cypher query to a specific shard on a remote node.
 // Prefers TCP+msgpack when available, falls back to HTTP+JSON.
+//
+// Equivalent to QueryRemoteCtx with context.Background() — i.e. no
+// deadline is propagated to the remote shard. Kept for callers that
+// have no context (e.g. background replication fanout); prefer the
+// Ctx variant from any path that already carries a context.
 func (c *Client) QueryRemote(nodeID string, shardID int, cypher string) (*QueryResponse, error) {
+	return c.QueryRemoteCtx(context.Background(), nodeID, shardID, cypher)
+}
+
+// QueryRemoteCtx is the context-aware variant of QueryRemote. The
+// context's deadline (if any) is encoded into the wire request as
+// DeadlineNanos so the remote server can honor the same wallclock —
+// this is what makes #84's deadline propagation actually work.
+// Cancellation of ctx aborts the local wait but does not (yet) tell
+// the remote shard to stop; the remote side's deadline-honoring path
+// in TCPServer.handleConn is what bounds the remote's blast radius.
+func (c *Client) QueryRemoteCtx(ctx context.Context, nodeID string, shardID int, cypher string) (*QueryResponse, error) {
 	// Try TCP first.
 	c.tcpPool.mu.RLock()
 	_, hasTCP := c.tcpPool.peers[nodeID]
 	c.tcpPool.mu.RUnlock()
 
 	if hasTCP {
-		return c.tcpPool.QueryRemoteTCP(nodeID, shardID, cypher)
+		return c.tcpPool.QueryRemoteTCPCtx(ctx, nodeID, shardID, cypher)
 	}
 
 	// Fall back to HTTP+JSON.
