@@ -198,6 +198,11 @@ func (s *TCPServer) handleConn(conn net.Conn) {
 				_ = writer.Flush()
 				continue
 			}
+			// Per-RPC correlation log (#86). Echoed on the response
+			// path so the client can correlate the two sides.
+			slog.Debug("tcp rpc received",
+				"shard", req.ShardID, "request_id", req.RequestID,
+				"deadline_nanos", req.DeadlineNanos)
 			s.handleQuery(writer, &req)
 			_ = writer.Flush()
 
@@ -210,10 +215,25 @@ func (s *TCPServer) handleConn(conn net.Conn) {
 }
 
 func (s *TCPServer) handleQuery(w *bufio.Writer, req *QueryRequest) {
+	// writeErr / writeOK stamp the per-RPC correlation ID (#86) onto
+	// every response so the client can pivot logs ↔ metrics ↔ frames.
+	writeErr := func(msg string) {
+		_ = WriteFrame(w, MsgError, QueryResponse{Error: msg, RequestID: req.RequestID})
+	}
+	writeOK := func(r *shard.QueryResponse) {
+		resp := QueryResponse{
+			Columns:   r.Columns,
+			Rows:      r.Rows,
+			RequestID: req.RequestID,
+		}
+		resp.Stats.CompileTimeMs = r.Stats.CompileTimeMs
+		resp.Stats.ExecTimeMs = r.Stats.ExecTimeMs
+		_ = WriteFrame(w, MsgResult, resp)
+	}
+
 	sh := s.shards.GetShard(req.ShardID)
 	if sh == nil {
-		resp := QueryResponse{Error: fmt.Sprintf("shard %d not hosted on this node", req.ShardID)}
-		_ = WriteFrame(w, MsgError, resp)
+		writeErr(fmt.Sprintf("shard %d not hosted on this node", req.ShardID))
 		return
 	}
 
@@ -221,24 +241,23 @@ func (s *TCPServer) handleQuery(w *bufio.Writer, req *QueryRequest) {
 	// DeadlineNanos on the wire, honor it. Three cases:
 	//
 	//   1. Deadline already past on arrival: short-circuit with
-	//      DEADLINE_EXCEEDED and do NOT invoke shard.Query \u2014 the
+	//      DEADLINE_EXCEEDED and do NOT invoke shard.Query — the
 	//      caller has already given up, doing the work is pure waste.
 	//   2. Deadline in the future: run shard.Query in a goroutine and
 	//      race the result against the deadline. If the deadline fires
 	//      first, return DEADLINE_EXCEEDED to the caller. The in-flight
 	//      shard goroutine continues to natural completion because
 	//      shard.Query (and the LadybugDB CGo layer below it) does not
-	//      yet honor context cancellation \u2014 see #84's "Failure modes".
+	//      yet honor context cancellation — see #84's "Failure modes".
 	//      The blast-radius benefit is still real: the caller no longer
 	//      waits past its deadline, and the wire no longer holds the
 	//      connection open past the deadline either.
-	//   3. DeadlineNanos == 0: legacy / pre-#84 client \u2014 fall through
+	//   3. DeadlineNanos == 0: legacy / pre-#84 client — fall through
 	//      to the unbounded path (current behaviour).
 	if req.DeadlineNanos != 0 {
 		dl := time.Unix(0, int64(req.DeadlineNanos))
 		if now := time.Now(); !dl.After(now) {
-			resp := QueryResponse{Error: "deadline exceeded before shard dispatch"}
-			_ = WriteFrame(w, MsgError, resp)
+			writeErr("deadline exceeded before shard dispatch")
 			return
 		}
 		type qres struct {
@@ -253,15 +272,13 @@ func (s *TCPServer) handleQuery(w *bufio.Writer, req *QueryRequest) {
 		select {
 		case res := <-ch:
 			if res.err != nil {
-				resp := QueryResponse{Error: res.err.Error()}
-				_ = WriteFrame(w, MsgError, resp)
+				writeErr(res.err.Error())
 				return
 			}
-			s.writeResult(w, res.r)
+			writeOK(res.r)
 			return
 		case <-time.After(time.Until(dl)):
-			resp := QueryResponse{Error: "deadline exceeded during shard execution"}
-			_ = WriteFrame(w, MsgError, resp)
+			writeErr("deadline exceeded during shard execution")
 			return
 		}
 	}
@@ -269,19 +286,8 @@ func (s *TCPServer) handleQuery(w *bufio.Writer, req *QueryRequest) {
 	// Legacy unbounded path (DeadlineNanos == 0).
 	result, err := sh.Query(req.Cypher)
 	if err != nil {
-		resp := QueryResponse{Error: err.Error()}
-		_ = WriteFrame(w, MsgError, resp)
+		writeErr(err.Error())
 		return
 	}
-	s.writeResult(w, result)
-}
-
-func (s *TCPServer) writeResult(w *bufio.Writer, result *shard.QueryResponse) {
-	resp := QueryResponse{
-		Columns: result.Columns,
-		Rows:    result.Rows,
-	}
-	resp.Stats.CompileTimeMs = result.Stats.CompileTimeMs
-	resp.Stats.ExecTimeMs = result.Stats.ExecTimeMs
-	_ = WriteFrame(w, MsgResult, resp)
+	writeOK(result)
 }
