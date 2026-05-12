@@ -5,8 +5,10 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"log/slog"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -26,6 +28,14 @@ type TCPPool struct {
 	poolSize  int
 	timeout   time.Duration
 	tlsConfig *tls.Config
+
+	// requestSeq is the monotonic source for per-RPC correlation IDs
+	// (#86). One counter per pool is fine — IDs only need to be
+	// unique within a single client process so log correlation
+	// works; cross-process uniqueness is not a goal (the (node, id)
+	// pair is implicitly unique because each peer has its own pool).
+	// Atomic 64-bit counter wraps at 2^64; effectively infinite.
+	requestSeq atomic.Uint64
 }
 
 // NewTCPPool creates a connection pool.
@@ -98,6 +108,13 @@ func (p *TCPPool) QueryRemoteTCPCtx(ctx context.Context, nodeID string, shardID 
 	if dl, ok := ctx.Deadline(); ok {
 		req.DeadlineNanos = uint64(dl.UnixNano())
 	}
+	// Per-RPC correlation ID (#86): zero-on-old-clients, monotonic
+	// thereafter. Logged on both sides so a partial-failed scatter
+	// can be pivoted from a metric to the specific TCP frames.
+	req.RequestID = p.requestSeq.Add(1)
+	slog.Debug("tcp rpc dispatched",
+		"node", nodeID, "shard", shardID, "request_id", req.RequestID,
+		"deadline_nanos", req.DeadlineNanos)
 
 	// Per-RPC wire deadline: the tighter of pool timeout and ctx deadline.
 	wireDeadline := time.Now().Add(p.timeout)
@@ -130,8 +147,15 @@ func (p *TCPPool) QueryRemoteTCPCtx(ctx context.Context, nodeID string, shardID 
 	}
 
 	if msgType == MsgError || resp.Error != "" {
-		return nil, fmt.Errorf("remote shard error on %s: %s", nodeID, resp.Error)
+		slog.Debug("tcp rpc error",
+			"node", nodeID, "shard", shardID, "request_id", req.RequestID,
+			"echoed_id", resp.RequestID, "err", resp.Error)
+		return nil, fmt.Errorf("remote shard error on %s [request_id=%d]: %s", nodeID, req.RequestID, resp.Error)
 	}
+
+	slog.Debug("tcp rpc completed",
+		"node", nodeID, "shard", shardID, "request_id", req.RequestID,
+		"echoed_id", resp.RequestID, "rows", len(resp.Rows))
 
 	return &resp, nil
 }

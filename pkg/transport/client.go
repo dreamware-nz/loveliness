@@ -22,13 +22,25 @@ import (
 // addition is v1-additive and does not require a frame version bump.
 // Co-designed with #85 (whole-query retry budget): retries scheduled
 // after the propagated deadline must not be issued.
+//
+// RequestID is the per-RPC correlation ID added in #86 (also
+// v1-additive). The client allocates a fresh ID per call from an
+// atomic counter; the server logs it on entry and echoes it back on
+// the response so any partial-failed scatter can be pivoted from a
+// metric to the specific TCP frames involved. Zero means "unset",
+// which is what old clients emit; new peers always populate non-zero.
 type QueryRequest struct {
-	ShardID        int    `json:"shard_id" msgpack:"shard_id"`
-	Cypher         string `json:"cypher" msgpack:"cypher"`
-	DeadlineNanos  uint64 `json:"deadline_nanos,omitempty" msgpack:"deadline_nanos,omitempty"`
+	ShardID       int    `json:"shard_id" msgpack:"shard_id"`
+	Cypher        string `json:"cypher" msgpack:"cypher"`
+	DeadlineNanos uint64 `json:"deadline_nanos,omitempty" msgpack:"deadline_nanos,omitempty"`
+	RequestID     uint64 `json:"request_id,omitempty" msgpack:"request_id,omitempty"`
 }
 
 // QueryResponse is the result of an internal shard query.
+//
+// RequestID echoes the value from the originating QueryRequest so the
+// client can correlate the response with its in-flight call site and
+// any per-call logging. Zero on responses from old (pre-#86) servers.
 type QueryResponse struct {
 	Columns []string         `json:"columns" msgpack:"columns"`
 	Rows    []map[string]any `json:"rows" msgpack:"rows"`
@@ -36,7 +48,8 @@ type QueryResponse struct {
 		CompileTimeMs float64 `json:"compile_time_ms,omitempty" msgpack:"compile_time_ms,omitempty"`
 		ExecTimeMs    float64 `json:"exec_time_ms,omitempty" msgpack:"exec_time_ms,omitempty"`
 	} `json:"stats,omitempty" msgpack:"stats,omitempty"`
-	Error string `json:"error,omitempty" msgpack:"error,omitempty"`
+	Error     string `json:"error,omitempty" msgpack:"error,omitempty"`
+	RequestID uint64 `json:"request_id,omitempty" msgpack:"request_id,omitempty"`
 }
 
 // Client manages connections to peer nodes for internal query forwarding.
