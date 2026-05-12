@@ -156,9 +156,60 @@ Set `LOVELINESS_TLS_CERT` + `LOVELINESS_TLS_KEY` and `LOVELINESS_TLS_MODE=requir
 
 **Client-facing (HTTP + Bolt):** standard TLS — server proves identity, clients verify.
 
-**Inter-node (TCP transport):** mTLS when `LOVELINESS_TLS_CA` is set. Both sides present certs signed by the cluster CA. Connections from unknown certs are rejected.
+**Inter-node (TCP transport):** mTLS when `LOVELINESS_TLS_CA` is set. Both sides present certs signed by the cluster CA. Connections from unknown certs are rejected at the TLS handshake — this is exercised end-to-end by `TestMTLS_RejectsForeignCA` in `pkg/transport/mtls_test.go` so a regression that silently accepted foreign-CA certs would fail CI.
 
 See [issue #2](https://github.com/dreamware-nz/loveliness/issues/2) for the full trust boundary design.
+
+### Generating certs for dev
+
+The cluster CA signs every node's leaf cert. A minimal dev setup uses one self-signed CA and one leaf per node. Helpers using `openssl`:
+
+```
+# 1. Cluster CA (one per cluster).
+openssl ecparam -genkey -name prime256v1 -noout -out ca.key
+openssl req -new -x509 -days 3650 -key ca.key -out ca.crt \
+    -subj "/CN=loveliness-cluster-ca"
+
+# 2. Per-node leaf (one per node; repeat for each node).
+openssl ecparam -genkey -name prime256v1 -noout -out node-1.key
+openssl req -new -key node-1.key -out node-1.csr \
+    -subj "/CN=node-1" \
+    -addext "subjectAltName=IP:127.0.0.1,DNS:localhost,DNS:node-1.cluster.local"
+openssl x509 -req -in node-1.csr -CA ca.crt -CAkey ca.key \
+    -CAcreateserial -out node-1.crt -days 365 \
+    -extfile <(printf "subjectAltName=IP:127.0.0.1,DNS:localhost,DNS:node-1.cluster.local")
+```
+
+Boot the node with:
+
+```
+LOVELINESS_TLS_CERT=./node-1.crt
+LOVELINESS_TLS_KEY=./node-1.key
+LOVELINESS_TLS_CA=./ca.crt
+LOVELINESS_TLS_MODE=required
+```
+
+### Rotating a node cert
+
+Cert rotation in the current release **requires a restart of the affected node** — `tls.Config` is captured on startup and there is no SIGHUP-style reload hook. The rolling-restart sequence is:
+
+1. Generate the new leaf cert + key (signed by the same cluster CA, same CN/SANs as the old one).
+2. Place them in the same paths as the old cert (`LOVELINESS_TLS_CERT`, `LOVELINESS_TLS_KEY`) — atomically replace (write to a temp file and rename).
+3. Drain the node (stop accepting new connections — `loveliness drain` if available, otherwise remove from the load balancer).
+4. Restart the node. Existing peer connections from other nodes drop and reconnect on the next RPC (or on the next keepalive eviction, per #87).
+5. Verify in `/health` that the node rejoins; smoke-check an inter-node query.
+
+Cluster CA rotation is a longer ceremony (you need both the old and new CA in the trust pool for the cross-over window). That's out of scope for this doc; file a separate issue if you need it.
+
+### Revoking a compromised cert
+
+The cluster currently has no CRL/OCSP wiring. If a node's leaf is compromised:
+
+1. Generate a new cluster CA. The old CA is now invalid for *all* nodes.
+2. Issue new leaves for every node from the new CA.
+3. Roll-restart every node onto the new CA per the rotation sequence above.
+
+A future enhancement may add CRL distribution; see `pkg/tlsutil` for where it would hook in. Production callers who need fast revocation today are best served by short-lived leaves (e.g. 24h validity) and a re-issue cadence.
 
 ## Choosing Shard Count
 
