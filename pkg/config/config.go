@@ -196,7 +196,13 @@ func FromEnv() Config {
 	if v := os.Getenv("LOVELINESS_BACKUP_DIR"); v != "" {
 		c.BackupDir = v
 	}
-	if v := os.Getenv("LOVELINESS_BOLT_ADDR"); v != "" {
+	// Bolt address has bespoke handling: an explicit empty value
+	// (LOVELINESS_BOLT_ADDR=) is the documented way to *disable* the
+	// Bolt listener — useful in tests that don't want to fight the
+	// fixed :7687 port. The other env vars treat unset and empty
+	// the same way, but Bolt's default of ":7687" makes that
+	// behaviour user-hostile here.
+	if v, ok := os.LookupEnv("LOVELINESS_BOLT_ADDR"); ok {
 		c.BoltAddr = v
 	}
 	if v := os.Getenv("LOVELINESS_AUTH_TOKEN"); v != "" {
