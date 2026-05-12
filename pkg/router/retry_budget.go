@@ -202,7 +202,13 @@ func classifyRetryOutcome(errs []ShardError, attempts, shardCount int64) string 
 		if strings.Contains(e.Error, "retry budget exhausted") {
 			return RetryOutcomeBudgetExhausted
 		}
+		// Accept both the British spelling the router writes for its
+		// synthetic scatter-side timeout *and* the American spelling
+		// Go's stdlib ctx.Err() emits — the latter is what surfaces
+		// when a per-shard retryRemoteCall returns ctx.Err() directly
+		// rather than the router's outer-select message.
 		if strings.Contains(e.Error, "context cancelled") ||
+			strings.Contains(e.Error, "context canceled") ||
 			strings.Contains(e.Error, "context deadline exceeded") ||
 			strings.Contains(e.Error, "scatter-gather timed out") {
 			return RetryOutcomeDeadlineExceeded

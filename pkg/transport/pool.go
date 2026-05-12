@@ -218,11 +218,11 @@ func (p *TCPPool) QueryRemoteTCPCtx(ctx context.Context, nodeID string, shardID 
 	ce.conn.SetWriteDeadline(wireDeadline)
 	if err := WriteFrame(ce.writer, MsgQuery, req); err != nil {
 		p.evict(nodeID, ce)
-		return nil, fmt.Errorf("write to %s: %w", nodeID, err)
+		return nil, fmt.Errorf("write to %s [request_id=%d]: %w", nodeID, req.RequestID, err)
 	}
 	if err := ce.writer.Flush(); err != nil {
 		p.evict(nodeID, ce)
-		return nil, fmt.Errorf("flush to %s: %w", nodeID, err)
+		return nil, fmt.Errorf("flush to %s [request_id=%d]: %w", nodeID, req.RequestID, err)
 	}
 
 	// Read response.
@@ -230,12 +230,12 @@ func (p *TCPPool) QueryRemoteTCPCtx(ctx context.Context, nodeID string, shardID 
 	msgType, payload, err := ReadFrame(ce.reader)
 	if err != nil {
 		p.evict(nodeID, ce)
-		return nil, fmt.Errorf("read from %s: %w", nodeID, err)
+		return nil, fmt.Errorf("read from %s [request_id=%d]: %w", nodeID, req.RequestID, err)
 	}
 
 	var resp QueryResponse
 	if err := Decode(payload, &resp); err != nil {
-		return nil, fmt.Errorf("decode from %s: %w", nodeID, err)
+		return nil, fmt.Errorf("decode from %s [request_id=%d]: %w", nodeID, req.RequestID, err)
 	}
 
 	if msgType == MsgError || resp.Error != "" {
