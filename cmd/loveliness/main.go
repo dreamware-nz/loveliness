@@ -362,6 +362,7 @@ func main() {
 	srv.SetAuth(tokenAuth)
 	srv.SetIngestQueue(ingestQueue)
 	srv.SetDatabaseRouter(dbRouter)
+	srv.SetTransportMetricsProvider(transportClientMetricsAdapter{c: transportClient})
 	httpServer := &http.Server{
 		Addr:         cfg.BindAddr,
 		Handler:      srv.Handler(),
@@ -694,3 +695,17 @@ func discoverPrimaryKey(s *shard.Shard, tableName string) string {
 	}
 	return ""
 }
+
+// transportClientMetricsAdapter bridges transport.Client.KeepaliveSnapshot
+// (which returns transport.KeepaliveSnapshot) to the api.KeepaliveSnapshot
+// shape the API package consumes. Kept tiny and inline so pkg/api stays
+// free of any transport-package import (#87).
+type transportClientMetricsAdapter struct {
+	c *transport.Client
+}
+
+func (a transportClientMetricsAdapter) KeepaliveSnapshot() api.KeepaliveSnapshot {
+	s := a.c.KeepaliveSnapshot()
+	return api.KeepaliveSnapshot{OK: s.OK, Miss: s.Miss, Error: s.Error}
+}
+
