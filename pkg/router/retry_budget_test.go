@@ -218,3 +218,38 @@ func TestRouter_ScatterRetryBudget_DeadlineBeatsBudget(t *testing.T) {
 type allToOnePlacement struct{ node string }
 
 func (p *allToOnePlacement) PrimaryForShard(_ int) string { return p.node }
+
+// TestClassifyRetryOutcome_AcceptsStdlibContextSpelling guards against
+// the British/American spelling mismatch between scatter-loop's
+// synthetic "context cancelled" message and Go's stdlib
+// context.Canceled.Error() "context canceled". A per-shard retry that
+// returns ctx.Err() bubbles up with the stdlib spelling; the
+// classifier must recognise it as a deadline outcome.
+func TestClassifyRetryOutcome_AcceptsStdlibContextSpelling(t *testing.T) {
+	cases := []struct {
+		name string
+		errs []ShardError
+		want string
+	}{
+		{"stdlib canceled", []ShardError{{Error: "context canceled"}}, RetryOutcomeDeadlineExceeded},
+		{"stdlib deadline", []ShardError{{Error: "context deadline exceeded"}}, RetryOutcomeDeadlineExceeded},
+		{"router cancelled (British)", []ShardError{{Error: "context cancelled"}}, RetryOutcomeDeadlineExceeded},
+		{"scatter timeout", []ShardError{{Error: "scatter-gather timed out"}}, RetryOutcomeDeadlineExceeded},
+		{"budget exhausted", []ShardError{{Error: "retry budget exhausted after 3 attempts"}}, RetryOutcomeBudgetExhausted},
+		{"no retry needed", nil, ""},
+		{"success after retry", nil, RetryOutcomeSuccessAfterRetry},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			attempts := int64(0)
+			shardCount := int64(4)
+			if tc.want == RetryOutcomeSuccessAfterRetry {
+				attempts = shardCount + 1
+			}
+			got := classifyRetryOutcome(tc.errs, attempts, shardCount)
+			if got != tc.want {
+				t.Errorf("classifyRetryOutcome = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

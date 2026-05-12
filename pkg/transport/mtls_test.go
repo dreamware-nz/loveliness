@@ -110,7 +110,7 @@ func writeMTLSPEM(t *testing.T, path, blockType string, data []byte) {
 // difference is the certs are generated in-process per test.
 func TestMTLS_HappyPath(t *testing.T) {
 	dir := t.TempDir()
-	caCertPath, caKeyPath, caCert, caKey := generateCA(t, dir, "cluster-ca")
+	caCertPath, _, caCert, caKey := generateCA(t, dir, "cluster-ca")
 	srvCertPath, srvKeyPath := generateLeaf(t, dir, "server", caCert, caKey)
 	cliCertPath, cliKeyPath := generateLeaf(t, dir, "client", caCert, caKey)
 
@@ -146,7 +146,6 @@ func TestMTLS_HappyPath(t *testing.T) {
 	pool.SetTLS(cliTLS)
 	pool.SetPeer("server", srv.Addr().String())
 
-	_ = caKeyPath // referenced only via the CA above
 	resp, err := pool.QueryRemoteTCP("server", 0, "MATCH (n) RETURN n")
 	if err != nil {
 		t.Fatalf("mTLS happy-path RPC failed: %v", err)
