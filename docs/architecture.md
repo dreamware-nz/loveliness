@@ -271,7 +271,7 @@ Categorisation, recorded so we don't re-discover the same gaps next time someone
 | 7 | No per-RPC correlation ID | should-fix-soon | in flight [#86](https://github.com/dreamware-nz/loveliness/issues/86) | The only v1-additive change in the list: a `request_id` field that old peers ignore. ~50 lines for a large debugging win. |
 | 8 | mTLS not exercised in tests | won't-fix-in-transport | [#90](https://github.com/dreamware-nz/loveliness/issues/90) | Real gap, but it's a CI/test/docs gap — not a transport design gap. Filed as a `testing`-labelled follow-up. |
 | 9 | No admission control / QoS | won't-fix-in-transport | [#91](https://github.com/dreamware-nz/loveliness/issues/91) | Belongs at the router/policy layer, not the transport. Filed as a roadmap issue for the router. |
-| 10 | Pool eviction is reactive only | should-fix-soon | [#87](https://github.com/dreamware-nz/loveliness/issues/87) | `MsgPing/MsgPong` exists in the wire format but no keepalive loop uses it. Single-file work; catches half-dead connections. |
+| 10 | Pool eviction is reactive only | should-fix-soon | in flight [#87](https://github.com/dreamware-nz/loveliness/issues/87) | `MsgPing/MsgPong` exists in the wire format but no keepalive loop uses it. Single-file work; catches half-dead connections. |
 
 **Frame-format decision:** item 7 ships as a v1-additive field. Items 5 and 6 require a v2 frame and ship together; the v2 frame is its own design issue with rolling-upgrade negotiation as a section. The v1 frame is otherwise stable.
 

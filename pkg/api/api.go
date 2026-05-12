@@ -74,6 +74,34 @@ type Server struct {
 	// against a Cypher Result when the client hits POST /db/{name}/query
 	// with an analytics[] selector. Plugins register at boot.
 	analytics *analytics.Registry
+
+	// transportMetrics is the optional source of cross-node
+	// transport observability — currently the keepalive counters
+	// from pkg/transport.TCPPool (#87). Wired via
+	// SetTransportMetricsProvider so the API package does not have
+	// to import pkg/transport directly.
+	transportMetrics TransportMetricsProvider
+}
+
+// TransportMetricsProvider is the interface the API server uses to
+// surface cross-node transport counters in /metrics. The transport
+// package's Client satisfies it; tests can pass any stub.
+type TransportMetricsProvider interface {
+	KeepaliveSnapshot() KeepaliveSnapshot
+}
+
+// KeepaliveSnapshot mirrors pkg/transport.KeepaliveSnapshot. Kept
+// here to keep pkg/api free of a transport import dependency cycle.
+type KeepaliveSnapshot struct {
+	OK    uint64
+	Miss  uint64
+	Error uint64
+}
+
+// SetTransportMetricsProvider wires the keepalive counter source for
+// /metrics. cmd/loveliness calls this with the transport.Client.
+func (s *Server) SetTransportMetricsProvider(p TransportMetricsProvider) {
+	s.transportMetrics = p
 }
 
 // NewServer creates a new API server.

@@ -101,6 +101,10 @@ func writeMetrics(w io.Writer, s *Server) {
 		writeRouterMetrics(w, s.router.Metrics().Snapshot())
 	}
 
+	if s.transportMetrics != nil {
+		writeTransportMetrics(w, s.transportMetrics.KeepaliveSnapshot())
+	}
+
 	if s.dr == nil || s.dr.WAL == nil {
 		return
 	}
@@ -178,6 +182,25 @@ func writeRouterMetrics(w io.Writer, snap router.RouterMetricsSnapshot) {
 			fprintf(w, "loveliness_router_retries_total{outcome=%q} %d\n", s.Outcome, s.Count)
 		}
 	}
+}
+
+// writeTransportMetrics emits the keepalive counters owned by the
+// TCP transport pool (#87):
+//
+//	loveliness_transport_keepalive_total{outcome="ok"}     counter
+//	loveliness_transport_keepalive_total{outcome="miss"}   counter
+//	loveliness_transport_keepalive_total{outcome="error"}  counter
+//
+// All three outcomes are always emitted (even at zero) so a scrape
+// at a fresh node still produces the series — the keepalive worker
+// is always running once a transport client exists, and a zero
+// reading is itself informative ("no half-dead conns this scrape").
+func writeTransportMetrics(w io.Writer, snap KeepaliveSnapshot) {
+	emitHelp(w, "loveliness_transport_keepalive_total",
+		"Cumulative proactive ping/pong outcomes on pooled TCP conns. 'ok' = pong received in time, 'miss' = pong timed out (conn evicted), 'error' = transport error during ping (conn evicted).", "counter")
+	fprintf(w, "loveliness_transport_keepalive_total{outcome=\"ok\"} %d\n", snap.OK)
+	fprintf(w, "loveliness_transport_keepalive_total{outcome=\"miss\"} %d\n", snap.Miss)
+	fprintf(w, "loveliness_transport_keepalive_total{outcome=\"error\"} %d\n", snap.Error)
 }
 
 // writeQueryHistogramMetrics emits loveliness_query_duration_seconds in

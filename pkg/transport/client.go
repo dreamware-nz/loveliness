@@ -95,6 +95,19 @@ func (c *Client) SetTLS(cfg *tls.Config) {
 	c.tcpPool.SetTLS(cfg)
 }
 
+// SetKeepalive configures the proactive ping/pong cadence on the
+// underlying TCP pool (#87). Pass interval <= 0 to keep the worker
+// dormant; the default interval set in NewTCPPool is 15s.
+func (c *Client) SetKeepalive(interval, pongWait time.Duration) {
+	c.tcpPool.SetKeepalive(interval, pongWait)
+}
+
+// KeepaliveSnapshot returns the closed-set counters that feed the
+// loveliness_transport_keepalive_total{outcome} metric.
+func (c *Client) KeepaliveSnapshot() KeepaliveSnapshot {
+	return c.tcpPool.KeepaliveSnapshot()
+}
+
 // SetPeerTCP registers a peer's TCP transport address for msgpack comms.
 func (c *Client) SetPeerTCP(nodeID, tcpAddr string) {
 	c.tcpPool.SetPeer(nodeID, tcpAddr)
