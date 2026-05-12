@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -16,16 +17,34 @@ import (
 // flakyRemote is a RemoteQuerier that fails the first n calls with a
 // supplied error, then succeeds on every subsequent call. Used to
 // exercise the retry loop without needing a real network failure.
+//
+// When failuresPerShard > 0, the shared `failures` counter is
+// ignored and instead each shard ID gets its own independent
+// failure budget of failuresPerShard attempts. This is what the
+// end-to-end test needs to avoid a goroutine-scheduling-dependent
+// distribution of the shared failure pool across shards (see
+// TestRouter_RemoteRetry_EndToEnd — without per-shard tracking,
+// one unlucky shard can absorb all failures and break the test).
 type flakyRemote struct {
-	failures int32 // remaining failures to inject (atomic)
-	err      error
-	calls    int32
-	resp     *shard.QueryResponse
+	failures         int32 // remaining failures to inject (atomic) — shared mode
+	failuresPerShard int32 // when >0, per-shard mode (ignores `failures`)
+	perShardCalls    sync.Map
+	err              error
+	calls            int32
+	resp             *shard.QueryResponse
 }
 
-func (f *flakyRemote) QueryRemoteShard(_ string, _ int, _ string) (*shard.QueryResponse, error) {
+func (f *flakyRemote) QueryRemoteShard(_ string, shardID int, _ string) (*shard.QueryResponse, error) {
 	atomic.AddInt32(&f.calls, 1)
-	if atomic.AddInt32(&f.failures, -1) >= 0 {
+	if f.failuresPerShard > 0 {
+		// Per-shard counter: load-or-init a *int32 for this shardID,
+		// then increment. Fail while the count is <= failuresPerShard.
+		v, _ := f.perShardCalls.LoadOrStore(shardID, new(int32))
+		count := atomic.AddInt32(v.(*int32), 1)
+		if count <= f.failuresPerShard {
+			return nil, f.err
+		}
+	} else if atomic.AddInt32(&f.failures, -1) >= 0 {
 		return nil, f.err
 	}
 	if f.resp == nil {
@@ -161,7 +180,7 @@ func TestRouter_RemoteRetry_EndToEnd(t *testing.T) {
 	const shardCount = 4
 	r := NewRouter(make([]*shard.Shard, shardCount), 2*time.Second)
 
-	fr := &flakyRemote{failures: int32(shardCount), err: io.ErrUnexpectedEOF}
+	fr := &flakyRemote{failuresPerShard: 1, err: io.ErrUnexpectedEOF}
 	r.SetRemoteTransport("local", fr, allRemotePlacement{})
 	r.SetRemoteRetryBackoff(time.Microsecond) // race-free fast retries
 
